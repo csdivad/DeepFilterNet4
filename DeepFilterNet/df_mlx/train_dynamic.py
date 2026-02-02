@@ -257,7 +257,10 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--config"], "dataset.config", getattr(args, "config", None)),
         (["--snr-range"], "dataset.snr_range", getattr(args, "snr_range", None)),
         (["--snr-range-extreme"], "dataset.snr_range_extreme", getattr(args, "snr_range_extreme", None)),
+        (["--snr-range-very-low"], "dataset.snr_range_very_low", getattr(args, "snr_range_very_low", None)),
         (["--p-extreme-snr"], "dataset.p_extreme_snr", getattr(args, "p_extreme_snr", None)),
+        (["--p-very-low-snr"], "dataset.p_very_low_snr", getattr(args, "p_very_low_snr", None)),
+        (["--p-interfer-speech"], "dataset.p_interfer_speech", getattr(args, "p_interfer_speech", None)),
         (["--speech-gain-range"], "dataset.speech_gain_range", getattr(args, "speech_gain_range", None)),
         (["--noise-gain-range"], "dataset.noise_gain_range", getattr(args, "noise_gain_range", None)),
         (["--p-reverb"], "augmentation.p_reverb", getattr(args, "p_reverb", None)),
@@ -2129,7 +2132,10 @@ def train(
     verbose: bool = False,
     snr_range: Tuple[float, float] | None = None,
     snr_range_extreme: Tuple[float, float] | None = None,
+    snr_range_very_low: Tuple[float, float] | None = None,
     p_extreme_snr: float | None = None,
+    p_very_low_snr: float | None = None,
+    p_interfer_speech: float | None = None,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
     dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome"] = "baseline",
@@ -2202,7 +2208,10 @@ def train(
         verbose: Enable detailed timing and diagnostic output
         snr_range: Optional override for base SNR range (dB)
         snr_range_extreme: Optional override for extreme SNR range (dB)
+        snr_range_very_low: Optional override for very-low SNR range (dB), for whisper/distant mic
         p_extreme_snr: Optional override for extreme SNR sampling probability
+        p_very_low_snr: Optional override for very-low SNR sampling probability
+        p_interfer_speech: Optional override for interfering speaker probability (simulates vocals/competing talker)
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
         dynamic_loss: Which dynamic loss to use ("baseline", "awesome", or "pipeline_awesome")
@@ -4596,9 +4605,26 @@ def main():
         help="Override extreme SNR range in dB (e.g., --snr-range-extreme -20 -5)",
     )
     parser.add_argument(
+        "--snr-range-very-low",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help="Override very-low SNR range in dB (e.g., --snr-range-very-low -30 -20)",
+    )
+    parser.add_argument(
         "--p-extreme-snr",
         type=float,
         help="Probability of sampling from extreme SNR range (0-1)",
+    )
+    parser.add_argument(
+        "--p-very-low-snr",
+        type=float,
+        help="Probability of sampling from very-low SNR range (0-1)",
+    )
+    parser.add_argument(
+        "--p-interfer-speech",
+        type=float,
+        help="Probability of adding interfering speaker (0-1, simulates vocals/competing talker)",
     )
     parser.add_argument(
         "--speech-gain-range",

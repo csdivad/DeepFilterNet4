@@ -111,7 +111,9 @@ class DatasetConfig:
     # Mixing parameters
     snr_range: Tuple[float, float] = (-5.0, 40.0)  # dB, matching Rust [-5, 0, 5, 10, 20, 40]
     snr_range_extreme: Tuple[float, float] = (-20.0, -5.0)  # dB, near-obscured speech
+    snr_range_very_low: Tuple[float, float] = (-30.0, -20.0)  # dB, severely obscured speech
     p_extreme_snr: float = 0.1  # Probability of sampling from snr_range_extreme
+    p_very_low_snr: float = 0.0  # Probability of sampling from snr_range_very_low
     gain_range: Tuple[float, float] = (-6.0, 6.0)  # dB (legacy; retained for compatibility)
     speech_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies absolute speech loudness
     noise_gain_range: Tuple[float, float] = (-12.0, 12.0)  # dB, varies relative noise contributions
@@ -121,6 +123,7 @@ class DatasetConfig:
     p_clipping: float = 0.0  # Probability of clipping distortion
     p_bandwidth_ext: float = 0.0  # Probability of bandwidth extension
     p_interfer_speech: float = 0.0  # Probability of interfering speaker
+    interfer_speech_snr_range: Tuple[float, float] = (-10.0, 10.0)  # dB, SNR of interferer vs target
 
     # Noise mixing
     n_noise_min: int = 2  # Minimum noises to combine
@@ -1103,10 +1106,16 @@ class DynamicDataset:
         if speech is None:
             return None
 
-        # Sample SNR and gain
-        if self.config.p_extreme_snr > 0 and self._rng.random() < self.config.p_extreme_snr:
+        # Sample SNR and gain with 3-tier SNR distribution
+        r = self._rng.random()
+        if self.config.p_very_low_snr > 0 and r < self.config.p_very_low_snr:
+            # Very low SNR: severely obscured speech (for whisper/distant mic training)
+            snr = self._rng.uniform(*self.config.snr_range_very_low)
+        elif self.config.p_extreme_snr > 0 and r < (self.config.p_very_low_snr + self.config.p_extreme_snr):
+            # Extreme SNR: near-obscured speech
             snr = self._rng.uniform(*self.config.snr_range_extreme)
         else:
+            # Base SNR: normal range
             snr = self._rng.uniform(*self.config.snr_range)
         gain = self._rng.uniform(*self.config.speech_gain_range)
 
@@ -1145,6 +1154,23 @@ class DynamicDataset:
                     sr=self.sample_rate,
                     prob=self.config.p_bandwidth_ext,
                 )
+
+            # Add interfering speaker (vocal music / competing talker simulation)
+            if self.config.p_interfer_speech > 0 and self._rng.random() < self.config.p_interfer_speech:
+                # Load a different speech file as interferer
+                interfer_idx = self._rng.randint(0, len(self._indices) - 1)
+                if interfer_idx != self._indices[idx]:
+                    interfer_speech = self._load_speech(interfer_idx)
+                    if interfer_speech is not None:
+                        # Mix interferer into noise at a random SNR relative to target
+                        interfer_snr = self._rng.uniform(*self.config.interfer_speech_snr_range)
+                        # Scale interferer relative to target speech
+                        target_rms = np.sqrt(np.mean(speech_for_mix**2) + 1e-8)
+                        interfer_rms = np.sqrt(np.mean(interfer_speech**2) + 1e-8)
+                        scale = target_rms / (interfer_rms + 1e-8) * (10 ** (-interfer_snr / 20))
+                        interfer_scaled = interfer_speech * scale
+                        # Add to combined noise (interferer is treated as noise, not target)
+                        combined_noise = combined_noise + interfer_scaled
 
         # Mix
         clean_out, _, noisy = mix_audio(speech_for_mix, combined_noise, snr, gain)
