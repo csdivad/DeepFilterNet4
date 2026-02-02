@@ -156,19 +156,19 @@ class PytorchDataLoader:
         if self.pin_memory:
             # Check if still running from previous epoch
             if self.pin_memory_thread is not None and self.pin_memory_thread.is_alive():
-                self.pin_memory_thread_done_event.set()
+                self.pin_memory_thread_done_event.set()  # type: ignore
                 while True:
                     try:  # Empty queue
-                        _ = self.data_queue.get(timeout=2)
+                        _ = self.data_queue.get(timeout=2)  # type: ignore
                         if hasattr(self.data_queue, "task_done"):
                             # self.data_queue.get() without a subsequent task_done()
                             # will cause self.data_queue.join() to wait indefinitely.
-                            self.data_queue.task_done()
+                            self.data_queue.task_done()  # type: ignore
                     except queue.Empty:
                         break
 
                 self.pin_memory_thread.join()
-                self.data_queue.join()
+                self.data_queue.join()  # type: ignore
                 print("Pinmemory cleanup done")
 
     def setup_data_queue(self):
@@ -236,9 +236,9 @@ class PytorchDataLoader:
     def _get_batch(self) -> Batch:
         if self.log_timings:
             t0 = time.time()
-        _, batch = self.data_queue.get()
+        _, batch = self.data_queue.get()  # type: ignore
         if hasattr(self.data_queue, "task_done"):
-            self.data_queue.task_done()
+            self.data_queue.task_done()  # type: ignore
         if isinstance(batch, ExceptionWrapper):
             batch.reraise()
         if self.log_timings:

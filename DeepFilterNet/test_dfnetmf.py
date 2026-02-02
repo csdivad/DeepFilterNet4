@@ -89,7 +89,7 @@ def test_basic_forward():
         from mlx.utils import tree_flatten
 
         flat_params = tree_flatten(m.parameters())
-        return sum(p.size for _, p in flat_params)
+        return sum(p.size for _, p in flat_params)  # type: ignore
 
     num_params = count_params(model)
     print(f"Parameters: {num_params:,}")
@@ -185,7 +185,7 @@ def compare_mf_methods():
             from mlx.utils import tree_flatten
 
             flat_params = tree_flatten(m.parameters())
-            return sum(p.size for _, p in flat_params)
+            return sum(p.size for _, p in flat_params)  # type: ignore
 
         num_params = count_params(model)
 
@@ -252,7 +252,7 @@ def benchmark_vs_dfnet4():
         from mlx.utils import tree_flatten
 
         flat_params = tree_flatten(m.parameters())
-        return sum(p.size for _, p in flat_params)
+        return sum(p.size for _, p in flat_params)  # type: ignore
 
     results["DFNet4"] = {"params": count_params(model_df4)}
 
@@ -371,17 +371,18 @@ def test_with_audio(audio_path: str):
 
     # STFT
     spec = stft(audio_mx, p.fft_size, p.hop_size)
-    print(f"Spectrogram shape: {spec.shape}")
+    spec_shape = (str(spec[0].shape) + " " + str(spec[1].shape)) if isinstance(spec, tuple) else str(spec.shape)
+    print(f"Spectrogram shape: {spec_shape}")
 
     # Create features (simplified - in practice these come from proper feature extraction)
     # ERB features: magnitude in ERB bands
-    spec_mag = mx.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2)
+    spec_mag = mx.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2)  # type: ignore
     feat_erb = mx.matmul(spec_mag, mx.transpose(erb_fb))  # [B, T, E]
     feat_erb = mx.expand_dims(feat_erb, axis=-1)  # [B, T, E, 1]
     feat_erb = mx.log(feat_erb + 1e-8)  # Log scale
 
     # DF features: low-freq complex spec
-    feat_spec = spec[:, :, : p.nb_df, :]
+    feat_spec = spec[:, :, : p.nb_df, :]  # type: ignore
 
     print(f"Feature shapes: erb={feat_erb.shape}, spec={feat_spec.shape}")
 

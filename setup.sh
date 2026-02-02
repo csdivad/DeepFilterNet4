@@ -191,7 +191,7 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
 
   pushd DeepFilterNet
 
-  python -m pip install -U pip setuptools wheel
+  python -m pip install -U pip setuptools wheel silero-vad
 
   all_extras=("${DEFAULT_EXTRAS[@]}")
   if [[ ${#USER_EXTRAS[@]} -gt 0 ]]; then

@@ -111,6 +111,20 @@ _AWESOME_MUSIC_FLUX_WIDTH = 0.05
 _AWESOME_MASK_LOGIT_CLAMP = 30.0
 _VAD_LOGIT_CLAMP = 20.0
 
+# =============================================================================
+# Pipeline Awesome loss constants (improved speech preservation + music suppression)
+# =============================================================================
+_PIPELINE_MIN_MASK_FLOOR = 0.08  # Prevent complete suppression
+_PIPELINE_LOW_ENERGY_ADDITIVE = 0.25  # Additive boost for quiet speech
+_PIPELINE_LOW_SNR_ADDITIVE = 0.25  # Additive boost for low-SNR
+_PIPELINE_PROXY_FLOOR = 0.15  # Higher minimum proxy weight
+_PIPELINE_SPEECH_BAND_WEIGHT = 2.0  # Extra weight on speech band (300-3400 Hz)
+_PIPELINE_MUSIC_SUPPRESSION_WEIGHT = 1.5  # Music suppression strength
+_PIPELINE_VOCAL_HARMONIC_THR = 0.4  # Threshold for vocal harmonic detection
+_PIPELINE_PITCH_STABILITY_THR = 0.3  # Threshold for pitch stability (vocals)
+_PIPELINE_ARTIFACT_SMOOTH_WEIGHT = 0.3  # Temporal smoothing for artifact control
+_PIPELINE_MASK_SATURATION_PENALTY = 0.1  # Penalty for extreme mask values
+
 
 @dataclass
 class NumericDebugConfig:
@@ -274,7 +288,7 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--resume"], "checkpoint.resume", getattr(args, "resume", None)),
         (["--resume-data"], "checkpoint.resume_data", getattr(args, "resume_data", None)),
         (["--check-chkpts"], "checkpoint.check_chkpts", getattr(args, "check_chkpts", None)),
-        (["--backbone-type"], "model.backbone_type", getattr(args, "backbone_type", None)),
+        (["--backbone", "--backbone-type"], "model.backbone_type", getattr(args, "backbone_type", None)),
         (["--dynamic-loss"], "loss.dynamic_loss", getattr(args, "dynamic_loss", None)),
         (["--awesome-loss-weight"], "loss.awesome.loss_weight", getattr(args, "awesome_loss_weight", None)),
         (["--awesome-mask-sharpness"], "loss.awesome.mask_sharpness", getattr(args, "awesome_mask_sharpness", None)),
@@ -662,6 +676,7 @@ def _compute_awesome_losses(
     mx.array,
     mx.array,
     mx.array,
+    mx.array,
 ]:
     """Compute awesome loss components and diagnostic gates."""
     clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
@@ -740,6 +755,338 @@ def _compute_awesome_losses(
         mod_energy,
         energy_boost,
         snr_boost,
+    )
+
+
+def _compute_pitch_stability(
+    mag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    eps: float = _EPS,
+) -> mx.array:
+    """Compute pitch stability metric to detect sustained vocals vs speech.
+
+    Vocals tend to have more stable pitch (lower frame-to-frame variation)
+    while speech has more dynamic pitch contours.
+
+    Returns per-sample pitch stability in [0, 1], where 1 = very stable (vocal-like).
+    """
+    mag = mag.astype(mx.float32)
+    band_mag = mag * band_mask
+
+    # Compute spectral centroid per frame
+    freq_weights = mx.arange(band_mag.shape[-1], dtype=mx.float32)
+    centroid = mx.sum(band_mag * freq_weights, axis=-1) / (mx.sum(band_mag, axis=-1) + eps)
+
+    # Pitch stability = inverse of centroid variation
+    if centroid.shape[1] > 1:
+        centroid_diff = mx.abs(centroid[:, 1:] - centroid[:, :-1])
+        centroid_var = mx.mean(centroid_diff, axis=1, keepdims=True)
+        # Normalize and invert: low variation = high stability
+        stability = mx.exp(-centroid_var / 10.0)
+    else:
+        stability = mx.ones((mag.shape[0], 1))
+
+    return mx.clip(stability, 0.0, 1.0).squeeze(-1)
+
+
+def _compute_harmonic_ratio(
+    mag: mx.array,
+    eps: float = _EPS,
+) -> mx.array:
+    """Compute harmonic-to-noise ratio to detect tonal content (vocals/music).
+
+    Uses autocorrelation proxy: high HNR = more harmonic/tonal content.
+    Returns per-sample HNR score in [0, 1].
+    """
+    mag = mag.astype(mx.float32)
+
+    # Simple proxy: ratio of peak to mean energy in low-mid frequencies
+    # Harmonic content creates spectral peaks
+    low_mid_mag = mag[:, :, : mag.shape[-1] // 2]  # Lower half of spectrum
+    peak_energy = mx.max(low_mid_mag, axis=-1)
+    mean_energy = mx.mean(low_mid_mag, axis=-1) + eps
+
+    hnr_proxy = peak_energy / mean_energy
+    # Normalize to [0, 1] using sigmoid
+    hnr_score = mx.sigmoid((hnr_proxy - 3.0) / 1.0)  # Center at ratio=3
+
+    return mx.mean(hnr_score, axis=1)
+
+
+def _compute_improved_musicness(
+    mag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    snr: mx.array,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Compute improved musicness score with vocal detection.
+
+    Returns:
+        musicness: (B,) overall musicness score
+        vocal_gate: (B,) gate for vocal content (1 = protect as speech)
+        instrument_gate: (B,) gate for instrumental content (1 = suppress)
+    """
+    mag = mag.astype(mx.float32)
+
+    # Original spectral flatness
+    log_mag = mx.log(mag + eps)
+    mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
+    geom_mean = mx.exp(mean_log)
+    arith_mean = mx.sum(mag * band_mask, axis=-1) / (band_bins + eps)
+    flatness = geom_mean / (arith_mean + eps)
+    tonal = 1.0 - mx.clip(flatness, 0.0, 1.0)
+    tonal_mean = mx.mean(tonal, axis=1, keepdims=True)
+
+    # Temporal flux
+    band_mag = mag * band_mask
+    flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
+    flux_mean = mx.mean(flux, axis=1, keepdims=True)
+    flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux_mean) / _AWESOME_MUSIC_FLUX_WIDTH)
+
+    # Pitch stability (vocals = less stable than instruments)
+    pitch_stability = _compute_pitch_stability(mag, band_mask, band_bins, eps)
+
+    # Harmonic ratio
+    harmonic_ratio = _compute_harmonic_ratio(mag, eps)
+
+    # Musicness from original features
+    musicness_base = mx.clip(tonal_mean.squeeze(-1) * flux_gate.squeeze(-1), 0.0, 1.0)
+
+    # Vocal detection: high tonality + moderate pitch stability + present in speech band
+    # Vocals: tonal but with more pitch variation than instruments
+    vocal_indicator = tonal_mean.squeeze(-1) * (1.0 - pitch_stability) * harmonic_ratio
+    vocal_gate = mx.sigmoid((vocal_indicator - _PIPELINE_VOCAL_HARMONIC_THR) / 0.15)
+
+    # Instrumental: high tonality + high pitch stability (sustained notes)
+    instrument_indicator = tonal_mean.squeeze(-1) * pitch_stability * flux_gate.squeeze(-1)
+    instrument_gate = mx.sigmoid((instrument_indicator - _PIPELINE_PITCH_STABILITY_THR) / 0.15)
+
+    # Adjust musicness: reduce for vocals (they should be preserved as speech-like)
+    musicness = musicness_base * (1.0 - 0.5 * vocal_gate)
+
+    if debug is not None:
+        debug.check("improved_musicness.tonal", tonal_mean, debug_ctx)
+        debug.check("improved_musicness.flux", flux_mean, debug_ctx)
+        debug.check("improved_musicness.pitch_stab", pitch_stability, debug_ctx)
+        debug.check("improved_musicness.harmonic", harmonic_ratio, debug_ctx)
+        debug.check("improved_musicness.vocal_gate", vocal_gate, debug_ctx)
+        debug.check("improved_musicness.instrument_gate", instrument_gate, debug_ctx)
+
+    return musicness, vocal_gate, instrument_gate
+
+
+def _compute_pipeline_awesome_losses(
+    noisy_real: mx.array,
+    noisy_imag: mx.array,
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    out_real: mx.array,
+    out_imag: mx.array,
+    snr: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    mask_sharpness: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    vad_snr_gate_db: float,
+    vad_snr_gate_width: float,
+    proxy_enabled: bool,
+    min_mask_floor: float = _PIPELINE_MIN_MASK_FLOOR,
+    eps: float = _EPS,
+    debug: NumericDebugger | None = None,
+    debug_ctx: dict[str, Any] | None = None,
+) -> tuple[
+    mx.array,  # total loss
+    mx.array,  # speech loss
+    mx.array,  # noise loss
+    mx.array,  # smooth loss
+    mx.array,  # music suppression loss
+    mx.array,  # mask saturation loss
+    mx.array,  # mask
+    mx.array,  # proxy_frame
+    mx.array,  # speech_ratio
+    mx.array,  # music_gate
+    mx.array,  # musicness
+    mx.array,  # vocal_gate
+    mx.array,  # instrument_gate
+    mx.array,  # mod_energy
+    mx.array,  # energy_boost
+    mx.array,  # snr_boost
+]:
+    """Compute pipeline_awesome loss with improved speech preservation and music suppression.
+
+    Key improvements over basic awesome loss:
+    1. Minimum mask floor to prevent complete speech suppression
+    2. Additive (not multiplicative) boosts for low-energy and low-SNR speech
+    3. Improved musicness detection with vocal/instrument separation
+    4. Speech-band weighted loss
+    5. Mask saturation penalty to avoid extreme values
+    6. Explicit music suppression loss
+    """
+    # Compute log magnitudes (same as awesome loss)
+    clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
+    out_log = _log1p_mag(out_real, out_imag, eps=eps)
+
+    noise_real = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
+    noise_imag = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
+
+    # Compute speech/noise dominance mask with floor
+    mask_logits = mx.clip(
+        mask_sharpness * (clean_log - noise_log),
+        -_AWESOME_MASK_LOGIT_CLAMP,
+        _AWESOME_MASK_LOGIT_CLAMP,
+    )
+    raw_mask = mx.sigmoid(mask_logits)
+    # Apply minimum floor to prevent complete suppression
+    mask = mx.maximum(raw_mask, min_mask_floor)
+    mask = mx.stop_gradient(mask)
+
+    if debug is not None:
+        debug.check("pipeline.clean_log", clean_log, debug_ctx)
+        debug.check("pipeline.noise_log", noise_log, debug_ctx)
+        debug.check("pipeline.mask_logits", mask_logits, debug_ctx)
+        debug.check("pipeline.raw_mask", raw_mask, debug_ctx)
+        debug.check("pipeline.mask", mask, debug_ctx)
+
+    # Compute improved proxy gates with additive boosts
+    clean_real_f32 = clean_real.astype(mx.float32)
+    clean_imag_f32 = clean_imag.astype(mx.float32)
+    noisy_real_f32 = noisy_real.astype(mx.float32)
+    noisy_imag_f32 = noisy_imag.astype(mx.float32)
+
+    clean_power = clean_real_f32**2 + clean_imag_f32**2
+    noise_real_f32 = noisy_real_f32 - clean_real_f32
+    noise_imag_f32 = noisy_imag_f32 - clean_imag_f32
+    noise_power = noise_real_f32**2 + noise_imag_f32**2
+
+    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+    noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
+    speech_ratio = clean_band / (clean_band + noise_band + eps)
+
+    # Z-scored log energy for VAD proxy
+    log_clean = mx.log10(clean_band + eps)
+    mu = mx.mean(log_clean, axis=1, keepdims=True)
+    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+
+    z_slope = max(vad_z_slope, 1e-3)
+    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+
+    # Modulation proxy
+    mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    mod_gate = mx.sigmoid((mod_energy - _AWESOME_MOD_THRESHOLD) / _AWESOME_MOD_WIDTH)
+
+    # Energy and SNR boosts (ADDITIVE, not multiplicative)
+    mean_log = mx.mean(log_clean, axis=1, keepdims=True)
+    energy_boost = mx.sigmoid((_AWESOME_ENERGY_BOOST_DB - mean_log) / _AWESOME_ENERGY_BOOST_WIDTH)
+
+    snr_scale = max(vad_snr_gate_width, 1e-3)
+    snr_boost = mx.sigmoid((vad_snr_gate_db - snr[:, None]) / snr_scale)
+
+    # Improved musicness detection
+    noisy_mag = mx.sqrt(noisy_real_f32**2 + noisy_imag_f32**2 + eps)
+    musicness, vocal_gate, instrument_gate = _compute_improved_musicness(
+        noisy_mag,
+        band_mask,
+        band_bins,
+        snr,
+        eps=eps,
+        debug=debug,
+        debug_ctx=debug_ctx,
+    )
+
+    # Music gate: downweight for instrumental, but preserve vocal-like content
+    music_gate = 1.0 - mx.sigmoid((musicness - _AWESOME_MUSICNESS_THR) / _AWESOME_MUSICNESS_WIDTH)
+    # Boost back for vocals (they should be preserved)
+    music_gate = music_gate + 0.5 * vocal_gate * (1.0 - music_gate)
+
+    if not proxy_enabled:
+        proxy_frame = mx.ones_like(clean_band)
+    else:
+        # Base proxy from VAD and speech ratio (with higher floor)
+        base_proxy = p_ref * (_PIPELINE_PROXY_FLOOR + (1.0 - _PIPELINE_PROXY_FLOOR) * speech_ratio)
+        base_proxy = base_proxy * mod_gate * music_gate[:, None]
+
+        # ADDITIVE boosts (key improvement for low-signal speech)
+        proxy_frame = base_proxy + _PIPELINE_LOW_ENERGY_ADDITIVE * energy_boost + _PIPELINE_LOW_SNR_ADDITIVE * snr_boost
+        proxy_frame = mx.clip(proxy_frame, _PIPELINE_PROXY_FLOOR, 5.0)
+
+    proxy_frame = mx.stop_gradient(proxy_frame)
+
+    if debug is not None:
+        debug.check("pipeline.z_ref", z_ref, debug_ctx)
+        debug.check("pipeline.p_ref", p_ref, debug_ctx)
+        debug.check("pipeline.speech_ratio", speech_ratio, debug_ctx)
+        debug.check("pipeline.energy_boost", energy_boost, debug_ctx)
+        debug.check("pipeline.snr_boost", snr_boost, debug_ctx)
+        debug.check("pipeline.music_gate", music_gate, debug_ctx)
+        debug.check("pipeline.proxy_frame", proxy_frame, debug_ctx)
+
+    # ========== Loss components ==========
+
+    # 1. Speech preservation loss (weighted by proxy)
+    proxy_frame_3d = proxy_frame[:, :, None]
+    speech_loss = mx.mean(mx.abs(out_log - clean_log) * mask * proxy_frame_3d)
+
+    # 2. Noise suppression loss
+    noise_loss = mx.mean(mx.abs(out_log) * (1.0 - mask))
+
+    # 3. Temporal smoothness for artifact control (stronger than base awesome)
+    if out_log.shape[1] > 1:
+        smooth_mask = 1.0 - mask[:, 1:, :]
+        smooth_loss = mx.mean(mx.abs(out_log[:, 1:, :] - out_log[:, :-1, :]) * smooth_mask)
+    else:
+        smooth_loss = mx.array(0.0)
+
+    # 4. Music suppression loss: penalize output energy where instrumental music detected
+    instrument_weight = instrument_gate[:, None, None] * (1.0 - mask)  # Only where noise dominant
+    music_suppression_loss = mx.mean(mx.abs(out_log) * instrument_weight)
+
+    # 5. Mask saturation penalty: discourage extreme mask values (prevents artifacts)
+    mask_extreme = mx.mean(raw_mask * (1.0 - raw_mask))  # Maximized when mask near 0.5
+    mask_saturation_loss = 1.0 - 4.0 * mask_extreme  # Penalty for being far from 0.5
+    mask_saturation_loss = mx.clip(mask_saturation_loss, 0.0, 1.0)
+
+    # Total loss
+    total_loss = (
+        speech_loss
+        + noise_loss
+        + _PIPELINE_ARTIFACT_SMOOTH_WEIGHT * smooth_loss
+        + _PIPELINE_MUSIC_SUPPRESSION_WEIGHT * music_suppression_loss
+        + _PIPELINE_MASK_SATURATION_PENALTY * mask_saturation_loss
+    )
+
+    if debug is not None:
+        debug.check("pipeline.speech_loss", speech_loss, debug_ctx)
+        debug.check("pipeline.noise_loss", noise_loss, debug_ctx)
+        debug.check("pipeline.smooth_loss", smooth_loss, debug_ctx)
+        debug.check("pipeline.music_suppression_loss", music_suppression_loss, debug_ctx)
+        debug.check("pipeline.mask_saturation_loss", mask_saturation_loss, debug_ctx)
+        debug.check("pipeline.total_loss", total_loss, debug_ctx)
+
+    return (
+        total_loss,
+        speech_loss,
+        noise_loss,
+        smooth_loss,
+        music_suppression_loss,
+        mask_saturation_loss,
+        mask,
+        proxy_frame,
+        speech_ratio,
+        music_gate,
+        musicness,
+        vocal_gate,
+        instrument_gate,
+        mod_energy.squeeze(-1),
+        energy_boost.squeeze(-1),
+        snr_boost.squeeze(-1),
     )
 
 
@@ -1785,7 +2132,7 @@ def train(
     p_extreme_snr: float | None = None,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
-    dynamic_loss: Literal["baseline", "awesome"] = "baseline",
+    dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome"] = "baseline",
     awesome_loss_weight: float = 0.4,
     awesome_mask_sharpness: float = 6.0,
     awesome_warmup_steps: int = 0,
@@ -1858,7 +2205,7 @@ def train(
         p_extreme_snr: Optional override for extreme SNR sampling probability
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
-        dynamic_loss: Which dynamic loss to use ("baseline" or "awesome")
+        dynamic_loss: Which dynamic loss to use ("baseline", "awesome", or "pipeline_awesome")
         awesome_loss_weight: Weight for awesome loss term (only if enabled)
         awesome_mask_sharpness: Sharpness for speech/noise dominance mask
         awesome_warmup_steps: Warmup steps for awesome loss weight ramp
@@ -2006,9 +2353,10 @@ def train(
     dataset = DynamicDataset(config)
 
     use_awesome_loss = dynamic_loss == "awesome"
+    use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
 
     if vad_eval_mode == "auto":
-        vad_eval_mode = "proxy" if use_awesome_loss else "off"
+        vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
     vad_eval_enabled = vad_eval_mode != "off"
     silero_vad = None
     if vad_eval_mode == "silero":
@@ -2026,7 +2374,9 @@ def train(
     use_vad_loss = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
 
-    need_band_mask = use_vad_loss or use_awesome_loss or vad_eval_enabled or use_vad_train_reg
+    need_band_mask = (
+        use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
+    )
     if need_band_mask:
         n_freqs = config.fft_size // 2 + 1
         vad_band_mask, vad_band_bins = _build_speech_band_mask(
@@ -2382,6 +2732,26 @@ def train(
             )
             total_loss = total_loss + awesome_weight * awesome_loss
 
+        if use_pipeline_awesome_loss:
+            pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_pipeline_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+            )
+            total_loss = total_loss + awesome_weight * pipeline_loss
+
         if use_vad_loss:
             vad_loss, _, _, gate = _compute_vad_loss(
                 clean_real,
@@ -2455,6 +2825,26 @@ def train(
         debugger.check("spec_loss", spec_loss, debug_ctx)
         if use_awesome_loss:
             _compute_awesome_losses(
+                noisy_real,
+                noisy_imag,
+                clean_real,
+                clean_imag,
+                out[0],
+                out[1],
+                snr,
+                vad_band_mask,
+                vad_band_bins,
+                awesome_mask_sharpness,
+                vad_z_threshold,
+                vad_z_slope,
+                vad_snr_gate_db,
+                vad_snr_gate_width,
+                vad_proxy_enabled,
+                debug=debugger,
+                debug_ctx=debug_ctx,
+            )
+        if use_pipeline_awesome_loss:
+            _compute_pipeline_awesome_losses(
                 noisy_real,
                 noisy_imag,
                 clean_real,
@@ -2725,6 +3115,44 @@ def train(
                     debug_ctx=debug_ctx,
                 )
 
+            if use_pipeline_awesome_loss:
+                (
+                    awesome_loss,
+                    awesome_speech,
+                    awesome_noise,
+                    awesome_smooth,
+                    _,  # music_suppression_loss
+                    _,  # mask_saturation_loss
+                    mask,
+                    proxy_frame,
+                    speech_ratio,
+                    music_gate,
+                    musicness,
+                    _,  # vocal_gate
+                    _,  # instrument_gate
+                    mod_energy,
+                    energy_boost,
+                    snr_boost,
+                ) = _compute_pipeline_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                    debug=debugger,
+                    debug_ctx=debug_ctx,
+                )
+
             if use_vad_loss:
                 vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                     clean_real,
@@ -2786,11 +3214,11 @@ def train(
                 )
 
             awesome_weight_val = awesome_loss_weight
-            if use_awesome_loss and awesome_warmup_steps > 0:
+            if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_weight_val = awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
 
             loss = spec_loss
-            if use_awesome_loss:
+            if use_awesome_loss or use_pipeline_awesome_loss:
                 loss = loss + awesome_weight_val * awesome_loss
             if use_vad_loss:
                 loss = loss + vad_loss_weight * vad_loss + vad_speech_loss_weight * speech_loss
@@ -3502,6 +3930,75 @@ def train(
                         train_eps_noise_rate += noise_eps_rate
                         num_debug_logs += 1
 
+                if use_pipeline_awesome_loss:
+                    (
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        music_supp_loss,
+                        mask_sat_loss,
+                        mask,
+                        proxy_frame,
+                        speech_ratio,
+                        music_gate,
+                        musicness,
+                        vocal_gate,
+                        instrument_gate,
+                        mod_energy,
+                        energy_boost,
+                        snr_boost,
+                    ) = _compute_pipeline_awesome_losses(
+                        noisy_real,
+                        noisy_imag,
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        snr,
+                        vad_band_mask,
+                        vad_band_bins,
+                        awesome_mask_sharpness,
+                        vad_z_threshold,
+                        vad_z_slope,
+                        vad_snr_gate_db,
+                        vad_snr_gate_width,
+                        vad_proxy_enabled,
+                        debug=debugger,
+                        debug_ctx=debug_ctx,
+                    )
+                    awesome_loss_val = float(awesome_loss)
+                    awesome_speech_val = float(awesome_speech)
+                    awesome_noise_val = float(awesome_noise)
+                    awesome_smooth_val = float(awesome_smooth)
+
+                    mask_mean = float(mx.mean(mask))
+                    mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
+                    mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
+                    proxy_mean = float(mx.mean(proxy_frame))
+                    speech_ratio_mean = float(mx.mean(speech_ratio))
+                    music_gate_mean = float(mx.mean(music_gate))
+                    musicness_mean = float(mx.mean(musicness))
+                    mod_energy_mean = float(mx.mean(mod_energy))
+                    energy_boost_mean = float(mx.mean(energy_boost))
+                    snr_boost_mean = float(mx.mean(snr_boost))
+
+                    train_awesome_loss += awesome_loss_val * eval_frequency
+                    train_awesome_speech += awesome_speech_val * eval_frequency
+                    train_awesome_noise += awesome_noise_val * eval_frequency
+                    train_awesome_smooth += awesome_smooth_val * eval_frequency
+                    train_mask_mean += mask_mean
+                    train_mask_high += mask_high
+                    train_mask_low += mask_low
+                    train_proxy_mean += proxy_mean
+                    train_speech_ratio += speech_ratio_mean
+                    train_music_gate += music_gate_mean
+                    train_musicness += musicness_mean
+                    train_mod_energy += mod_energy_mean
+                    train_energy_boost += energy_boost_mean
+                    train_snr_boost += snr_boost_mean
+                    num_awesome_logs += 1
+
                 if use_vad_train_reg and apply_vad_reg:
                     vad_reg_loss, vad_dec, gate, _, _, _, _ = _compute_vad_reg_loss(
                         clean_real,
@@ -3530,13 +4027,15 @@ def train(
                         loss=f"{loss_val:.4f}",
                         spec=(
                             f"{spec_loss_val:.4f}"
-                            if (use_vad_loss or use_awesome_loss or use_vad_train_reg)
+                            if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
                             else f"{loss_val:.4f}"
                         ),
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=f"{awesome_loss_val:.4f}" if use_awesome_loss else "0.0000",
-                        mask=f"{mask_mean:.2f}" if use_awesome_loss else "0.00",
+                        awesome=(
+                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
+                        ),
+                        mask=f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00",
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
                         step=f"{fwd_time * 1000:.0f}ms",
@@ -3550,8 +4049,10 @@ def train(
                         avg=f"{train_loss / num_train_batches:.4f}",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
-                        awesome=f"{awesome_loss_val:.4f}" if use_awesome_loss else "0.0000",
-                        mask=f"{mask_mean:.2f}" if use_awesome_loss else "0.00",
+                        awesome=(
+                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
+                        ),
+                        mask=f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00",
                         p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
                         p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
@@ -4072,7 +4573,9 @@ def main():
         help="Sync with GPU every N batches (higher = faster but less responsive logging)",
     )
     parser.add_argument(
+        "--backbone",
         "--backbone-type",
+        dest="backbone_type",
         type=str,
         choices=["mamba", "gru", "attention"],
         default="mamba",
@@ -4114,9 +4617,9 @@ def main():
     parser.add_argument(
         "--dynamic-loss",
         type=str,
-        choices=["baseline", "awesome"],
+        choices=["baseline", "awesome", "pipeline_awesome"],
         default="baseline",
-        help="Dynamic loss to use: 'baseline' (spectral + legacy VAD) or 'awesome'",
+        help="Dynamic loss: 'baseline' (spectral + legacy VAD), 'awesome' (speech-preserving contrastive), or 'pipeline_awesome' (improved speech preservation + music suppression)",
     )
     parser.add_argument(
         "--awesome-loss-weight",
@@ -4405,7 +4908,7 @@ def main():
         p_extreme_snr=run_cfg.dataset.p_extreme_snr,
         speech_gain_range=run_cfg.dataset.speech_gain_range,
         noise_gain_range=run_cfg.dataset.noise_gain_range,
-        dynamic_loss=cast(Literal["baseline", "awesome"], run_cfg.loss.dynamic_loss),
+        dynamic_loss=cast(Literal["baseline", "awesome", "pipeline_awesome"], run_cfg.loss.dynamic_loss),
         awesome_loss_weight=run_cfg.loss.awesome.loss_weight,
         awesome_mask_sharpness=run_cfg.loss.awesome.mask_sharpness,
         awesome_warmup_steps=run_cfg.loss.awesome.warmup_steps,
