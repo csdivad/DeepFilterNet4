@@ -2144,11 +2144,23 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
     if not checkpoint_dir.exists():
         return None
 
-    report = validate_checkpoint_dir(checkpoint_dir, strict=False, validate_load=False)
-    latest = report.get("latest_path")
-    if isinstance(latest, Path):
-        return latest
-    return None
+    manifest = CheckpointManifest()
+    candidates = [p for p in checkpoint_dir.glob(f"*{manifest.weights_ext}") if not manifest.is_temporary(p)]
+
+    valid_pairs: list[Path] = []
+    for ckpt in candidates:
+        state_path = manifest.state_path(ckpt)
+        if not ckpt.exists() or ckpt.stat().st_size == 0:
+            continue
+        if not state_path.exists() or state_path.stat().st_size == 0:
+            continue
+        valid_pairs.append(ckpt)
+
+    if not valid_pairs:
+        return None
+
+    # Fast path: use latest mtime without loading large state JSON files.
+    return max(valid_pairs, key=lambda p: p.stat().st_mtime)
 
 
 def train(
