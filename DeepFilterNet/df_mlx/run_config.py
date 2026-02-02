@@ -202,6 +202,24 @@ class DatasetRunConfig:
         normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0, max_value=1.0),
         none_sentinel=-1.0,
     )
+    snr_range_very_low: tuple[float, float] | None = cfg_field(
+        None,
+        help="Override very-low SNR range in dB (e.g., [-30, -20])",
+        normalize=_normalize_range,
+        none_sentinel=[],
+    )
+    p_very_low_snr: float | None = cfg_field(
+        None,
+        help="Probability of sampling from very-low SNR range (0-1)",
+        normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0, max_value=1.0),
+        none_sentinel=-1.0,
+    )
+    p_interfer_speech: float | None = cfg_field(
+        None,
+        help="Probability of adding interfering speaker (0-1)",
+        normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0, max_value=1.0),
+        none_sentinel=-1.0,
+    )
     speech_gain_range: tuple[float, float] | None = cfg_field(
         None,
         help="Override speech gain range in dB (e.g., [-12, 12])",
@@ -245,6 +263,11 @@ class TrainingConfig:
         min=0.0,
     )
     warmup_epochs: int = cfg_field(5, help="Warmup epochs", normalize=lambda v: _normalize_int(v, min_value=0))
+    curriculum_warmup_epochs: int = cfg_field(
+        0,
+        help="Curriculum learning warmup epochs (0=disabled). SNR/interferer probabilities ramp from 0 to target.",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
     patience: int = cfg_field(10, help="Early stopping patience", normalize=lambda v: _normalize_int(v, min_value=0))
     grad_accumulation_steps: int = cfg_field(
         1, help="Gradient accumulation steps", normalize=lambda v: _normalize_int(v, min_value=1)

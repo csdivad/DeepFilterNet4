@@ -240,6 +240,52 @@ def _tree_all_finite(tree: Any) -> bool:
     return True
 
 
+# =============================================================================
+# Curriculum Learning Scheduler
+# =============================================================================
+
+
+def curriculum_schedule(
+    epoch: int,
+    total_epochs: int,
+    warmup_epochs: int,
+    target_p_extreme: float,
+    target_p_very_low: float,
+    target_p_interfer: float,
+) -> tuple[float, float, float]:
+    """Compute curriculum-scheduled SNR and interferer probabilities.
+
+    During warmup, we start with easy (high SNR) samples and gradually
+    introduce harder samples. After warmup, we use the full target distribution.
+
+    Schedule:
+    - Epoch 0 to warmup_epochs: linear ramp from 0 to target values
+    - After warmup_epochs: use full target values
+
+    Args:
+        epoch: Current training epoch (0-indexed)
+        total_epochs: Total training epochs
+        warmup_epochs: Number of warmup epochs for curriculum
+        target_p_extreme: Final probability for extreme SNR
+        target_p_very_low: Final probability for very-low SNR
+        target_p_interfer: Final probability for interfering speech
+
+    Returns:
+        Tuple of (p_extreme_snr, p_very_low_snr, p_interfer_speech)
+    """
+    if warmup_epochs <= 0 or epoch >= warmup_epochs:
+        # Past warmup: use full target distribution
+        return target_p_extreme, target_p_very_low, target_p_interfer
+
+    # Linear ramp during warmup
+    progress = epoch / warmup_epochs
+    return (
+        progress * target_p_extreme,
+        progress * target_p_very_low,
+        progress * target_p_interfer,
+    )
+
+
 def _flag_in_argv(flags: list[str], argv: list[str]) -> bool:
     for arg in argv:
         for flag in flags:
@@ -261,6 +307,11 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--p-extreme-snr"], "dataset.p_extreme_snr", getattr(args, "p_extreme_snr", None)),
         (["--p-very-low-snr"], "dataset.p_very_low_snr", getattr(args, "p_very_low_snr", None)),
         (["--p-interfer-speech"], "dataset.p_interfer_speech", getattr(args, "p_interfer_speech", None)),
+        (
+            ["--curriculum-warmup-epochs"],
+            "training.curriculum_warmup_epochs",
+            getattr(args, "curriculum_warmup_epochs", None),
+        ),
         (["--speech-gain-range"], "dataset.speech_gain_range", getattr(args, "speech_gain_range", None)),
         (["--noise-gain-range"], "dataset.noise_gain_range", getattr(args, "noise_gain_range", None)),
         (["--p-reverb"], "augmentation.p_reverb", getattr(args, "p_reverb", None)),
@@ -2136,6 +2187,7 @@ def train(
     p_extreme_snr: float | None = None,
     p_very_low_snr: float | None = None,
     p_interfer_speech: float | None = None,
+    curriculum_warmup_epochs: int = 0,
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
     dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome"] = "baseline",
@@ -2212,6 +2264,8 @@ def train(
         p_extreme_snr: Optional override for extreme SNR sampling probability
         p_very_low_snr: Optional override for very-low SNR sampling probability
         p_interfer_speech: Optional override for interfering speaker probability (simulates vocals/competing talker)
+        curriculum_warmup_epochs: Number of warmup epochs for curriculum learning (0=disabled).
+            During warmup, SNR/interferer probabilities ramp from 0 to target values.
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
         dynamic_loss: Which dynamic loss to use ("baseline", "awesome", or "pipeline_awesome")
@@ -3465,6 +3519,29 @@ def train(
         dataset.set_split("train")
         dataset.set_epoch(epoch)
 
+        # ====== Curriculum Learning Schedule ======
+        if curriculum_warmup_epochs > 0:
+            target_p_extreme = p_extreme_snr if p_extreme_snr is not None else config.p_extreme_snr
+            target_p_very_low = p_very_low_snr if p_very_low_snr is not None else config.p_very_low_snr
+            target_p_interfer = p_interfer_speech if p_interfer_speech is not None else config.p_interfer_speech
+            cur_p_extreme, cur_p_very_low, cur_p_interfer = curriculum_schedule(
+                epoch=epoch,
+                total_epochs=epochs,
+                warmup_epochs=curriculum_warmup_epochs,
+                target_p_extreme=target_p_extreme,
+                target_p_very_low=target_p_very_low,
+                target_p_interfer=target_p_interfer,
+            )
+            # Update dataset config with scheduled probabilities
+            dataset.config.p_extreme_snr = cur_p_extreme
+            dataset.config.p_very_low_snr = cur_p_very_low
+            dataset.config.p_interfer_speech = cur_p_interfer
+            if epoch < curriculum_warmup_epochs or (epoch == curriculum_warmup_epochs and verbose):
+                print(
+                    f"  Curriculum (epoch {epoch + 1}/{curriculum_warmup_epochs}): "
+                    f"p_extreme={cur_p_extreme:.3f}, p_very_low={cur_p_very_low:.3f}, p_interfer={cur_p_interfer:.3f}"
+                )
+
         # ====== Training ======
         model.train()
         train_loss = 0.0
@@ -4627,6 +4704,13 @@ def main():
         help="Probability of adding interfering speaker (0-1, simulates vocals/competing talker)",
     )
     parser.add_argument(
+        "--curriculum-warmup-epochs",
+        type=int,
+        default=0,
+        help="Number of warmup epochs for curriculum learning (0=disabled). "
+        "SNR/interferer probabilities ramp linearly from 0 to target values.",
+    )
+    parser.add_argument(
         "--speech-gain-range",
         type=float,
         nargs=2,
@@ -4931,7 +5015,11 @@ def main():
         verbose=run_cfg.debug.verbose,
         snr_range=run_cfg.dataset.snr_range,
         snr_range_extreme=run_cfg.dataset.snr_range_extreme,
+        snr_range_very_low=run_cfg.dataset.snr_range_very_low,
         p_extreme_snr=run_cfg.dataset.p_extreme_snr,
+        p_very_low_snr=run_cfg.dataset.p_very_low_snr,
+        p_interfer_speech=run_cfg.dataset.p_interfer_speech,
+        curriculum_warmup_epochs=run_cfg.training.curriculum_warmup_epochs,
         speech_gain_range=run_cfg.dataset.speech_gain_range,
         noise_gain_range=run_cfg.dataset.noise_gain_range,
         dynamic_loss=cast(Literal["baseline", "awesome", "pipeline_awesome"], run_cfg.loss.dynamic_loss),
