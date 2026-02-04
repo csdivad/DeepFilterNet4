@@ -299,6 +299,18 @@ resolve_ld() {
   echo ""
 }
 
+# ------------------------- macOS deployment target ------------------------- #
+# Set early so it applies to all native builds (pip, cargo, maturin).
+# This avoids version mismatch errors where assembly/C code compiled for
+# the host macOS version (e.g. 26.2) fails to link against Rust's default
+# target (e.g. 11.0). Affects: tract-linalg, hdf5-src, and others.
+if [[ "$PLATFORM_OS" == "Darwin" ]]; then
+  if [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
+    export MACOSX_DEPLOYMENT_TARGET="14.0"
+    echo "Setting MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET (native code compatibility)"
+  fi
+fi
+
 # ------------------------- Python ------------------------- #
 if [[ $BUILD_PYTHON -eq 1 ]]; then
   echo "==> Python setup (venv: $VENV_DIR; python: $PYTHON_BIN)"
@@ -358,23 +370,17 @@ fi
 if [[ $BUILD_CARGO -eq 1 ]]; then
   build_flags=()
   read -r -a build_flags <<<"$CARGO_FLAGS"
-  if [[ $CARGO_INCLUDE_PYDF -eq 0 ]]; then
-    build_flags+=(--exclude DeepFilterLib --exclude DeepFilterDataLoader)
+  # Always exclude PyO3 extension modules from standalone cargo build.
+  # They MUST be built via maturin which handles Python symbol resolution correctly.
+  # The --cargo-include-pydf flag is deprecated and ignored for this reason.
+  build_flags+=(--exclude DeepFilterLib --exclude DeepFilterDataLoader)
+  if [[ $CARGO_INCLUDE_PYDF -eq 1 ]]; then
+    echo "NOTE: --cargo-include-pydf is deprecated. PyO3 extensions are built via maturin only."
   fi
 
   echo "==> Cargo build (${build_flags[*]})"
   require_cmd cargo "Cargo"
   require_cmd rustc "rustc"
-
-  # On macOS, set deployment target to avoid version mismatch with tract-linalg assembly
-  if [[ "$PLATFORM_OS" == "Darwin" ]]; then
-    if [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
-      export MACOSX_DEPLOYMENT_TARGET="14.0"
-      echo "Setting MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET (tract-linalg compatibility)"
-    else
-      echo "Using MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
-    fi
-  fi
 
   LD_PATH="$(resolve_ld)"
   if [[ -n "$LD_PATH" ]]; then
