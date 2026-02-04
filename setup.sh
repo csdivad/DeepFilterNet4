@@ -10,6 +10,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -x "$ROOT_DIR/scripts/install-hooks.sh" ]]; then
+  "$ROOT_DIR/scripts/install-hooks.sh"
+fi
+
 # ------------------------- defaults ------------------------- #
 PYTHON_BIN="${PYTHON_BIN:-python3.10}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
