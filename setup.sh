@@ -365,6 +365,17 @@ if [[ $BUILD_CARGO -eq 1 ]]; then
   echo "==> Cargo build (${build_flags[*]})"
   require_cmd cargo "Cargo"
   require_cmd rustc "rustc"
+
+  # On macOS, set deployment target to avoid version mismatch with tract-linalg assembly
+  if [[ "$PLATFORM_OS" == "Darwin" ]]; then
+    if [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
+      export MACOSX_DEPLOYMENT_TARGET="14.0"
+      echo "Setting MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET (tract-linalg compatibility)"
+    else
+      echo "Using MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
+    fi
+  fi
+
   LD_PATH="$(resolve_ld)"
   if [[ -n "$LD_PATH" ]]; then
     export LD="$LD_PATH"
