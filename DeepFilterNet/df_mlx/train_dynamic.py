@@ -452,7 +452,10 @@ def _compute_vad_probs(
 
     log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+    # Edge case: ensure minimum variance to avoid instability on silence
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    _MIN_VARIANCE = 1e-4
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
 
     z_ref_raw = (log_clean - mu) / (sigma + eps)
     z_out_raw = (mx.log10(out_band + eps) - mu) / (sigma + eps)
@@ -590,9 +593,13 @@ def _compute_musicness(
     tonal_mean = mx.mean(tonal, axis=1, keepdims=True)
 
     # Temporal flux (lower flux => more music-like)
+    # Edge case: with single frame, no flux can be computed - assume speech-like
     band_mag = mag * band_mask
-    flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
-    flux = mx.mean(flux, axis=1, keepdims=True)
+    if mag.shape[1] > 1:
+        flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
+        flux = mx.mean(flux, axis=1, keepdims=True)
+    else:
+        flux = mx.zeros((mag.shape[0], 1))
     flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux) / _AWESOME_MUSIC_FLUX_WIDTH)
 
     musicness = mx.clip(tonal_mean * flux_gate, 0.0, 1.0)
@@ -648,7 +655,10 @@ def _compute_proxy_gates(
 
     log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+    # Edge case: ensure minimum variance to avoid instability on silence
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    _MIN_VARIANCE = 1e-4
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
     z_ref_raw = (log_clean - mu) / (sigma + eps)
     z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
 
@@ -656,7 +666,11 @@ def _compute_proxy_gates(
     p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
     # Modulation proxy from z-scored energy trajectory
-    mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    # Edge case: if only 1 frame, no modulation can be computed
+    if z_ref.shape[1] > 1:
+        mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    else:
+        mod_energy = mx.zeros((z_ref.shape[0], 1))
     mod_gate = mx.sigmoid((mod_energy - _AWESOME_MOD_THRESHOLD) / _AWESOME_MOD_WIDTH)
 
     mean_log = mx.mean(log_clean, axis=1, keepdims=True)
@@ -896,9 +910,13 @@ def _compute_improved_musicness(
     tonal_mean = mx.mean(tonal, axis=1, keepdims=True)
 
     # Temporal flux
+    # Edge case: with single frame, no flux can be computed - assume speech-like
     band_mag = mag * band_mask
-    flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
-    flux_mean = mx.mean(flux, axis=1, keepdims=True)
+    if mag.shape[1] > 1:
+        flux = mx.sum(mx.abs(band_mag[:, 1:, :] - band_mag[:, :-1, :]), axis=-1) / (band_bins + eps)
+        flux_mean = mx.mean(flux, axis=1, keepdims=True)
+    else:
+        flux_mean = mx.zeros((mag.shape[0], 1))
     flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux_mean) / _AWESOME_MUSIC_FLUX_WIDTH)
 
     # Pitch stability (vocals = less stable than instruments)
@@ -978,8 +996,12 @@ def _compute_pipeline_awesome_losses(
     2. Additive (not multiplicative) boosts for low-energy and low-SNR speech
     3. Improved musicness detection with vocal/instrument separation
     4. Speech-band weighted loss
-    5. Mask saturation penalty to avoid extreme values
+    5. Mask saturation penalty to encourage confident predictions
     6. Explicit music suppression loss
+
+    Note: The mask saturation penalty uses mask entropy: mask*(1-mask).
+    This is minimized when mask is near 0 or 1 (confident), and maximized
+    at 0.5 (uncertain). We want to PENALIZE uncertainty, so we use it directly.
     """
     # Compute log magnitudes (same as awesome loss)
     clean_log = _log1p_mag(clean_real, clean_imag, eps=eps)
@@ -1023,9 +1045,14 @@ def _compute_pipeline_awesome_losses(
     speech_ratio = clean_band / (clean_band + noise_band + eps)
 
     # Z-scored log energy for VAD proxy
+    # Edge case handling: if variance is near-zero (silence), use neutral z-scores
     log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True) + eps)
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    # Use a minimum variance threshold to avoid division instability on silence
+    _MIN_VARIANCE = 1e-4
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+    # When variance is too low, z-scores become unreliable; clamp them
     z_ref_raw = (log_clean - mu) / (sigma + eps)
     z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
 
@@ -1033,7 +1060,11 @@ def _compute_pipeline_awesome_losses(
     p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
     # Modulation proxy
-    mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    # Edge case: with single frame, no modulation can be computed
+    if z_ref.shape[1] > 1:
+        mod_energy = mx.mean(mx.abs(z_ref[:, 1:] - z_ref[:, :-1]), axis=1, keepdims=True)
+    else:
+        mod_energy = mx.zeros((z_ref.shape[0], 1))
     mod_gate = mx.sigmoid((mod_energy - _AWESOME_MOD_THRESHOLD) / _AWESOME_MOD_WIDTH)
 
     # Energy and SNR boosts (ADDITIVE, not multiplicative)
@@ -1102,10 +1133,16 @@ def _compute_pipeline_awesome_losses(
     instrument_weight = instrument_gate[:, None, None] * (1.0 - mask)  # Only where noise dominant
     music_suppression_loss = mx.mean(mx.abs(out_log) * instrument_weight)
 
-    # 5. Mask saturation penalty: discourage extreme mask values (prevents artifacts)
-    mask_extreme = mx.mean(raw_mask * (1.0 - raw_mask))  # Maximized when mask near 0.5
-    mask_saturation_loss = 1.0 - 4.0 * mask_extreme  # Penalty for being far from 0.5
-    mask_saturation_loss = mx.clip(mask_saturation_loss, 0.0, 1.0)
+    # 5. Mask saturation penalty: encourage confident mask predictions
+    # mask * (1-mask) is an entropy-like term:
+    #   - Minimized at 0 or 1 (confident predictions)
+    #   - Maximized at 0.5 (uncertain predictions)
+    # We PENALIZE uncertainty by using this term directly as the loss.
+    # FIX: Previous implementation inverted this (1.0 - 4.0*entropy), which
+    # rewarded uncertainty. Now we penalize uncertainty directly.
+    mask_entropy = mx.mean(raw_mask * (1.0 - raw_mask))
+    # Scale to [0, 1]: max entropy at mask=0.5 is 0.25, so multiply by 4
+    mask_saturation_loss = 4.0 * mask_entropy
 
     # Total loss
     total_loss = (
