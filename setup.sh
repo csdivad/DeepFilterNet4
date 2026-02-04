@@ -14,6 +14,33 @@ if [[ -x "$ROOT_DIR/scripts/install-hooks.sh" ]]; then
   "$ROOT_DIR/scripts/install-hooks.sh"
 fi
 
+# ------------------------- platform detection ------------------------- #
+PLATFORM_OS="$(uname -s)"
+PLATFORM_ARCH="$(uname -m)"
+
+is_darwin_arm64() {
+  [[ "$PLATFORM_OS" == "Darwin" && "$PLATFORM_ARCH" == "arm64" ]]
+}
+
+warn_mlx_platform() {
+  if ! is_darwin_arm64; then
+    cat >&2 <<'MLXWARN'
+╔═══════════════════════════════════════════════════════════════════════════╗
+║ WARNING: MLX packages require macOS on Apple Silicon (Darwin arm64).      ║
+║ Current platform: OS=$PLATFORM_OS, ARCH=$PLATFORM_ARCH                    ║
+║                                                                           ║
+║ The 'asr-mlx' extra will only install 'openai-whisper'; mlx, mlx-whisper, ║
+║ and mlx-data will be silently skipped due to platform markers.            ║
+║                                                                           ║
+║ Consider using --extras "asr" instead for cross-platform ASR support.     ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+MLXWARN
+    cat >&2 <<EOF
+(Detected: OS=$PLATFORM_OS, ARCH=$PLATFORM_ARCH)
+EOF
+  fi
+}
+
 # ------------------------- defaults ------------------------- #
 PYTHON_BIN="${PYTHON_BIN:-python3.10}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
@@ -28,6 +55,8 @@ CARGO_FLAGS="${CARGO_FLAGS:---workspace --release --all-features}"
 USE_ALL=0
 LD_OVERRIDE=""
 CARGO_INCLUDE_PYDF=0
+DRY_RUN=0
+PRINT_ENV=0
 
 usage() {
   cat <<'EOF'
@@ -50,6 +79,10 @@ Maturin bindings (optional):
   --with-pydf               Build/install pyDF via maturin develop --release -m pyDF/Cargo.toml
   --with-pydf-data          Build/install pyDF-data via maturin develop --release -m pyDF-data/Cargo.toml
   --pydf-data-hdf5-static   Build pyDF-data with --features hdf5-static (implies --with-pydf-data)
+
+Diagnostic:
+  --print-env               Print detected environment and exit (no build)
+  --dry-run                 Show what would be done without executing
 
 General:
   -h, --help                Show this help
@@ -110,6 +143,14 @@ while [[ $# -gt 0 ]]; do
       PYDF_DATA_FEATURES="--features hdf5-static"
       shift 1
       ;;
+    --print-env)
+      PRINT_ENV=1
+      shift 1
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift 1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -127,6 +168,92 @@ if [[ $USE_ALL -eq 1 ]]; then
   USER_EXTRAS+=("dev" "train" "eval")
   BUILD_PYDF=1
   BUILD_PYDF_DATA=1
+fi
+
+# ------------------------- print-env ------------------------- #
+if [[ $PRINT_ENV -eq 1 ]]; then
+  echo "=== DeepFilterNet setup.sh Environment Report ==="
+  echo "Platform:"
+  echo "  OS:       $PLATFORM_OS"
+  echo "  ARCH:     $PLATFORM_ARCH"
+  echo "  MLX OK:   $(is_darwin_arm64 && echo "YES" || echo "NO (MLX packages will be skipped)")"
+  echo ""
+  echo "Python:"
+  echo "  PYTHON_BIN: $PYTHON_BIN"
+  echo "  VENV_DIR:   $VENV_DIR"
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "  Version:    $("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')"
+    echo "  Path:       $(command -v "$PYTHON_BIN")"
+  else
+    echo "  ERROR:      '$PYTHON_BIN' not found!"
+  fi
+  echo ""
+  echo "Cargo:"
+  echo "  FLAGS: $CARGO_FLAGS"
+  if command -v cargo >/dev/null 2>&1; then
+    echo "  cargo: $(cargo --version)"
+    echo "  rustc: $(rustc --version)"
+  else
+    echo "  ERROR: cargo not found!"
+  fi
+  echo ""
+  echo "Extras:"
+  echo "  DEFAULT: ${DEFAULT_EXTRAS[*]}"
+  echo "  USER:    ${USER_EXTRAS[*]:-<none>}"
+  echo ""
+  echo "Build Flags:"
+  echo "  BUILD_PYTHON:    $BUILD_PYTHON"
+  echo "  BUILD_CARGO:     $BUILD_CARGO"
+  echo "  BUILD_PYDF:      $BUILD_PYDF"
+  echo "  BUILD_PYDF_DATA: $BUILD_PYDF_DATA"
+  exit 0
+fi
+
+# ------------------------- dry-run preview ------------------------- #
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "=== DRY RUN MODE - Showing what would be executed ==="
+  echo ""
+  echo "Platform: $PLATFORM_OS / $PLATFORM_ARCH"
+  echo ""
+
+  if [[ $BUILD_PYTHON -eq 1 ]]; then
+    echo "[WOULD] Create/use venv at: $VENV_DIR"
+    echo "[WOULD] Install extras: ${DEFAULT_EXTRAS[*]} ${USER_EXTRAS[*]:-}"
+
+    # Warn about MLX if applicable
+    for extra in "${DEFAULT_EXTRAS[@]}" "${USER_EXTRAS[@]}"; do
+      if [[ "$extra" == "mlx" || "$extra" == "asr-mlx" ]]; then
+        if ! is_darwin_arm64; then
+          echo "[WARN]  MLX packages will be SKIPPED (requires Darwin arm64)"
+        fi
+        break
+      fi
+    done
+  else
+    echo "[SKIP]  Python setup (--no-python)"
+  fi
+  echo ""
+
+  if [[ $BUILD_CARGO -eq 1 ]]; then
+    echo "[WOULD] cargo build $CARGO_FLAGS"
+    if [[ $CARGO_INCLUDE_PYDF -eq 0 ]]; then
+      echo "        (excluding DeepFilterLib, DeepFilterDataLoader)"
+    fi
+  else
+    echo "[SKIP]  Cargo build (--no-cargo)"
+  fi
+  echo ""
+
+  if [[ $BUILD_PYDF -eq 1 ]]; then
+    echo "[WOULD] maturin develop --release -m pyDF/Cargo.toml"
+  fi
+  if [[ $BUILD_PYDF_DATA -eq 1 ]]; then
+    echo "[WOULD] maturin develop --release ${PYDF_DATA_FEATURES:-} -m pyDF-data/Cargo.toml"
+  fi
+
+  echo ""
+  echo "=== END DRY RUN ==="
+  exit 0
 fi
 
 # ------------------------- helpers ------------------------- #
@@ -203,6 +330,14 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
   fi
   mapfile -t uniq_extras < <(dedupe_extras "${all_extras[@]}")
 
+  # Warn if mlx-related extras are used on non-ARM64 Darwin
+  for extra in "${uniq_extras[@]}"; do
+    if [[ "$extra" == "mlx" || "$extra" == "asr-mlx" ]]; then
+      warn_mlx_platform
+      break
+    fi
+  done
+
   extras_str=""
   if [[ ${#uniq_extras[@]} -gt 0 ]]; then
     IFS=',' read -r extras_str <<<"$(printf "%s," "${uniq_extras[@]}" | sed 's/,$//')"
@@ -257,8 +392,13 @@ if [[ $BUILD_PYDF -eq 1 ]]; then
 fi
 
 if [[ $BUILD_PYDF_DATA -eq 1 ]]; then
-  echo "  - Building pyDF-data (maturin develop --release $PYDF_DATA_FEATURES -m pyDF-data/Cargo.toml)"
-  maturin develop --release $PYDF_DATA_FEATURES -m pyDF-data/Cargo.toml
+  pydf_data_args=(--release -m pyDF-data/Cargo.toml)
+  if [[ -n "$PYDF_DATA_FEATURES" ]]; then
+    # shellcheck disable=SC2206
+    pydf_data_args+=($PYDF_DATA_FEATURES)
+  fi
+  echo "  - Building pyDF-data (maturin develop ${pydf_data_args[*]})"
+  maturin develop "${pydf_data_args[@]}"
 fi
 
 echo "==> Done."
