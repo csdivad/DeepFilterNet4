@@ -147,6 +147,24 @@ def _normalize_float(value: Any, *, min_value: float | None = None) -> float:
     raise TypeError("expected float")
 
 
+def _normalize_int_list(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [int(v) for v in value]
+    raise TypeError("expected list of ints")
+
+
+def _normalize_optional_int_list(value: Any) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        if len(value) == 0:
+            return None
+        return [int(v) for v in value]
+    raise TypeError("expected list of ints")
+
+
 # ============================
 # Config dataclasses
 # ============================
@@ -262,6 +280,18 @@ class TrainingConfig:
         normalize=lambda v: _normalize_float(v, min_value=0.0),
         min=0.0,
     )
+    learning_rate_min: float | None = cfg_field(
+        None,
+        help="Minimum learning rate for cosine schedule (None=1% of base)",
+        normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0),
+        none_sentinel=-1.0,
+    )
+    weight_decay: float = cfg_field(
+        0.0,
+        help="Weight decay for AdamW",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
     warmup_epochs: int = cfg_field(5, help="Warmup epochs", normalize=lambda v: _normalize_int(v, min_value=0))
     curriculum_warmup_epochs: int = cfg_field(
         0,
@@ -294,6 +324,12 @@ class TrainingConfig:
         help="Optional RNG seed override (-1 disables override)",
         normalize=lambda v: _normalize_optional_int(v, none_sentinel=-1, min_value=0),
         none_sentinel=-1,
+    )
+    train_config: str | None = cfg_field(
+        None,
+        help="Path to train.py-compatible INI config (optional)",
+        normalize=_normalize_optional_str,
+        none_sentinel="",
     )
 
 
@@ -366,6 +402,12 @@ class ModelConfig:
         choices=["mamba", "gru", "attention"],
         normalize=lambda v: str(v),
     )
+    variant: str = cfg_field(
+        "full",
+        help="Model variant: full | lite",
+        choices=["full", "lite"],
+        normalize=lambda v: str(v),
+    )
 
 
 @dataclass
@@ -393,15 +435,48 @@ class AwesomeLossConfig:
 
 
 @dataclass
+class MultiResSpecLossConfig:
+    factor: float = cfg_field(
+        0.0,
+        help="Multi-res STFT loss weight (0 disables)",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    gamma: float = cfg_field(
+        1.0,
+        help="Magnitude compression exponent",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    f_complex: float | None = cfg_field(
+        None,
+        help="Complex loss weight (None disables)",
+        normalize=lambda v: _normalize_optional_float(v, none_sentinel=-1.0, min_value=0.0),
+        none_sentinel=-1.0,
+    )
+    fft_sizes: list[int] = field(
+        default_factory=lambda: [512, 1024, 2048],
+        metadata={"help": "FFT sizes for multi-res loss", "normalize": _normalize_int_list},
+    )
+    hop_sizes: list[int] | None = cfg_field(
+        None,
+        help="Hop sizes for multi-res loss (None=fft_size//4)",
+        normalize=_normalize_optional_int_list,
+        none_sentinel=[],
+    )
+
+
+@dataclass
 class LossConfig:
     dynamic_loss: str = cfg_field(
         "baseline",
-        help="Dynamic loss: baseline | awesome",
-        choices=["baseline", "awesome"],
+        help="Dynamic loss: baseline | awesome | pipeline_awesome",
+        choices=["baseline", "awesome", "pipeline_awesome"],
         normalize=lambda v: str(v),
-        notes="If not 'awesome', the [loss.awesome] block is ignored.",
+        notes="If not 'awesome' or 'pipeline_awesome', the [loss.awesome] block is ignored.",
     )
     awesome: AwesomeLossConfig = field(default_factory=AwesomeLossConfig)
+    mrstft: MultiResSpecLossConfig = field(default_factory=MultiResSpecLossConfig)
 
 
 @dataclass
@@ -644,6 +719,9 @@ def validate_run_config(cfg: RunConfig) -> None:
     if cfg.vad.eval.mode == "off" and cfg.vad.eval.batches > 0 and cfg.vad.eval.every > 0:
         pass
 
+    if cfg.loss.mrstft.hop_sizes is not None and len(cfg.loss.mrstft.hop_sizes) != len(cfg.loss.mrstft.fft_sizes):
+        raise ValueError("loss.mrstft.hop_sizes must match length of loss.mrstft.fft_sizes")
+
     # Probability checks
     if not (0.0 <= cfg.augmentation.p_reverb <= 1.0):
         raise ValueError("augmentation.p_reverb must be in [0,1]")
@@ -723,6 +801,7 @@ def generate_run_config_example() -> str:
     _emit_section(lines, "model", cfg.model)
     _emit_section(lines, "loss", cfg.loss)
     _emit_section(lines, "loss.awesome", cfg.loss.awesome)
+    _emit_section(lines, "loss.mrstft", cfg.loss.mrstft)
     _emit_section(lines, "vad", cfg.vad)
     _emit_section(lines, "vad.eval", cfg.vad.eval)
     _emit_section(lines, "vad.train", cfg.vad.train)

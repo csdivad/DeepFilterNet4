@@ -21,6 +21,12 @@ Usage:
         --config dataset_config.json \
         --epochs 100
 
+    # Or with a train.py-compatible INI config
+    python -m df_mlx.train_dynamic \
+        --config dataset_config.json \
+        --train-config training_config.ini \
+        --epochs 100
+
 Features:
     - Dynamic on-the-fly mixing (matches original training strategy)
     - Full dataset diversity each epoch
@@ -45,7 +51,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Tuple, cast
+from typing import TYPE_CHECKING, Any, Literal, Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -62,6 +68,11 @@ from df_mlx.run_config import (  # noqa: E402
     set_by_path,
     validate_run_config,
 )
+from df_mlx.train_dynamic_config import apply_train_ini_config  # noqa: E402
+
+if TYPE_CHECKING:
+    from df_mlx.config import ModelParams4
+    from df_mlx.run_config import MultiResSpecLossConfig
 
 # =============================================================================
 # tqdm configuration
@@ -301,6 +312,7 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--noise-list"], "dataset.noise_list", getattr(args, "noise_list", None)),
         (["--rir-list"], "dataset.rir_list", getattr(args, "rir_list", None)),
         (["--config"], "dataset.config", getattr(args, "config", None)),
+        (["--train-config"], "training.train_config", getattr(args, "train_config", None)),
         (["--snr-range"], "dataset.snr_range", getattr(args, "snr_range", None)),
         (["--snr-range-extreme"], "dataset.snr_range_extreme", getattr(args, "snr_range_extreme", None)),
         (["--snr-range-very-low"], "dataset.snr_range_very_low", getattr(args, "snr_range_very_low", None)),
@@ -319,6 +331,8 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--epochs"], "training.epochs", getattr(args, "epochs", None)),
         (["--batch-size"], "training.batch_size", getattr(args, "batch_size", None)),
         (["--learning-rate"], "training.learning_rate", getattr(args, "learning_rate", None)),
+        (["--learning-rate-min"], "training.learning_rate_min", getattr(args, "learning_rate_min", None)),
+        (["--weight-decay"], "training.weight_decay", getattr(args, "weight_decay", None)),
         (["--warmup-epochs"], "training.warmup_epochs", getattr(args, "warmup_epochs", None)),
         (["--patience"], "training.patience", getattr(args, "patience", None)),
         (
@@ -343,10 +357,16 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--resume-data"], "checkpoint.resume_data", getattr(args, "resume_data", None)),
         (["--check-chkpts"], "checkpoint.check_chkpts", getattr(args, "check_chkpts", None)),
         (["--backbone", "--backbone-type"], "model.backbone_type", getattr(args, "backbone_type", None)),
+        (["--model-variant"], "model.variant", getattr(args, "model_variant", None)),
         (["--dynamic-loss"], "loss.dynamic_loss", getattr(args, "dynamic_loss", None)),
         (["--awesome-loss-weight"], "loss.awesome.loss_weight", getattr(args, "awesome_loss_weight", None)),
         (["--awesome-mask-sharpness"], "loss.awesome.mask_sharpness", getattr(args, "awesome_mask_sharpness", None)),
         (["--awesome-warmup-steps"], "loss.awesome.warmup_steps", getattr(args, "awesome_warmup_steps", None)),
+        (["--mrstft-factor"], "loss.mrstft.factor", getattr(args, "mrstft_factor", None)),
+        (["--mrstft-gamma"], "loss.mrstft.gamma", getattr(args, "mrstft_gamma", None)),
+        (["--mrstft-f-complex"], "loss.mrstft.f_complex", getattr(args, "mrstft_f_complex", None)),
+        (["--mrstft-fft-sizes"], "loss.mrstft.fft_sizes", getattr(args, "mrstft_fft_sizes", None)),
+        (["--mrstft-hop-sizes"], "loss.mrstft.hop_sizes", getattr(args, "mrstft_hop_sizes", None)),
         (["--vad-loss-weight"], "vad.loss_weight", getattr(args, "vad_loss_weight", None)),
         (["--vad-threshold"], "vad.threshold", getattr(args, "vad_threshold", None)),
         (["--vad-margin"], "vad.margin", getattr(args, "vad_margin", None)),
@@ -424,6 +444,18 @@ def _build_speech_band_mask(
             f"Speech band [{band_low_hz}, {band_high_hz}] Hz has no bins for " f"n_freqs={n_freqs}, sr={sample_rate}."
         )
     return mx.array(mask), band_bins
+
+
+def _sync_model_config_with_dataset(model_cfg: Any, dataset_cfg: Any) -> None:
+    """Align MLX model config with dataset audio parameters."""
+    model_cfg.audio.sr = dataset_cfg.sample_rate
+    model_cfg.audio.fft_size = dataset_cfg.fft_size
+    model_cfg.audio.hop_size = dataset_cfg.hop_size
+    n_freqs = dataset_cfg.fft_size // 2 + 1
+    model_cfg.audio.nb_freqs = n_freqs
+    model_cfg.audio.n_freqs = n_freqs
+    model_cfg.erb.nb_erb = dataset_cfg.nb_erb
+    model_cfg.df.nb_df = dataset_cfg.nb_df
 
 
 def _compute_vad_probs(
@@ -2209,6 +2241,8 @@ def train(
     epochs: int = 100,
     batch_size: int = 8,
     learning_rate: float = 1e-4,
+    learning_rate_min: float | None = None,
+    weight_decay: float = 0.0,
     checkpoint_dir: str = "checkpoints",
     resume_from: str | None = None,
     resume_data_from: str | None = None,
@@ -2229,6 +2263,7 @@ def train(
     grad_accumulation_steps: int = 1,
     eval_frequency: int = 10,
     backbone_type: Literal["mamba", "gru", "attention"] = "mamba",
+    model_variant: Literal["full", "lite"] = "full",
     verbose: bool = False,
     snr_range: Tuple[float, float] | None = None,
     snr_range_extreme: Tuple[float, float] | None = None,
@@ -2275,6 +2310,10 @@ def train(
     debug_numerics_dump_arrays: bool = False,
     debug_numerics_max_dumps: int = 5,
     nan_skip_batch: bool = False,
+    model_config: ModelParams4 | None = None,
+    dataset_overrides: dict[str, Any] | None = None,
+    mrstft_config: MultiResSpecLossConfig | None = None,
+    train_config_path: str | None = None,
 ) -> None:
     """Train DfNet4 model with dynamic on-the-fly mixing.
 
@@ -2287,6 +2326,8 @@ def train(
         epochs: Number of training epochs
         batch_size: Batch size
         learning_rate: Initial learning rate
+        learning_rate_min: Minimum learning rate for cosine schedule
+        weight_decay: Weight decay for AdamW optimizer
         checkpoint_dir: Directory for checkpoints
         resume_from: Optional model checkpoint to resume from
         resume_data_from: Optional data checkpoint for resuming interrupted epoch
@@ -2306,6 +2347,7 @@ def train(
         use_fp16: Use FP16 (half-precision) training. None=auto-detect from hardware
         grad_accumulation_steps: Number of steps to accumulate gradients (effective batch = batch_size * grad_accumulation_steps)
         eval_frequency: Evaluate loss every N batches (reduces synchronization overhead)
+        model_variant: Model size variant ("full" or "lite")
         verbose: Enable detailed timing and diagnostic output
         snr_range: Optional override for base SNR range (dB)
         snr_range_extreme: Optional override for extreme SNR range (dB)
@@ -2353,6 +2395,10 @@ def train(
         debug_numerics_dump_arrays: Save small tensor slices alongside JSON dumps
         debug_numerics_max_dumps: Maximum number of non-finite dumps to write
         nan_skip_batch: Skip optimizer update when loss/grads are non-finite (debug-friendly)
+        model_config: Optional MLX model config overrides (ModelParams4)
+        dataset_overrides: Optional dataset config overrides (applied before CLI overrides)
+        mrstft_config: Optional multi-res STFT loss config
+        train_config_path: Optional path to INI train config (stored in metadata)
     """
     from df_mlx.config import get_default_config
     from df_mlx.dynamic_dataset import (
@@ -2365,7 +2411,7 @@ def train(
     )
     from df_mlx.hardware import HardwareConfig
     from df_mlx.model import count_parameters, init_model
-    from df_mlx.train import WarmupCosineSchedule, spectral_loss
+    from df_mlx.train import MultiResolutionSTFTLoss, WarmupCosineSchedule, spectral_loss
 
     print("=" * 60)
     print("MLX DeepFilterNet4 Training - Dynamic On-the-Fly Mixing")
@@ -2413,6 +2459,14 @@ def train(
             p_clipping=p_clipping,
             num_workers=num_workers,
         )
+
+    # Apply train-config dataset overrides before CLI/runtime overrides
+    if dataset_overrides:
+        for key, value in dataset_overrides.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+            else:
+                print(f"Warning: train-config dataset override ignored: {key}")
 
     if snr_range is not None:
         config.snr_range = snr_range
@@ -2466,6 +2520,29 @@ def train(
 
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
+    mrstft_cfg = mrstft_config
+    use_mrstft_loss = mrstft_cfg is not None and mrstft_cfg.factor > 0
+    mrstft_loss_fn = None
+    mrstft_hop_sizes = None
+    mrstft_istft = None
+    mrstft_target_len = None
+    if use_mrstft_loss:
+        if not mrstft_cfg.fft_sizes:
+            print("Warning: mrstft enabled but fft_sizes is empty; disabling MRSTFT loss.")
+            use_mrstft_loss = False
+        else:
+            from df_mlx.ops import istft
+
+            mrstft_istft = istft
+            mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
+            mrstft_loss_fn = MultiResolutionSTFTLoss(
+                fft_sizes=tuple(mrstft_cfg.fft_sizes),
+                hop_sizes=mrstft_hop_sizes,
+                gamma=mrstft_cfg.gamma,
+                factor=mrstft_cfg.factor,
+                f_complex=mrstft_cfg.f_complex,
+            )
+            mrstft_target_len = int(round(config.segment_length * config.sample_rate))
 
     if vad_eval_mode == "auto":
         vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
@@ -2501,13 +2578,16 @@ def train(
         vad_band_mask = mx.array(0.0)
         vad_band_bins = 1.0
 
+    min_lr = learning_rate_min if learning_rate_min is not None else learning_rate * 0.01
+
     # Print file counts after dataset init (so cache files are included)
     print(f"Speech files:   {len(config.speech_files):,}")
     print(f"Noise files:    {len(config.noise_files):,}")
     print(f"RIR files:      {len(config.rir_files):,}")
     print(f"Epochs:         {epochs}")
     print(f"Batch size:     {batch_size}")
-    print(f"Learning rate:  {learning_rate}")
+    print(f"Learning rate:  {learning_rate} (min {min_lr})")
+    print(f"Weight decay:   {weight_decay}")
     print(f"Checkpoint dir: {checkpoint_dir}")
     print(f"P(reverb):      {config.p_reverb}")
     print(f"P(clipping):    {config.p_clipping}")
@@ -2516,7 +2596,15 @@ def train(
     print(f"Speech gain:    {config.speech_gain_range} dB")
     print(f"Noise gain:     {config.noise_gain_range} dB")
     print(f"Dynamic loss:   {dynamic_loss}")
-    if use_awesome_loss:
+    if use_mrstft_loss and mrstft_cfg is not None:
+        hop_sizes_display = mrstft_cfg.hop_sizes if mrstft_cfg.hop_sizes is not None else "auto"
+        print(
+            "MRSTFT loss:   "
+            f"factor={mrstft_cfg.factor}, gamma={mrstft_cfg.gamma}, "
+            f"f_complex={mrstft_cfg.f_complex}, fft_sizes={mrstft_cfg.fft_sizes}, "
+            f"hop_sizes={hop_sizes_display}"
+        )
+    if use_awesome_loss or use_pipeline_awesome_loss:
         print(
             f"  Awesome loss: weight={awesome_loss_weight}, mask_sharpness={awesome_mask_sharpness}, "
             f"warmup_steps={awesome_warmup_steps}, proxy={'on' if vad_proxy_enabled else 'off'}"
@@ -2548,11 +2636,17 @@ def train(
 
     train_config = {
         **config.__dict__,
+        "train_config_path": train_config_path,
         "dynamic_loss": dynamic_loss,
         "awesome_loss_weight": awesome_loss_weight,
         "awesome_mask_sharpness": awesome_mask_sharpness,
         "awesome_warmup_steps": awesome_warmup_steps,
         "vad_proxy_enabled": vad_proxy_enabled,
+        "mrstft_factor": mrstft_cfg.factor if mrstft_cfg is not None else 0.0,
+        "mrstft_gamma": mrstft_cfg.gamma if mrstft_cfg is not None else 1.0,
+        "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
+        "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
+        "mrstft_hop_sizes": list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
         "vad_margin": vad_margin,
@@ -2576,6 +2670,9 @@ def train(
         "max_train_batches": max_train_batches,
         "max_valid_batches": max_valid_batches,
         "seed": seed,
+        "learning_rate_min": learning_rate_min,
+        "weight_decay": weight_decay,
+        "model_variant": model_variant,
         "debug_numerics": debug_numerics,
         "debug_numerics_fail_fast": debug_numerics_fail_fast,
         "debug_numerics_every": debug_numerics_every,
@@ -2702,10 +2799,12 @@ def train(
 
     # Initialize model with config
     print("\nInitializing model...")
-    model_config = get_default_config()
+    if model_config is None:
+        model_config = get_default_config()
+    _sync_model_config_with_dataset(model_config, config)
     model_config.backbone.backbone_type = backbone_type  # type: ignore[assignment]
-    print(f"  Backbone type: {backbone_type}")
-    model = init_model(config=model_config)
+    print(f"  Backbone type: {backbone_type} | Variant: {model_variant}")
+    model = init_model(config=model_config, variant=model_variant)
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
 
@@ -2715,19 +2814,19 @@ def train(
     total_steps = epochs * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
-    awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if use_awesome_loss else 0
+    awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
         warmup_steps=warmup_steps,
         total_steps=total_steps,
-        min_lr=learning_rate * 0.01,
+        min_lr=min_lr,
     )
 
     # Optimizer - create before loading checkpoint to allow optimizer state restoration
     # Use fixed learning rate (schedule applied manually before each step)
     # This is required because schedule callbacks can't run inside mx.compile()
-    optimizer = optim.AdamW(learning_rate=learning_rate)
+    optimizer = optim.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
 
     # Resume from checkpoint if provided (AFTER optimizer creation)
     start_epoch = 0
@@ -2823,6 +2922,22 @@ def train(
         out = model(noisy_spec, feat_erb, feat_spec)
         spec_loss = spectral_loss(out, target_spec)
         total_loss = spec_loss
+
+        if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+            clean_wav = mrstft_istft(
+                target_spec,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                length=mrstft_target_len,
+            )
+            out_wav = mrstft_istft(
+                out,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                length=mrstft_target_len,
+            )
+            mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
+            total_loss = total_loss + mrstft_loss
 
         if use_awesome_loss:
             awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
@@ -2935,6 +3050,21 @@ def train(
         debugger.check("model.out_imag", out[1], debug_ctx)
         spec_loss = spectral_loss(out, (clean_real, clean_imag))
         debugger.check("spec_loss", spec_loss, debug_ctx)
+        if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+            clean_wav = mrstft_istft(
+                (clean_real, clean_imag),
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                length=mrstft_target_len,
+            )
+            out_wav = mrstft_istft(
+                out,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                length=mrstft_target_len,
+            )
+            mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
+            debugger.check("mrstft_loss", mrstft_loss, debug_ctx)
         if use_awesome_loss:
             _compute_awesome_losses(
                 noisy_real,
@@ -3085,6 +3215,7 @@ def train(
 
         valid_loss = 0.0
         valid_spec_loss = 0.0
+        valid_mrstft_loss = 0.0
         valid_vad_loss = 0.0
         valid_speech_loss = 0.0
         valid_awesome_loss = 0.0
@@ -3179,6 +3310,21 @@ def train(
                 debugger.check("model.out_real", out[0], debug_ctx)
                 debugger.check("model.out_imag", out[1], debug_ctx)
             spec_loss = spectral_loss(out, target_spec)
+            mrstft_loss = mx.array(0.0)
+            if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+                clean_wav = mrstft_istft(
+                    target_spec,
+                    n_fft=config.fft_size,
+                    hop_length=config.hop_size,
+                    length=mrstft_target_len,
+                )
+                out_wav = mrstft_istft(
+                    out,
+                    n_fft=config.fft_size,
+                    hop_length=config.hop_size,
+                    length=mrstft_target_len,
+                )
+                mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
 
             awesome_loss = mx.array(0.0)
             awesome_speech = mx.array(0.0)
@@ -3330,6 +3476,8 @@ def train(
                 awesome_weight_val = awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
 
             loss = spec_loss
+            if use_mrstft_loss:
+                loss = loss + mrstft_loss
             if use_awesome_loss or use_pipeline_awesome_loss:
                 loss = loss + awesome_weight_val * awesome_loss
             if use_vad_loss:
@@ -3339,6 +3487,7 @@ def train(
 
             loss_val = float(loss)
             spec_loss_val = float(spec_loss)
+            mrstft_loss_val = float(mrstft_loss)
             vad_loss_val = float(vad_loss)
             speech_loss_val = float(speech_loss)
             awesome_loss_val = float(awesome_loss)
@@ -3350,6 +3499,7 @@ def train(
 
             valid_loss += loss_val
             valid_spec_loss += spec_loss_val
+            valid_mrstft_loss += mrstft_loss_val
             valid_vad_loss += vad_loss_val
             valid_speech_loss += speech_loss_val
             valid_awesome_loss += awesome_loss_val
@@ -3449,6 +3599,7 @@ def train(
 
         if num_valid_batches > 0:
             avg_spec = valid_spec_loss / num_valid_batches
+            avg_mrstft = valid_mrstft_loss / num_valid_batches
             avg_vad = valid_vad_loss / num_valid_batches
             avg_speech = valid_speech_loss / num_valid_batches
             avg_awesome = valid_awesome_loss / num_valid_batches
@@ -3461,16 +3612,17 @@ def train(
             avg_p_out = valid_p_out / num_valid_batches if use_vad_loss else 0.0
             avg_gate = valid_gate_pct / num_valid_batches if use_vad_loss else 0.0
             avg_sisdr = valid_sisdr / num_valid_batches if eval_sisdr else None
-            avg_mask_mean = valid_mask_mean / num_valid_batches if use_awesome_loss else 0.0
-            avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_loss else 0.0
-            avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_loss else 0.0
-            avg_proxy = valid_proxy_mean / num_valid_batches if use_awesome_loss else 0.0
-            avg_speech_ratio = valid_speech_ratio / num_valid_batches if use_awesome_loss else 0.0
-            avg_music_gate = valid_music_gate / num_valid_batches if use_awesome_loss else 0.0
-            avg_musicness = valid_musicness / num_valid_batches if use_awesome_loss else 0.0
-            avg_mod = valid_mod_energy / num_valid_batches if use_awesome_loss else 0.0
-            avg_energy_boost = valid_energy_boost / num_valid_batches if use_awesome_loss else 0.0
-            avg_snr_boost = valid_snr_boost / num_valid_batches if use_awesome_loss else 0.0
+            use_awesome_metrics = use_awesome_loss or use_pipeline_awesome_loss
+            avg_mask_mean = valid_mask_mean / num_valid_batches if use_awesome_metrics else 0.0
+            avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_metrics else 0.0
+            avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_metrics else 0.0
+            avg_proxy = valid_proxy_mean / num_valid_batches if use_awesome_metrics else 0.0
+            avg_speech_ratio = valid_speech_ratio / num_valid_batches if use_awesome_metrics else 0.0
+            avg_music_gate = valid_music_gate / num_valid_batches if use_awesome_metrics else 0.0
+            avg_musicness = valid_musicness / num_valid_batches if use_awesome_metrics else 0.0
+            avg_mod = valid_mod_energy / num_valid_batches if use_awesome_metrics else 0.0
+            avg_energy_boost = valid_energy_boost / num_valid_batches if use_awesome_metrics else 0.0
+            avg_snr_boost = valid_snr_boost / num_valid_batches if use_awesome_metrics else 0.0
             avg_vad_eval_p_ref = (
                 vad_eval_p_ref / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
             )
@@ -3483,11 +3635,21 @@ def train(
             vad_eval_time = vad_eval_seconds
             vad_eval_clips_total = vad_eval_clips
 
-            if use_vad_loss or eval_sisdr or use_awesome_loss or use_vad_train_reg or do_vad_eval:
+            if (
+                use_vad_loss
+                or eval_sisdr
+                or use_awesome_loss
+                or use_pipeline_awesome_loss
+                or use_vad_train_reg
+                or do_vad_eval
+                or use_mrstft_loss
+            ):
                 extras = [f"spec={avg_spec:.4f}", f"resid={avg_residual:.4f}"]
+                if use_mrstft_loss:
+                    extras.append(f"mrstft={avg_mrstft:.4f}")
                 if use_vad_loss:
                     extras.extend([f"vad={avg_vad:.4f}", f"speech={avg_speech:.4f}"])
-                if use_awesome_loss:
+                if use_awesome_metrics:
                     extras.extend(
                         [
                             f"awesome={avg_awesome:.4f}",
@@ -3502,7 +3664,7 @@ def train(
                     extras.append(f"p_ref={avg_p_ref:.2f}")
                     extras.append(f"p_out={avg_p_out:.2f}")
                     extras.append(f"gate={avg_gate:.0f}%")
-                if use_awesome_loss:
+                if use_awesome_metrics:
                     extras.extend(
                         [
                             f"mask={avg_mask_mean:.2f}",
@@ -3595,6 +3757,7 @@ def train(
         model.train()
         train_loss = 0.0
         train_spec_loss = 0.0
+        train_mrstft_loss = 0.0
         train_vad_loss = 0.0
         train_speech_loss = 0.0
         train_awesome_loss = 0.0
@@ -3735,7 +3898,7 @@ def train(
             vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
             speech_weight_mx = mx.array(speech_weight, dtype=mx.float32)
             awesome_frac = 1.0
-            if use_awesome_loss and awesome_warmup_steps > 0:
+            if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_frac = min(1.0, global_step / max(awesome_warmup_steps, 1))
             awesome_weight = awesome_loss_weight * awesome_frac
             awesome_weight_mx = mx.array(awesome_weight, dtype=mx.float32)
@@ -3886,6 +4049,7 @@ def train(
 
                 # Defaults for logging
                 spec_loss_val = loss_val
+                mrstft_loss_val = 0.0
                 vad_loss_val = 0.0
                 speech_loss_val = 0.0
                 p_ref_mean = 0.0
@@ -3907,7 +4071,13 @@ def train(
                 snr_boost_mean = 0.0
                 vad_reg_loss_val = 0.0
 
-                if use_vad_loss or use_awesome_loss or use_vad_train_reg:
+                if (
+                    use_vad_loss
+                    or use_awesome_loss
+                    or use_pipeline_awesome_loss
+                    or use_vad_train_reg
+                    or use_mrstft_loss
+                ):
                     # Extra forward pass for component logging (only on sync steps)
                     out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
                     if debugger is not None:
@@ -3916,6 +4086,21 @@ def train(
                     spec_loss = spectral_loss(out, (clean_real, clean_imag))
                     spec_loss_val = float(spec_loss)
                     train_spec_loss += spec_loss_val * eval_frequency
+                    if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
+                        clean_wav = mrstft_istft(
+                            (clean_real, clean_imag),
+                            n_fft=config.fft_size,
+                            hop_length=config.hop_size,
+                            length=mrstft_target_len,
+                        )
+                        out_wav = mrstft_istft(
+                            out,
+                            n_fft=config.fft_size,
+                            hop_length=config.hop_size,
+                            length=mrstft_target_len,
+                        )
+                        mrstft_loss_val = float(mrstft_loss_fn(out_wav, clean_wav))
+                        train_mrstft_loss += mrstft_loss_val * eval_frequency
 
                 if use_vad_loss:
                     vad_loss, p_ref, p_out, gate = _compute_vad_loss(
@@ -4165,6 +4350,7 @@ def train(
                             if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
                             else f"{loss_val:.4f}"
                         ),
+                        mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         awesome=(
@@ -4245,6 +4431,7 @@ def train(
 
         avg_train_loss = train_loss / max(num_train_batches, 1)
         avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
+        avg_train_mrstft_loss = train_mrstft_loss / max(num_train_batches, 1)
         avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
         avg_train_speech_loss = train_speech_loss / max(num_train_batches, 1)
         avg_train_awesome_loss = train_awesome_loss / max(num_train_batches, 1)
@@ -4340,8 +4527,10 @@ def train(
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
         loss_summary = ""
-        if use_vad_loss or use_awesome_loss or use_vad_train_reg:
+        if use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg or use_mrstft_loss:
             loss_parts = [f"Spec: {avg_train_spec_loss:.4f}"]
+            if use_mrstft_loss:
+                loss_parts.append(f"MRSTFT: {avg_train_mrstft_loss:.4f}")
             if use_vad_loss:
                 loss_parts.extend(
                     [
@@ -4376,7 +4565,7 @@ def train(
                 f"  VAD stats: p_ref={avg_train_p_ref:.2f} | "
                 f"p_out={avg_train_p_out:.2f} | gate={avg_train_gate:.0f}%"
             )
-        if use_awesome_loss and verbose:
+        if (use_awesome_loss or use_pipeline_awesome_loss) and verbose:
             print(
                 "  Awesome stats: "
                 f"mask={avg_train_mask_mean:.2f} (hi {avg_train_mask_high:.0f}%, lo {avg_train_mask_low:.0f}%) | "
@@ -4386,7 +4575,7 @@ def train(
             )
         if debug_numerics:
             parts = []
-            if use_awesome_loss and num_debug_logs > 0:
+            if (use_awesome_loss or use_pipeline_awesome_loss) and num_debug_logs > 0:
                 avg_mask_clip = train_mask_clip_rate / num_debug_logs
                 avg_eps_clean = train_eps_clean_rate / num_debug_logs
                 avg_eps_noise = train_eps_noise_rate / num_debug_logs
@@ -4517,7 +4706,8 @@ def main():
         description=(
             "Train DfNet4 with dynamic on-the-fly mixing. "
             "--config refers to the dataset/mixer JSON config, "
-            "while --run-config refers to CLI/runtime settings (TOML)."
+            "--train-config is the train.py-style INI config, "
+            "and --run-config refers to CLI/runtime settings (TOML)."
         )
     )
 
@@ -4553,6 +4743,11 @@ def main():
         help="Path to run-config TOML file (CLI/runtime settings)",
     )
     parser.add_argument(
+        "--train-config",
+        type=str,
+        help="Path to train.py-compatible INI config (model + training settings)",
+    )
+    parser.add_argument(
         "--print-run-config",
         action="store_true",
         help="Print a commented run-config TOML example and exit",
@@ -4576,6 +4771,18 @@ def main():
         type=float,
         default=1e-4,
         help="Initial learning rate",
+    )
+    parser.add_argument(
+        "--learning-rate-min",
+        type=float,
+        default=None,
+        help="Minimum learning rate for cosine schedule (defaults to 1% of base)",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for AdamW",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -4717,6 +4924,13 @@ def main():
         help="Backbone type: 'mamba' (parallel scan SSM), 'gru' (recurrent), or 'attention' (fastest backward)",
     )
     parser.add_argument(
+        "--model-variant",
+        type=str,
+        choices=["full", "lite"],
+        default="full",
+        help="Model variant: 'full' or 'lite'",
+    )
+    parser.add_argument(
         "--snr-range",
         type=float,
         nargs=2,
@@ -4797,6 +5011,38 @@ def main():
         type=int,
         default=0,
         help="Warmup steps for ramping awesome loss weight",
+    )
+    parser.add_argument(
+        "--mrstft-factor",
+        type=float,
+        default=None,
+        help="Multi-res STFT loss weight (0 disables)",
+    )
+    parser.add_argument(
+        "--mrstft-gamma",
+        type=float,
+        default=None,
+        help="Multi-res STFT magnitude compression exponent",
+    )
+    parser.add_argument(
+        "--mrstft-f-complex",
+        type=float,
+        default=None,
+        help="Multi-res STFT complex loss weight (None disables)",
+    )
+    parser.add_argument(
+        "--mrstft-fft-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Multi-res STFT FFT sizes (e.g., --mrstft-fft-sizes 512 1024 2048)",
+    )
+    parser.add_argument(
+        "--mrstft-hop-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Multi-res STFT hop sizes (defaults to fft_size//4)",
     )
     parser.add_argument(
         "--no-vad-proxy",
@@ -5000,8 +5246,29 @@ def main():
     run_cfg = RunConfig()
     if args.run_config:
         run_cfg = load_run_config(args.run_config, base=run_cfg)
+    train_config_path = args.train_config or run_cfg.training.train_config
+    model_cfg = None
+    dataset_overrides: dict[str, Any] = {}
+    ini_warnings: list[str] = []
+    if train_config_path:
+        from df_mlx.config import get_default_config
+
+        model_cfg = get_default_config()
+        ini_overrides = apply_train_ini_config(train_config_path, run_cfg, model_cfg)
+        dataset_overrides = ini_overrides.dataset_overrides
+        ini_warnings = ini_overrides.warnings
     _apply_cli_overrides(run_cfg, args, sys.argv[1:])
     validate_run_config(run_cfg)
+    if ini_warnings:
+        print("Train-config warnings:")
+        for warning in ini_warnings:
+            print(f"  - {warning}")
+    if model_cfg is None:
+        from df_mlx.config import get_default_config
+
+        model_cfg = get_default_config()
+    # Ensure backbone override from CLI/run-config wins
+    model_cfg.backbone.backbone_type = run_cfg.model.backbone_type  # type: ignore[assignment]
 
     def _resolve_resume(resume_setting: bool | str, checkpoint_dir: str, label: str) -> str | None:
         if not resume_setting:
@@ -5041,6 +5308,8 @@ def main():
         epochs=run_cfg.training.epochs,
         batch_size=run_cfg.training.batch_size,
         learning_rate=run_cfg.training.learning_rate,
+        learning_rate_min=run_cfg.training.learning_rate_min,
+        weight_decay=run_cfg.training.weight_decay,
         checkpoint_dir=run_cfg.checkpoint.checkpoint_dir,
         resume_from=resume_from,
         resume_data_from=resume_data_from,
@@ -5061,6 +5330,7 @@ def main():
         grad_accumulation_steps=run_cfg.training.grad_accumulation_steps,
         eval_frequency=run_cfg.training.eval_frequency,
         backbone_type=cast(Literal["mamba", "gru", "attention"], run_cfg.model.backbone_type),
+        model_variant=cast(Literal["full", "lite"], run_cfg.model.variant),
         verbose=run_cfg.debug.verbose,
         snr_range=run_cfg.dataset.snr_range,
         snr_range_extreme=run_cfg.dataset.snr_range_extreme,
@@ -5107,6 +5377,10 @@ def main():
         debug_numerics_dump_arrays=run_cfg.debug.debug_numerics_dump_arrays,
         debug_numerics_max_dumps=run_cfg.debug.debug_numerics_max_dumps,
         nan_skip_batch=run_cfg.debug.nan_skip_batch,
+        model_config=model_cfg,
+        dataset_overrides=dataset_overrides,
+        mrstft_config=run_cfg.loss.mrstft,
+        train_config_path=train_config_path,
     )
 
 

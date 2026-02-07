@@ -41,7 +41,7 @@ asr = ["openai-whisper"]
 mlx = ["mlx", "mlx-whisper", "mlx-data"]
 # Combined ASR with MLX optimization
 asr-mlx = ["openai-whisper", "mlx", "mlx-whisper", "mlx-data"]
-#dev = [ "black", "isort", "pytest" ]
+dev = ["pytest>=9,<10", "matplotlib>=3.8,<4"]
 
 [project.scripts]
 deepFilter = "df.enhance:run"
@@ -92,6 +92,8 @@ mlx-data = { version = ">=0.2.0", optional = true, markers ="sys_platform == 'da
 
 [tool.poetry.group.dev.dependencies]
 poethepoet = "^0.26"
+pytest = "^9.0"
+matplotlib = "^3.8"
 
 [tool.poe.tasks]
 install-torch-cuda121 = "pip install torch==2.9.1+cu121 torchaudio==2.9.1+cu121 --extra-index-url https://download.pytorch.org/whl/cu121"

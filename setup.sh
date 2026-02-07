@@ -44,7 +44,7 @@ EOF
 # ------------------------- defaults ------------------------- #
 PYTHON_BIN="${PYTHON_BIN:-python3.10}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
-DEFAULT_EXTRAS=("asr-mlx")
+DEFAULT_EXTRAS=("asr-mlx" "train" "eval")
 USER_EXTRAS=()
 BUILD_PYTHON=1
 BUILD_CARGO=1

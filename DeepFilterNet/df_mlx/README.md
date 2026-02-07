@@ -106,6 +106,29 @@ python -m df_mlx.train_dynamic \
     --config ./file_lists/config.json
 ```
 
+#### Train-config (train.py-compatible INI)
+
+`train_dynamic` also accepts a train.py-style `config.ini` and maps supported
+sections to MLX training + model settings. Precedence: defaults < train-config
+< run-config < explicit CLI flags.
+
+Example template:
+`DeepFilterNet/df_mlx/configs/train.ini`
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --train-config /path/to/config.ini
+```
+
+Supported sections:
+- `[df]`, `[train]`, `[optim]`, `[distortion]`, `[deepfilternet4]`
+- `[loss]` (multi_res_stft_* keys)
+- `[MultiResSpecLoss]`
+
+Unsupported sections (e.g. `[ASRLoss]`, `[GANLoss]`) are ignored with warnings.
+Use `df/train.py` for ASR loss or `df_mlx/train_gan.py` for adversarial training.
+
 #### Awesome dynamic loss (speech-preserving)
 
 Enable the speech-preserving contrastive loss and cheap VAD proxy gating:
@@ -139,6 +162,21 @@ Optional VAD controls (all optional; defaults are safe):
 
 # Disable proxy gating if needed
 --no-vad-proxy
+```
+
+#### Multi-res STFT loss (speech clarity)
+
+Enable the time-domain multi-resolution STFT loss (analogous to PyTorch
+`MultiResSpecLoss`) to improve speech detail:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --train-config /path/to/config.ini \
+    --mrstft-factor 1.0 \
+    --mrstft-gamma 1.0 \
+    --mrstft-f-complex 0.5 \
+    --mrstft-fft-sizes 512 1024 2048
 ```
 
 #### Numeric debug mode (NaN/inf diagnosis)
