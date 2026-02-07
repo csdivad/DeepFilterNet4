@@ -121,6 +121,17 @@ python -m df_mlx.train_dynamic \
     --train-config /path/to/config.ini
 ```
 
+Example using the repo template:
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config /path/to/dataset/config.json \
+    --train-config DeepFilterNet/df_mlx/configs/train.ini \
+    --checkpoint-dir /path/to/checkpoints \
+    --dynamic-loss pipeline_awesome \
+    --epochs 100
+```
+
 Supported sections:
 - `[df]`, `[train]`, `[optim]`, `[distortion]`, `[deepfilternet4]`
 - `[loss]` (multi_res_stft_* keys)

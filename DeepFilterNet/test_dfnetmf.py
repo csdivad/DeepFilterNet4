@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ from typing import Tuple
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 
 def get_erb_filterbanks(
@@ -51,6 +53,19 @@ def get_erb_filterbanks(
         nb_bands=nb_erb,
     )
     return erb_fb, erb_inv
+
+
+@pytest.fixture
+def audio_path() -> str:
+    """Provide an audio path for DFNetMF integration test."""
+    env_path = os.getenv("DFNETMF_AUDIO_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+    repo_root = Path(__file__).resolve().parents[1]
+    fallback = repo_root / "assets" / "noisy_snr0.wav"
+    if fallback.exists():
+        return str(fallback)
+    pytest.skip("No audio file available for DFNetMF integration test.")
 
 
 def test_basic_forward():
@@ -128,7 +143,7 @@ def test_basic_forward():
     assert lsnr.shape == (batch_size, time_frames, 1), f"LSNR shape unexpected: {lsnr.shape}"
 
     print("\n✅ Basic forward pass test PASSED")
-    return True
+    assert True
 
 
 def test_mvdr_method():
@@ -161,7 +176,7 @@ def test_mvdr_method():
 
     print(f"Output shape: {spec_out.shape}")
     print("\n✅ MVDR method test PASSED")
-    return True
+    assert True
 
 
 def compare_mf_methods():
@@ -370,19 +385,19 @@ def test_with_audio(audio_path: str):
     audio_mx = mx.expand_dims(audio_mx, axis=0)  # Add batch dim
 
     # STFT
-    spec = stft(audio_mx, p.fft_size, p.hop_size)
-    spec_shape = (str(spec[0].shape) + " " + str(spec[1].shape)) if isinstance(spec, tuple) else str(spec.shape)
-    print(f"Spectrogram shape: {spec_shape}")
+    spec_real, spec_imag = stft(audio_mx, p.fft_size, p.hop_size)
+    spec = mx.stack([spec_real, spec_imag], axis=-1)
+    print(f"Spectrogram shape: {spec.shape}")
 
     # Create features (simplified - in practice these come from proper feature extraction)
     # ERB features: magnitude in ERB bands
-    spec_mag = mx.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2)  # type: ignore
-    feat_erb = mx.matmul(spec_mag, mx.transpose(erb_fb))  # [B, T, E]
+    spec_mag = mx.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2)
+    feat_erb = mx.matmul(spec_mag, erb_fb)  # [B, T, E]
     feat_erb = mx.expand_dims(feat_erb, axis=-1)  # [B, T, E, 1]
     feat_erb = mx.log(feat_erb + 1e-8)  # Log scale
 
     # DF features: low-freq complex spec
-    feat_spec = spec[:, :, : p.nb_df, :]  # type: ignore
+    feat_spec = spec[:, :, : p.nb_df, :]
 
     print(f"Feature shapes: erb={feat_erb.shape}, spec={feat_spec.shape}")
 
@@ -411,7 +426,7 @@ def test_with_audio(audio_path: str):
     print(f"\nSaved output to: {output_path}")
 
     print("\n✅ Audio processing test PASSED")
-    return True
+    assert True
 
 
 def print_suitability_guide():
