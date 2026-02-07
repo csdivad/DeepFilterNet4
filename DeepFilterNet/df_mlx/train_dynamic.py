@@ -51,7 +51,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -1586,6 +1586,53 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
     return cast(dict, apply_clip(grads)), total_norm
 
 
+def compute_mrstft_loss(
+    out_spec: tuple[mx.array, mx.array],
+    clean_spec: tuple[mx.array, mx.array],
+    *,
+    istft_fn: Callable[..., mx.array],
+    loss_fn: Callable[[mx.array, mx.array], mx.array],
+    n_fft: int,
+    hop_length: int,
+    target_len: int,
+    force_fp32: bool = True,
+) -> mx.array:
+    """Compute MRSTFT loss from complex specs with optional FP32 stabilization.
+
+    MRSTFT involves magnitude squaring and power compression, which can overflow
+    in FP16 when the model outputs large spectral magnitudes. We optionally cast
+    to FP32 for this path to keep losses finite while the rest of the training
+    stays in mixed precision.
+    """
+    if istft_fn is None or loss_fn is None:
+        return mx.array(0.0)
+
+    if force_fp32:
+        out_spec = (out_spec[0].astype(mx.float32), out_spec[1].astype(mx.float32))
+        clean_spec = (clean_spec[0].astype(mx.float32), clean_spec[1].astype(mx.float32))
+
+    clean_wav = istft_fn(
+        clean_spec,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        length=target_len,
+    )
+    out_wav = istft_fn(
+        out_spec,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        length=target_len,
+    )
+
+    if force_fp32:
+        if clean_wav.dtype != mx.float32:
+            clean_wav = clean_wav.astype(mx.float32)
+        if out_wav.dtype != mx.float32:
+            out_wav = out_wav.astype(mx.float32)
+
+    return loss_fn(out_wav, clean_wav)
+
+
 _CHECKPOINT_KINDS = {"step", "epoch_end", "best", "best_final", "final", "interrupted"}
 _COMPLETED_KINDS = {"epoch_end", "best", "best_final", "final"}
 _IN_PROGRESS_KINDS = {"step", "interrupted"}
@@ -2924,19 +2971,16 @@ def train(
         total_loss = spec_loss
 
         if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-            clean_wav = mrstft_istft(
-                target_spec,
-                n_fft=config.fft_size,
-                hop_length=config.hop_size,
-                length=mrstft_target_len,
-            )
-            out_wav = mrstft_istft(
+            mrstft_loss = compute_mrstft_loss(
                 out,
+                target_spec,
+                istft_fn=mrstft_istft,
+                loss_fn=mrstft_loss_fn,
                 n_fft=config.fft_size,
                 hop_length=config.hop_size,
-                length=mrstft_target_len,
+                target_len=mrstft_target_len,
+                force_fp32=True,
             )
-            mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
             total_loss = total_loss + mrstft_loss
 
         if use_awesome_loss:
@@ -3051,19 +3095,16 @@ def train(
         spec_loss = spectral_loss(out, (clean_real, clean_imag))
         debugger.check("spec_loss", spec_loss, debug_ctx)
         if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-            clean_wav = mrstft_istft(
-                (clean_real, clean_imag),
-                n_fft=config.fft_size,
-                hop_length=config.hop_size,
-                length=mrstft_target_len,
-            )
-            out_wav = mrstft_istft(
+            mrstft_loss = compute_mrstft_loss(
                 out,
+                (clean_real, clean_imag),
+                istft_fn=mrstft_istft,
+                loss_fn=mrstft_loss_fn,
                 n_fft=config.fft_size,
                 hop_length=config.hop_size,
-                length=mrstft_target_len,
+                target_len=mrstft_target_len,
+                force_fp32=True,
             )
-            mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
             debugger.check("mrstft_loss", mrstft_loss, debug_ctx)
         if use_awesome_loss:
             _compute_awesome_losses(
@@ -3312,19 +3353,16 @@ def train(
             spec_loss = spectral_loss(out, target_spec)
             mrstft_loss = mx.array(0.0)
             if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-                clean_wav = mrstft_istft(
-                    target_spec,
-                    n_fft=config.fft_size,
-                    hop_length=config.hop_size,
-                    length=mrstft_target_len,
-                )
-                out_wav = mrstft_istft(
+                mrstft_loss = compute_mrstft_loss(
                     out,
+                    target_spec,
+                    istft_fn=mrstft_istft,
+                    loss_fn=mrstft_loss_fn,
                     n_fft=config.fft_size,
                     hop_length=config.hop_size,
-                    length=mrstft_target_len,
+                    target_len=mrstft_target_len,
+                    force_fp32=True,
                 )
-                mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
 
             awesome_loss = mx.array(0.0)
             awesome_speech = mx.array(0.0)
@@ -4087,19 +4125,18 @@ def train(
                     spec_loss_val = float(spec_loss)
                     train_spec_loss += spec_loss_val * eval_frequency
                     if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-                        clean_wav = mrstft_istft(
-                            (clean_real, clean_imag),
-                            n_fft=config.fft_size,
-                            hop_length=config.hop_size,
-                            length=mrstft_target_len,
+                        mrstft_loss_val = float(
+                            compute_mrstft_loss(
+                                out,
+                                (clean_real, clean_imag),
+                                istft_fn=mrstft_istft,
+                                loss_fn=mrstft_loss_fn,
+                                n_fft=config.fft_size,
+                                hop_length=config.hop_size,
+                                target_len=mrstft_target_len,
+                                force_fp32=True,
+                            )
                         )
-                        out_wav = mrstft_istft(
-                            out,
-                            n_fft=config.fft_size,
-                            hop_length=config.hop_size,
-                            length=mrstft_target_len,
-                        )
-                        mrstft_loss_val = float(mrstft_loss_fn(out_wav, clean_wav))
                         train_mrstft_loss += mrstft_loss_val * eval_frequency
 
                 if use_vad_loss:

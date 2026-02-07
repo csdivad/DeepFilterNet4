@@ -190,6 +190,9 @@ python -m df_mlx.train_dynamic \
     --mrstft-fft-sizes 512 1024 2048
 ```
 
+Note: When FP16 mixed precision is enabled, the MRSTFT path is computed in
+FP32 internally to avoid overflow in magnitude squaring and power compression.
+
 #### Numeric debug mode (NaN/inf diagnosis)
 
 Use the built-in numeric debugger to find the first non-finite tensor and
