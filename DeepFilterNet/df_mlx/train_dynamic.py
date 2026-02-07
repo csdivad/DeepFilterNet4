@@ -34,6 +34,7 @@ Features:
     - Gradient clipping for stability
     - Periodic checkpointing
     - Validation with fixed noise/RIR for reproducibility
+    - Optional GAN adversarial + feature matching loss for perceptual cleanup
 """
 
 from __future__ import annotations
@@ -367,6 +368,18 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--mrstft-f-complex"], "loss.mrstft.f_complex", getattr(args, "mrstft_f_complex", None)),
         (["--mrstft-fft-sizes"], "loss.mrstft.fft_sizes", getattr(args, "mrstft_fft_sizes", None)),
         (["--mrstft-hop-sizes"], "loss.mrstft.hop_sizes", getattr(args, "mrstft_hop_sizes", None)),
+        (["--gan-enabled"], "gan.enabled", getattr(args, "gan_enabled", None)),
+        (["--gan-start-epoch"], "gan.start_epoch", getattr(args, "gan_start_epoch", None)),
+        (["--gan-ramp-epochs"], "gan.ramp_epochs", getattr(args, "gan_ramp_epochs", None)),
+        (["--gan-adv-weight"], "gan.adv_weight", getattr(args, "gan_adv_weight", None)),
+        (["--gan-fm-weight"], "gan.fm_weight", getattr(args, "gan_fm_weight", None)),
+        (["--gan-discriminator"], "gan.discriminator", getattr(args, "gan_discriminator", None)),
+        (["--gan-mpd-periods"], "gan.mpd_periods", getattr(args, "gan_mpd_periods", None)),
+        (["--gan-msd-scales"], "gan.msd_scales", getattr(args, "gan_msd_scales", None)),
+        (["--gan-disc-lr"], "gan.disc_lr", getattr(args, "gan_disc_lr", None)),
+        (["--gan-disc-weight-decay"], "gan.disc_weight_decay", getattr(args, "gan_disc_weight_decay", None)),
+        (["--gan-disc-grad-clip"], "gan.disc_grad_clip", getattr(args, "gan_disc_grad_clip", None)),
+        (["--gan-disc-update-freq"], "gan.disc_update_freq", getattr(args, "gan_disc_update_freq", None)),
         (["--vad-loss-weight"], "vad.loss_weight", getattr(args, "vad_loss_weight", None)),
         (["--vad-threshold"], "vad.threshold", getattr(args, "vad_threshold", None)),
         (["--vad-margin"], "vad.margin", getattr(args, "vad_margin", None)),
@@ -1322,6 +1335,8 @@ _interrupt_state = {
     "global_step": 0,
     "model": None,
     "optimizer": None,
+    "discriminator": None,
+    "disc_optimizer": None,
     "loss": 0.0,
     "best_valid_loss": float("inf"),
     "config": {},
@@ -1378,6 +1393,8 @@ def _handle_sigint(signum, frame):
                 best_valid_loss=_interrupt_state["best_valid_loss"],
                 config=_interrupt_state["config"],
                 optimizer=_interrupt_state["optimizer"],
+                discriminator=_interrupt_state.get("discriminator"),
+                disc_optimizer=_interrupt_state.get("disc_optimizer"),
                 last_completed_epoch=last_completed,
                 kind="interrupted",
             )
@@ -1402,7 +1419,16 @@ def _handle_sigint(signum, frame):
     raise KeyboardInterrupt()
 
 
-def _register_sigint_handler(model, optimizer, checkpoint_dir, config, last_completed_epoch: int = -1):
+def _register_sigint_handler(
+    model,
+    optimizer,
+    checkpoint_dir,
+    config,
+    *,
+    discriminator=None,
+    disc_optimizer=None,
+    last_completed_epoch: int = -1,
+):
     """Register SIGINT handler for graceful training shutdown.
 
     Args:
@@ -1414,6 +1440,8 @@ def _register_sigint_handler(model, optimizer, checkpoint_dir, config, last_comp
     """
     _interrupt_state["model"] = model
     _interrupt_state["optimizer"] = optimizer
+    _interrupt_state["discriminator"] = discriminator
+    _interrupt_state["disc_optimizer"] = disc_optimizer
     _interrupt_state["checkpoint_dir"] = checkpoint_dir
     _interrupt_state["config"] = config
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
@@ -1586,27 +1614,17 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
     return cast(dict, apply_clip(grads)), total_norm
 
 
-def compute_mrstft_loss(
+def specs_to_wavs(
     out_spec: tuple[mx.array, mx.array],
     clean_spec: tuple[mx.array, mx.array],
     *,
     istft_fn: Callable[..., mx.array],
-    loss_fn: Callable[[mx.array, mx.array], mx.array],
     n_fft: int,
     hop_length: int,
     target_len: int,
     force_fp32: bool = True,
-) -> mx.array:
-    """Compute MRSTFT loss from complex specs with optional FP32 stabilization.
-
-    MRSTFT involves magnitude squaring and power compression, which can overflow
-    in FP16 when the model outputs large spectral magnitudes. We optionally cast
-    to FP32 for this path to keep losses finite while the rest of the training
-    stays in mixed precision.
-    """
-    if istft_fn is None or loss_fn is None:
-        return mx.array(0.0)
-
+) -> tuple[mx.array, mx.array]:
+    """Convert complex specs to waveforms with optional FP32 stabilization."""
     if force_fp32:
         out_spec = (out_spec[0].astype(mx.float32), out_spec[1].astype(mx.float32))
         clean_spec = (clean_spec[0].astype(mx.float32), clean_spec[1].astype(mx.float32))
@@ -1629,6 +1647,40 @@ def compute_mrstft_loss(
             clean_wav = clean_wav.astype(mx.float32)
         if out_wav.dtype != mx.float32:
             out_wav = out_wav.astype(mx.float32)
+
+    return out_wav, clean_wav
+
+
+def compute_mrstft_loss(
+    out_spec: tuple[mx.array, mx.array],
+    clean_spec: tuple[mx.array, mx.array],
+    *,
+    istft_fn: Callable[..., mx.array],
+    loss_fn: Callable[[mx.array, mx.array], mx.array],
+    n_fft: int,
+    hop_length: int,
+    target_len: int,
+    force_fp32: bool = True,
+) -> mx.array:
+    """Compute MRSTFT loss from complex specs with optional FP32 stabilization.
+
+    MRSTFT involves magnitude squaring and power compression, which can overflow
+    in FP16 when the model outputs large spectral magnitudes. We optionally cast
+    to FP32 for this path to keep losses finite while the rest of the training
+    stays in mixed precision.
+    """
+    if istft_fn is None or loss_fn is None:
+        return mx.array(0.0)
+
+    out_wav, clean_wav = specs_to_wavs(
+        out_spec,
+        clean_spec,
+        istft_fn=istft_fn,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        target_len=target_len,
+        force_fp32=force_fp32,
+    )
 
     return loss_fn(out_wav, clean_wav)
 
@@ -1677,6 +1729,15 @@ class CheckpointManifest:
         if match := self.complete_re.match(path.name):
             return int(match.group(1)) - 1
         return None
+
+
+def _disc_weights_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.disc{path.suffix}")
+
+
+def _is_disc_weights(path: Path, manifest: CheckpointManifest | None = None) -> bool:
+    manifest = manifest or CheckpointManifest()
+    return path.name.endswith(f".disc{manifest.weights_ext}")
 
 
 @dataclass
@@ -1782,7 +1843,11 @@ def validate_checkpoint_dir(
         report["invalid"].append((tmp, "temporary checkpoint residue"))
 
     ckpt_files = sorted(
-        [p for p in checkpoint_dir.glob(f"*{manifest.weights_ext}") if not manifest.is_temporary(p)],
+        [
+            p
+            for p in checkpoint_dir.glob(f"*{manifest.weights_ext}")
+            if not manifest.is_temporary(p) and not _is_disc_weights(p, manifest)
+        ],
         key=lambda p: p.stat().st_mtime,
     )
 
@@ -2012,6 +2077,8 @@ def save_checkpoint(
     best_valid_loss: float,
     config: dict,
     optimizer: optim.Optimizer | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: optim.Optimizer | None = None,
     last_completed_epoch: int = -1,
     kind: str = "epoch_end",
     raise_on_error: bool = False,
@@ -2070,6 +2137,18 @@ def save_checkpoint(
             except Exception as e:
                 print(f"⚠️  Failed to serialize optimizer state: {e}")
 
+        disc_optimizer_state_dict = {}
+        if disc_optimizer is not None and hasattr(disc_optimizer, "state") and disc_optimizer.state:
+            try:
+                flat_state = tree_flatten(disc_optimizer.state)
+                for k, v in flat_state:
+                    if isinstance(v, mx.array):
+                        disc_optimizer_state_dict[k] = v.tolist()
+                    else:
+                        disc_optimizer_state_dict[k] = v
+            except Exception as e:
+                print(f"⚠️  Failed to serialize discriminator optimizer state: {e}")
+
         checkpoint_kind = "end_of_epoch" if kind in _COMPLETED_KINDS else "in_progress"
 
         # Save training state and metadata
@@ -2083,6 +2162,7 @@ def save_checkpoint(
             "best_valid_loss": best_valid_loss,
             "config": config,
             "optimizer_state": optimizer_state_dict,
+            "disc_optimizer_state": disc_optimizer_state_dict,
             "last_completed_epoch": last_completed_epoch,
             "kind": kind,
             "checkpoint_kind": checkpoint_kind,
@@ -2098,6 +2178,20 @@ def save_checkpoint(
         # Atomic rename
         tmp_weights.replace(path)
         tmp_state_path.replace(state_path)
+
+        # Save discriminator weights after main checkpoint is safely written
+        if discriminator is not None:
+            disc_path = _disc_weights_path(path)
+            tmp_disc = disc_path.with_name(f"{disc_path.stem}.tmp{disc_path.suffix}")
+            disc_params = discriminator.parameters()
+            flat_disc = tree_flatten(disc_params)
+            disc_weights = {k: v for k, v in flat_disc}
+            if disc_weights:
+                mx.eval(*disc_weights.values())
+            mx.save_safetensors(str(tmp_disc), disc_weights)
+            if not tmp_disc.exists():
+                mx.save_safetensors(str(tmp_disc), disc_weights)
+            tmp_disc.replace(disc_path)
 
         if not _validate_checkpoint_pair(path, manifest=manifest):
             msg = f"Checkpoint validation failed after save: {path.name}"
@@ -2120,6 +2214,8 @@ def load_checkpoint(
     model: nn.Module,
     path: str | Path,
     optimizer: optim.Optimizer | None = None,
+    discriminator: nn.Module | None = None,
+    disc_optimizer: optim.Optimizer | None = None,
 ) -> dict:
     """Load a training checkpoint and restore model weights and optimizer state.
 
@@ -2187,6 +2283,41 @@ def load_checkpoint(
             except Exception as e:
                 print(f"⚠️  Failed to restore optimizer state: {e}")
 
+        # Restore discriminator weights/optimizer if provided
+        if discriminator is not None:
+            disc_path = _disc_weights_path(ckpt_path)
+            if disc_path.exists():
+                try:
+                    disc_weights = mx.load(str(disc_path))
+                    flat_disc = tree_flatten(discriminator.parameters())
+                    disc_pairs = []
+                    missing_disc = []
+                    for name, param in flat_disc:
+                        if isinstance(disc_weights, dict) and name in disc_weights:
+                            disc_pairs.append((name, disc_weights[name]))
+                        else:
+                            disc_pairs.append((name, param))
+                            missing_disc.append(name)
+                    discriminator.update(tree_unflatten(disc_pairs))
+                    if missing_disc:
+                        print(f"⚠️  {len(missing_disc)} discriminator parameters missing in checkpoint")
+                except Exception as e:
+                    print(f"⚠️  Failed to load discriminator weights: {e}")
+            else:
+                print(f"⚠️  Discriminator checkpoint missing: {disc_path.name}")
+
+        if disc_optimizer is not None and "disc_optimizer_state" in state:
+            try:
+                disc_state_dict = state.get("disc_optimizer_state", {})
+                if disc_state_dict:
+                    restored = {k: mx.array(v) for k, v in disc_state_dict.items()}
+                    disc_pairs = list(restored.items())
+                    disc_nested = tree_unflatten(disc_pairs)
+                    disc_optimizer.state = disc_nested
+                    print("✅ Restored discriminator optimizer state from checkpoint")
+            except Exception as e:
+                print(f"⚠️  Failed to restore discriminator optimizer state: {e}")
+
         epoch = state.get("epoch", 0)
         kind = state.get("kind", "epoch_end")
         completed_kinds = {"epoch_end", "best", "best_final", "final"}
@@ -2219,7 +2350,7 @@ def cleanup_checkpoints(
     # Find all checkpoint files (epoch_*.safetensors and step_*.safetensors)
     ckpt_files = []
     for pattern in ["epoch_*.safetensors", "step_*.safetensors"]:
-        ckpt_files.extend(checkpoint_dir.glob(pattern))
+        ckpt_files.extend([p for p in checkpoint_dir.glob(pattern) if not _is_disc_weights(p, manifest)])
 
     # Sort by modification time (oldest first)
     ckpt_files.sort(key=lambda p: p.stat().st_mtime)
@@ -2234,6 +2365,8 @@ def cleanup_checkpoints(
     for ckpt_path in ckpt_files[:num_to_remove]:
         # Remove the safetensors file
         ckpt_path.unlink(missing_ok=True)
+        # Remove discriminator weights if present
+        _disc_weights_path(ckpt_path).unlink(missing_ok=True)
 
         # Also remove the accompanying state.json
         state_path = manifest.state_path(ckpt_path)
@@ -2261,7 +2394,11 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path | None:
         return None
 
     manifest = CheckpointManifest()
-    candidates = [p for p in checkpoint_dir.glob(f"*{manifest.weights_ext}") if not manifest.is_temporary(p)]
+    candidates = [
+        p
+        for p in checkpoint_dir.glob(f"*{manifest.weights_ext}")
+        if not manifest.is_temporary(p) and not _is_disc_weights(p, manifest)
+    ]
 
     valid_pairs: list[Path] = []
     for ckpt in candidates:
@@ -2325,6 +2462,18 @@ def train(
     awesome_loss_weight: float = 0.4,
     awesome_mask_sharpness: float = 6.0,
     awesome_warmup_steps: int = 0,
+    gan_enabled: bool = False,
+    gan_start_epoch: int = 0,
+    gan_ramp_epochs: int = 0,
+    gan_adv_weight: float = 0.0,
+    gan_fm_weight: float = 0.0,
+    gan_disc_type: Literal["combined", "mpd", "msd"] = "combined",
+    gan_mpd_periods: Tuple[int, ...] | None = None,
+    gan_msd_scales: int = 3,
+    gan_disc_lr: float = 1e-4,
+    gan_disc_weight_decay: float = 0.0,
+    gan_disc_grad_clip: float = 1.0,
+    gan_disc_update_freq: int = 1,
     vad_proxy_enabled: bool = True,
     vad_loss_weight: float = 0.05,
     vad_threshold: float = 0.6,
@@ -2591,6 +2740,44 @@ def train(
             )
             mrstft_target_len = int(round(config.segment_length * config.sample_rate))
 
+    # GAN configuration (adversarial + feature matching)
+    gan_enabled = bool(gan_enabled or gan_adv_weight > 0 or gan_fm_weight > 0)
+    gan_disc_type = gan_disc_type.lower()
+    if gan_disc_type not in {"combined", "mpd", "msd"}:
+        print(f"Warning: unsupported gan_disc_type={gan_disc_type}; using combined.")
+        gan_disc_type = "combined"
+    gan_disc_update_freq = max(int(gan_disc_update_freq), 1)
+    gan_target_len = int(round(config.segment_length * config.sample_rate))
+    gan_istft = mrstft_istft
+
+    discriminator = None
+    disc_optimizer = None
+    feature_match_loss = None
+    gan_loss_fns = None
+
+    if gan_enabled:
+        from df_mlx.discriminator import CombinedDiscriminator, MultiPeriodDiscriminator, MultiScaleDiscriminator
+        from df_mlx.loss import FeatureMatchingLoss, discriminator_loss, generator_loss
+        from df_mlx.ops import istft
+
+        if gan_istft is None:
+            gan_istft = istft
+
+        mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
+        if gan_disc_type == "mpd":
+            discriminator = MultiPeriodDiscriminator(periods=mpd_periods)
+        elif gan_disc_type == "msd":
+            discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales)
+        else:
+            discriminator = CombinedDiscriminator(mpd_periods=mpd_periods, msd_scales=gan_msd_scales)
+
+        disc_optimizer = optim.AdamW(
+            learning_rate=gan_disc_lr,
+            weight_decay=gan_disc_weight_decay,
+        )
+        feature_match_loss = FeatureMatchingLoss(factor=1.0)
+        gan_loss_fns = (generator_loss, discriminator_loss)
+
     if vad_eval_mode == "auto":
         vad_eval_mode = "proxy" if (use_awesome_loss or use_pipeline_awesome_loss) else "off"
     vad_eval_enabled = vad_eval_mode != "off"
@@ -2656,6 +2843,16 @@ def train(
             f"  Awesome loss: weight={awesome_loss_weight}, mask_sharpness={awesome_mask_sharpness}, "
             f"warmup_steps={awesome_warmup_steps}, proxy={'on' if vad_proxy_enabled else 'off'}"
         )
+    if gan_enabled:
+        print(
+            "GAN loss:       on "
+            f"(adv={gan_adv_weight}, fm={gan_fm_weight}, start={gan_start_epoch}, ramp={gan_ramp_epochs})"
+        )
+        print(
+            "  Discriminator: "
+            f"type={gan_disc_type}, mpd_periods={gan_mpd_periods or [2, 3, 5, 7, 11]}, "
+            f"msd_scales={gan_msd_scales}, update_freq={gan_disc_update_freq}"
+        )
     vad_enabled = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     print(
         f"VAD loss:       {'on' if vad_enabled else 'off'} "
@@ -2694,6 +2891,18 @@ def train(
         "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
         "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
         "mrstft_hop_sizes": list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None,
+        "gan_enabled": gan_enabled,
+        "gan_start_epoch": gan_start_epoch,
+        "gan_ramp_epochs": gan_ramp_epochs,
+        "gan_adv_weight": gan_adv_weight,
+        "gan_fm_weight": gan_fm_weight,
+        "gan_disc_type": gan_disc_type,
+        "gan_mpd_periods": list(gan_mpd_periods) if gan_mpd_periods else [2, 3, 5, 7, 11],
+        "gan_msd_scales": gan_msd_scales,
+        "gan_disc_lr": gan_disc_lr,
+        "gan_disc_weight_decay": gan_disc_weight_decay,
+        "gan_disc_grad_clip": gan_disc_grad_clip,
+        "gan_disc_update_freq": gan_disc_update_freq,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
         "vad_margin": vad_margin,
@@ -2884,7 +3093,13 @@ def train(
     resume_batch_idx = 0
 
     if resume_from:
-        state = load_checkpoint(model, resume_from, optimizer=optimizer)
+        state = load_checkpoint(
+            model,
+            resume_from,
+            optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
+        )
         if state:
             ckpt_epoch = int(state.get("epoch", 0))
             ckpt_kind = state.get("kind", "epoch_end")
@@ -2936,6 +3151,8 @@ def train(
 
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
 
+    gan_active = False
+
     # Loss function - define as a pure function for compilation
     # Loss formula:
     #   L_total = L_spec
@@ -2960,6 +3177,8 @@ def train(
         speech_weight,
         awesome_weight,
         vad_reg_weight,
+        gan_weight,
+        fm_weight,
     ):
         """Compute training loss."""
         # Model expects spec as tuple (real, imag)
@@ -2970,18 +3189,32 @@ def train(
         spec_loss = spectral_loss(out, target_spec)
         total_loss = spec_loss
 
-        if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
-            mrstft_loss = compute_mrstft_loss(
+        out_wav = None
+        clean_wav = None
+        if (use_mrstft_loss or gan_active) and gan_istft is not None:
+            out_wav, clean_wav = specs_to_wavs(
                 out,
                 target_spec,
-                istft_fn=mrstft_istft,
-                loss_fn=mrstft_loss_fn,
+                istft_fn=gan_istft,
                 n_fft=config.fft_size,
                 hop_length=config.hop_size,
-                target_len=mrstft_target_len,
+                target_len=gan_target_len,
                 force_fp32=True,
             )
+
+        if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
+            mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
             total_loss = total_loss + mrstft_loss
+
+        if gan_active and gan_loss_fns is not None and discriminator is not None and out_wav is not None:
+            gen_loss_fn, _ = gan_loss_fns
+            disc_fake, fake_feats = discriminator(out_wav)
+            disc_real, real_feats = discriminator(clean_wav)
+            gan_g_loss = gen_loss_fn(disc_fake)
+            total_loss = total_loss + gan_weight * gan_g_loss
+            if feature_match_loss is not None and gan_fm_weight > 0:
+                fm_loss = feature_match_loss(real_feats, fake_feats)
+                total_loss = total_loss + fm_weight * fm_loss
 
         if use_awesome_loss:
             awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
@@ -3106,6 +3339,24 @@ def train(
                 force_fp32=True,
             )
             debugger.check("mrstft_loss", mrstft_loss, debug_ctx)
+        if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
+            out_wav, clean_wav = specs_to_wavs(
+                out,
+                (clean_real, clean_imag),
+                istft_fn=gan_istft,
+                n_fft=config.fft_size,
+                hop_length=config.hop_size,
+                target_len=gan_target_len,
+                force_fp32=True,
+            )
+            gen_loss_fn, _ = gan_loss_fns
+            disc_fake, fake_feats = discriminator(out_wav)
+            disc_real, real_feats = discriminator(clean_wav)
+            gan_g_loss = gen_loss_fn(disc_fake)
+            debugger.check("gan_g_loss", gan_g_loss, debug_ctx)
+            if feature_match_loss is not None and gan_fm_weight > 0:
+                fm_loss = feature_match_loss(real_feats, fake_feats)
+                debugger.check("gan_fm_loss", fm_loss, debug_ctx)
         if use_awesome_loss:
             _compute_awesome_losses(
                 noisy_real,
@@ -3217,6 +3468,8 @@ def train(
         speech_weight,
         awesome_weight,
         vad_reg_weight,
+        gan_weight,
+        fm_weight,
         max_grad_norm_val,
     ):
         """JIT-compiled training step for faster training.
@@ -3237,6 +3490,8 @@ def train(
             speech_weight,
             awesome_weight,
             vad_reg_weight,
+            gan_weight,
+            fm_weight,
         )
         # Gradient clipping inline
         if max_grad_norm_val > 0:
@@ -3731,13 +3986,23 @@ def train(
         return valid_loss / max(num_valid_batches, 1)
 
     # Flag to use compiled step (can be disabled for debugging)
-    use_compiled_step = not (debug_numerics or nan_skip_batch)
+    use_compiled_step = not (debug_numerics or nan_skip_batch or gan_enabled)
     print(f"  Using compiled training step: {use_compiled_step}")
+    if gan_enabled and not use_compiled_step:
+        print("  GAN enabled: compiled training step disabled")
     if nan_skip_batch:
         print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
     # Register SIGINT handler for graceful shutdown
-    _register_sigint_handler(model, optimizer, ckpt_dir, train_config, last_completed_epoch=last_completed_epoch)
+    _register_sigint_handler(
+        model,
+        optimizer,
+        ckpt_dir,
+        train_config,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
+        last_completed_epoch=last_completed_epoch,
+    )
     print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
     # Training loop
@@ -3791,11 +4056,30 @@ def train(
                     f"p_extreme={cur_p_extreme:.3f}, p_very_low={cur_p_very_low:.3f}, p_interfer={cur_p_interfer:.3f}"
                 )
 
+        gan_scale = 0.0
+        if gan_enabled and epoch >= gan_start_epoch:
+            if gan_ramp_epochs > 0:
+                gan_scale = min(1.0, (epoch - gan_start_epoch + 1) / gan_ramp_epochs)
+            else:
+                gan_scale = 1.0
+        gan_weight = gan_adv_weight * gan_scale
+        fm_weight = gan_fm_weight * gan_scale
+        gan_active = gan_enabled and gan_scale > 0.0
+        if gan_enabled and verbose:
+            print(
+                f"  GAN schedule (epoch {epoch + 1}/{epochs}): "
+                f"scale={gan_scale:.3f}, adv={gan_weight:.4f}, fm={fm_weight:.4f}"
+            )
+
         # ====== Training ======
         model.train()
         train_loss = 0.0
         train_spec_loss = 0.0
         train_mrstft_loss = 0.0
+        train_gan_g_loss = 0.0
+        train_gan_d_loss = 0.0
+        train_gan_fm_loss = 0.0
+        train_gan_d_updates = 0
         train_vad_loss = 0.0
         train_speech_loss = 0.0
         train_awesome_loss = 0.0
@@ -3949,6 +4233,8 @@ def train(
                     apply_vad_reg = random.random() < vad_train_prob
             vad_reg_weight = vad_weight if apply_vad_reg else 0.0
             vad_reg_weight_mx = mx.array(vad_reg_weight, dtype=mx.float32)
+            gan_weight_mx = mx.array(gan_weight, dtype=mx.float32)
+            fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
 
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
@@ -3967,6 +4253,8 @@ def train(
                     speech_weight_mx,
                     awesome_weight_mx,
                     vad_reg_weight_mx,
+                    gan_weight_mx,
+                    fm_weight_mx,
                     max_grad_norm,
                 )
                 # OPTIMIZATION: Only sync periodically to reduce GPU stalls
@@ -3990,6 +4278,8 @@ def train(
                     speech_weight_mx,
                     awesome_weight_mx,
                     vad_reg_weight_mx,
+                    gan_weight_mx,
+                    fm_weight_mx,
                 )
                 loss_finite = bool(mx.all(mx.isfinite(loss)))
                 grads_finite = _tree_all_finite(grads) if (debugger is not None or nan_skip_batch) else True
@@ -4045,6 +4335,43 @@ def train(
                 if should_sync:
                     mx.eval(model.parameters(), optimizer.state)
 
+            gan_d_loss_val = 0.0
+            if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
+                do_disc_update = (global_step % gan_disc_update_freq) == 0
+                if do_disc_update:
+                    _, disc_loss_fn = gan_loss_fns
+
+                    pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                    if gan_istft is not None:
+                        pred_wav, clean_wav = specs_to_wavs(
+                            pred_spec,
+                            (clean_real, clean_imag),
+                            istft_fn=gan_istft,
+                            n_fft=config.fft_size,
+                            hop_length=config.hop_size,
+                            target_len=gan_target_len,
+                            force_fp32=True,
+                        )
+                        pred_wav = mx.stop_gradient(pred_wav)
+
+                        def disc_loss_wrapper(disc):
+                            real_out, _ = disc(clean_wav)
+                            fake_out, _ = disc(pred_wav)
+                            total_loss, _, _ = disc_loss_fn(real_out, fake_out)
+                            return total_loss
+
+                        disc_loss, disc_grads = nn.value_and_grad(discriminator, disc_loss_wrapper)(discriminator)
+
+                        if gan_disc_grad_clip > 0:
+                            disc_grads, _ = clip_grad_norm(disc_grads, gan_disc_grad_clip)
+
+                        disc_optimizer.update(discriminator, disc_grads)
+
+                        if should_sync:
+                            mx.eval(disc_loss, discriminator.parameters(), disc_optimizer.state)
+                            gan_d_loss_val = float(disc_loss)
+                            train_gan_d_updates += 1
+
             fwd_time = time.time() - fwd_start
             total_forward_time += fwd_time
 
@@ -4060,6 +4387,8 @@ def train(
                         "Re-run with --debug-numerics for detailed diagnostics."
                     )
                 train_loss += loss_val * eval_frequency  # Approximate accumulated loss
+                if gan_active and gan_d_loss_val:
+                    train_gan_d_loss += gan_d_loss_val * eval_frequency
             num_train_batches += 1
             samples_processed += current_batch_size
             global_step += 1
@@ -4088,6 +4417,8 @@ def train(
                 # Defaults for logging
                 spec_loss_val = loss_val
                 mrstft_loss_val = 0.0
+                gan_g_loss_val = 0.0
+                gan_fm_loss_val = 0.0
                 vad_loss_val = 0.0
                 speech_loss_val = 0.0
                 p_ref_mean = 0.0
@@ -4115,6 +4446,7 @@ def train(
                     or use_pipeline_awesome_loss
                     or use_vad_train_reg
                     or use_mrstft_loss
+                    or gan_active
                 ):
                     # Extra forward pass for component logging (only on sync steps)
                     out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
@@ -4138,6 +4470,24 @@ def train(
                             )
                         )
                         train_mrstft_loss += mrstft_loss_val * eval_frequency
+                    if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
+                        out_wav, clean_wav = specs_to_wavs(
+                            out,
+                            (clean_real, clean_imag),
+                            istft_fn=gan_istft,
+                            n_fft=config.fft_size,
+                            hop_length=config.hop_size,
+                            target_len=gan_target_len,
+                            force_fp32=True,
+                        )
+                        gen_loss_fn, _ = gan_loss_fns
+                        disc_fake, fake_feats = discriminator(out_wav)
+                        disc_real, real_feats = discriminator(clean_wav)
+                        gan_g_loss_val = float(gen_loss_fn(disc_fake))
+                        train_gan_g_loss += gan_g_loss_val * eval_frequency
+                        if feature_match_loss is not None and gan_fm_weight > 0:
+                            gan_fm_loss_val = float(feature_match_loss(real_feats, fake_feats))
+                            train_gan_fm_loss += gan_fm_loss_val * eval_frequency
 
                 if use_vad_loss:
                     vad_loss, p_ref, p_out, gate = _compute_vad_loss(
@@ -4388,6 +4738,9 @@ def train(
                             else f"{loss_val:.4f}"
                         ),
                         mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
+                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
+                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
+                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         awesome=(
@@ -4405,6 +4758,9 @@ def train(
                     train_pbar.set_postfix(
                         loss=f"{loss_val:.4f}",
                         avg=f"{train_loss / num_train_batches:.4f}",
+                        gan_g=f"{gan_g_loss_val:.4f}" if gan_active else "0.0000",
+                        gan_d=f"{gan_d_loss_val:.4f}" if gan_active else "0.0000",
+                        fm=f"{gan_fm_loss_val:.4f}" if gan_active else "0.0000",
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         awesome=(
@@ -4442,6 +4798,8 @@ def train(
                     best_valid_loss=best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
+                    discriminator=discriminator,
+                    disc_optimizer=disc_optimizer,
                     last_completed_epoch=last_completed_epoch,
                     kind="step",
                 )
@@ -4469,6 +4827,9 @@ def train(
         avg_train_loss = train_loss / max(num_train_batches, 1)
         avg_train_spec_loss = train_spec_loss / max(num_train_batches, 1)
         avg_train_mrstft_loss = train_mrstft_loss / max(num_train_batches, 1)
+        avg_train_gan_g_loss = train_gan_g_loss / max(num_train_batches, 1)
+        avg_train_gan_fm_loss = train_gan_fm_loss / max(num_train_batches, 1)
+        avg_train_gan_d_loss = train_gan_d_loss / max(train_gan_d_updates, 1)
         avg_train_vad_loss = train_vad_loss / max(num_train_batches, 1)
         avg_train_speech_loss = train_speech_loss / max(num_train_batches, 1)
         avg_train_awesome_loss = train_awesome_loss / max(num_train_batches, 1)
@@ -4529,6 +4890,8 @@ def train(
                     best_valid_loss=best_valid_loss,
                     config=train_config,
                     optimizer=optimizer,
+                    discriminator=discriminator,
+                    disc_optimizer=disc_optimizer,
                     last_completed_epoch=epoch,
                     kind="best",
                 )
@@ -4564,10 +4927,22 @@ def train(
         # Improved epoch summary with throughput
         improvement_marker = "★" if avg_valid_loss <= best_valid_loss else ""
         loss_summary = ""
-        if use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg or use_mrstft_loss:
+        if (
+            use_vad_loss
+            or use_awesome_loss
+            or use_pipeline_awesome_loss
+            or use_vad_train_reg
+            or use_mrstft_loss
+            or gan_enabled
+        ):
             loss_parts = [f"Spec: {avg_train_spec_loss:.4f}"]
             if use_mrstft_loss:
                 loss_parts.append(f"MRSTFT: {avg_train_mrstft_loss:.4f}")
+            if gan_enabled:
+                loss_parts.append(f"GAN_G: {avg_train_gan_g_loss:.4f}")
+                loss_parts.append(f"GAN_D: {avg_train_gan_d_loss:.4f}")
+                if gan_fm_weight > 0:
+                    loss_parts.append(f"FM: {avg_train_gan_fm_loss:.4f}")
             if use_vad_loss:
                 loss_parts.extend(
                     [
@@ -4639,6 +5014,8 @@ def train(
             best_valid_loss=best_valid_loss,
             config=train_config,
             optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
             last_completed_epoch=epoch,
             kind="epoch_end",
         )
@@ -4694,6 +5071,8 @@ def train(
             best_valid_loss=best_valid_loss,
             config=train_config,
             optimizer=optimizer,
+            discriminator=discriminator,
+            disc_optimizer=disc_optimizer,
             last_completed_epoch=max(last_completed_epoch, final_epoch),
             kind="best_final",
         )
@@ -4715,6 +5094,8 @@ def train(
         best_valid_loss=best_valid_loss,
         config=train_config,
         optimizer=optimizer,
+        discriminator=discriminator,
+        disc_optimizer=disc_optimizer,
         last_completed_epoch=max(last_completed_epoch, final_epoch),
         kind="final",
     )
@@ -5082,6 +5463,79 @@ def main():
         help="Multi-res STFT hop sizes (defaults to fft_size//4)",
     )
     parser.add_argument(
+        "--gan-enabled",
+        action="store_true",
+        help="Enable GAN adversarial training",
+    )
+    parser.add_argument(
+        "--gan-start-epoch",
+        type=int,
+        default=0,
+        help="Epoch to start GAN training (0-based)",
+    )
+    parser.add_argument(
+        "--gan-ramp-epochs",
+        type=int,
+        default=0,
+        help="Linearly ramp GAN weights over N epochs (0 disables ramp)",
+    )
+    parser.add_argument(
+        "--gan-adv-weight",
+        type=float,
+        default=0.0,
+        help="GAN adversarial loss weight",
+    )
+    parser.add_argument(
+        "--gan-fm-weight",
+        type=float,
+        default=0.0,
+        help="GAN feature matching loss weight",
+    )
+    parser.add_argument(
+        "--gan-discriminator",
+        type=str,
+        default="combined",
+        choices=["combined", "mpd", "msd"],
+        help="Discriminator type for GAN training",
+    )
+    parser.add_argument(
+        "--gan-mpd-periods",
+        type=int,
+        nargs="+",
+        default=None,
+        help="MPD periods for GAN discriminator (e.g., --gan-mpd-periods 2 3 5 7 11)",
+    )
+    parser.add_argument(
+        "--gan-msd-scales",
+        type=int,
+        default=3,
+        help="MSD scales for GAN discriminator",
+    )
+    parser.add_argument(
+        "--gan-disc-lr",
+        type=float,
+        default=1e-4,
+        help="GAN discriminator learning rate",
+    )
+    parser.add_argument(
+        "--gan-disc-weight-decay",
+        type=float,
+        default=0.0,
+        help="GAN discriminator weight decay",
+    )
+    parser.add_argument(
+        "--gan-disc-grad-clip",
+        type=float,
+        default=1.0,
+        help="GAN discriminator gradient clipping",
+    )
+    parser.add_argument(
+        "--gan-disc-update-freq",
+        type=int,
+        default=1,
+        help="Update discriminator every N steps",
+    )
+    parser.add_argument(
         "--no-vad-proxy",
         action="store_true",
         help="Disable cheap VAD proxy gating in awesome loss",
@@ -5382,6 +5836,18 @@ def main():
         awesome_loss_weight=run_cfg.loss.awesome.loss_weight,
         awesome_mask_sharpness=run_cfg.loss.awesome.mask_sharpness,
         awesome_warmup_steps=run_cfg.loss.awesome.warmup_steps,
+        gan_enabled=run_cfg.gan.enabled,
+        gan_start_epoch=run_cfg.gan.start_epoch,
+        gan_ramp_epochs=run_cfg.gan.ramp_epochs,
+        gan_adv_weight=run_cfg.gan.adv_weight,
+        gan_fm_weight=run_cfg.gan.fm_weight,
+        gan_disc_type=cast(Literal["combined", "mpd", "msd"], run_cfg.gan.discriminator),
+        gan_mpd_periods=tuple(run_cfg.gan.mpd_periods) if run_cfg.gan.mpd_periods else None,
+        gan_msd_scales=run_cfg.gan.msd_scales,
+        gan_disc_lr=run_cfg.gan.disc_lr,
+        gan_disc_weight_decay=run_cfg.gan.disc_weight_decay,
+        gan_disc_grad_clip=run_cfg.gan.disc_grad_clip,
+        gan_disc_update_freq=run_cfg.gan.disc_update_freq,
         vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
         vad_loss_weight=run_cfg.vad.loss_weight,
         vad_threshold=run_cfg.vad.threshold,

@@ -140,9 +140,35 @@ def apply_train_ini_config(
                 dataset_overrides["noise_gain_range"] = gain_range
             used.add("dataloader_gains")
         if "gan_enabled" in sec:
-            if sec.getboolean("gan_enabled"):
-                warnings.append("train-config: GAN_ENABLED is not supported in train_dynamic; use df_mlx/train_gan.py.")
+            run_cfg.gan.enabled = sec.getboolean("gan_enabled")
             used.add("gan_enabled")
+        if "gan_start_epoch" in sec:
+            run_cfg.gan.start_epoch = sec.getint("gan_start_epoch")
+            used.add("gan_start_epoch")
+        if "gan_ramp_epochs" in sec:
+            run_cfg.gan.ramp_epochs = sec.getint("gan_ramp_epochs")
+            used.add("gan_ramp_epochs")
+        if "discriminator_type" in sec:
+            run_cfg.gan.discriminator = sec.get("discriminator_type").lower()
+            used.add("discriminator_type")
+        if "mpd_periods" in sec:
+            run_cfg.gan.mpd_periods = _parse_csv_ints(sec.get("mpd_periods"))
+            used.add("mpd_periods")
+        if "msd_scales" in sec:
+            run_cfg.gan.msd_scales = sec.getint("msd_scales")
+            used.add("msd_scales")
+        if "discriminator_update_freq" in sec:
+            run_cfg.gan.disc_update_freq = sec.getint("discriminator_update_freq")
+            used.add("discriminator_update_freq")
+        if "discriminator_lr" in sec:
+            run_cfg.gan.disc_lr = sec.getfloat("discriminator_lr")
+            used.add("discriminator_lr")
+        if "discriminator_weight_decay" in sec:
+            run_cfg.gan.disc_weight_decay = sec.getfloat("discriminator_weight_decay")
+            used.add("discriminator_weight_decay")
+        if "discriminator_grad_clip" in sec:
+            run_cfg.gan.disc_grad_clip = sec.getfloat("discriminator_grad_clip")
+            used.add("discriminator_grad_clip")
 
         _warn_unused(sec_name or "train", sec.keys(), used, warnings)
 
@@ -300,13 +326,45 @@ def apply_train_ini_config(
 
         _warn_unused(sec_name or "MultiResSpecLoss", sec.keys(), used, warnings)
 
+    # [GANLoss] section (train.py style)
+    sec, sec_name = _get_section(parser, "GANLoss")
+    if sec is not None:
+        used = set()
+        if "factor" in sec:
+            run_cfg.gan.adv_weight = sec.getfloat("factor")
+            used.add("factor")
+        if "type" in sec:
+            # MLX GAN uses hinge loss; keep config but warn if mismatched.
+            loss_type = sec.get("type").lower()
+            if loss_type != "hinge":
+                warnings.append(f"train-config: GANLoss.type={loss_type} not supported; using hinge loss.")
+            used.add("type")
+
+        _warn_unused(sec_name or "GANLoss", sec.keys(), used, warnings)
+
+    # [FeatureMatchingLoss] section (train.py style)
+    sec, sec_name = _get_section(parser, "FeatureMatchingLoss")
+    if sec is not None:
+        used = set()
+        if "factor" in sec:
+            run_cfg.gan.fm_weight = sec.getfloat("factor")
+            used.add("factor")
+
+        _warn_unused(sec_name or "FeatureMatchingLoss", sec.keys(), used, warnings)
+
     # Explicitly warn for unsupported advanced losses
-    for section in ("asrloss", "ganloss", "featurematchingloss", "speakerloss", "maskloss", "spectralloss"):
+    for section in ("asrloss", "speakerloss", "maskloss", "spectralloss"):
         sec, sec_name = _get_section(parser, section)
         if sec is not None:
             warnings.append(
                 f"train-config: section [{sec_name}] is not supported in train_dynamic; "
-                "use PyTorch train.py or df_mlx/train_gan.py where applicable."
+                "use PyTorch train.py where applicable."
             )
+
+    if not run_cfg.gan.enabled and (run_cfg.gan.adv_weight > 0 or run_cfg.gan.fm_weight > 0):
+        warnings.append(
+            "train-config: GANLoss/FeatureMatchingLoss enabled while GAN_ENABLED=false; " "enabling GAN training."
+        )
+        run_cfg.gan.enabled = True
 
     return TrainIniOverrides(dataset_overrides=dataset_overrides, warnings=warnings)

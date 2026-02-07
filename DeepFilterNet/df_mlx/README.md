@@ -136,9 +136,10 @@ Supported sections:
 - `[df]`, `[train]`, `[optim]`, `[distortion]`, `[deepfilternet4]`
 - `[loss]` (multi_res_stft_* keys)
 - `[MultiResSpecLoss]`
+- `[GANLoss]`, `[FeatureMatchingLoss]` (adversarial training)
 
-Unsupported sections (e.g. `[ASRLoss]`, `[GANLoss]`) are ignored with warnings.
-Use `df/train.py` for ASR loss or `df_mlx/train_gan.py` for adversarial training.
+Unsupported sections (e.g. `[ASRLoss]`, `[MaskLoss]`, `[SpectralLoss]`) are ignored with warnings.
+Use `df/train.py` for ASR loss; GAN training is supported directly in `train_dynamic`.
 
 #### Awesome dynamic loss (speech-preserving)
 
@@ -192,6 +193,28 @@ python -m df_mlx.train_dynamic \
 
 Note: When FP16 mixed precision is enabled, the MRSTFT path is computed in
 FP32 internally to avoid overflow in magnitude squaring and power compression.
+
+#### GAN adversarial loss (optional)
+
+Enable GAN-based perceptual cleanup using a discriminator + feature matching.
+When GAN is enabled, the compiled training step is disabled automatically.
+Set `[GANLoss] factor` (and optionally `[FeatureMatchingLoss] factor`) to
+non-zero values in your train.ini.
+
+```bash
+python -m df_mlx.train_dynamic \
+    --config ./file_lists/config.json \
+    --train-config /path/to/config.ini \
+    --gan-enabled \
+    --gan-start-epoch 0 \
+    --gan-ramp-epochs 5 \
+    --gan-adv-weight 0.1 \
+    --gan-fm-weight 2.0 \
+    --gan-discriminator combined
+```
+
+GAN checkpoints include discriminator weights alongside generator checkpoints
+using the same stem: `epoch_060.safetensors` + `epoch_060.disc.safetensors`.
 
 #### Numeric debug mode (NaN/inf diagnosis)
 

@@ -480,6 +480,65 @@ class LossConfig:
 
 
 @dataclass
+class GanConfig:
+    enabled: bool = cfg_field(False, help="Enable GAN adversarial training", normalize=_normalize_bool)
+    start_epoch: int = cfg_field(
+        0, help="Epoch to start GAN training (0-based)", normalize=lambda v: _normalize_int(v, min_value=0)
+    )
+    ramp_epochs: int = cfg_field(
+        0,
+        help="Linearly ramp GAN weights over N epochs (0 disables ramp)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
+    adv_weight: float = cfg_field(
+        0.0,
+        help="Generator adversarial loss weight",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    fm_weight: float = cfg_field(
+        0.0,
+        help="Feature matching loss weight",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    discriminator: str = cfg_field(
+        "combined",
+        help="Discriminator type: combined | mpd | msd",
+        choices=["combined", "mpd", "msd"],
+        normalize=lambda v: str(v),
+    )
+    mpd_periods: list[int] = field(
+        default_factory=lambda: [2, 3, 5, 7, 11],
+        metadata={"help": "MPD periods", "normalize": _normalize_int_list},
+    )
+    msd_scales: int = cfg_field(3, help="MSD number of scales", normalize=lambda v: _normalize_int(v, min_value=1))
+    disc_lr: float = cfg_field(
+        1e-4,
+        help="Discriminator learning rate",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    disc_weight_decay: float = cfg_field(
+        0.0,
+        help="Discriminator weight decay",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    disc_grad_clip: float = cfg_field(
+        1.0,
+        help="Discriminator gradient clipping",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    disc_update_freq: int = cfg_field(
+        1,
+        help="Update discriminator every N steps",
+        normalize=lambda v: _normalize_int(v, min_value=1),
+    )
+
+
+@dataclass
 class VADEvalConfig:
     mode: str = cfg_field(
         "auto",
@@ -606,6 +665,7 @@ class RunConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    gan: GanConfig = field(default_factory=GanConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
@@ -729,6 +789,10 @@ def validate_run_config(cfg: RunConfig) -> None:
         raise ValueError("augmentation.p_clipping must be in [0,1]")
     if cfg.vad.train.prob < 0.0 or cfg.vad.train.prob > 1.0:
         raise ValueError("vad.train.prob must be in [0,1]")
+    if cfg.gan.enabled and cfg.gan.adv_weight == 0.0 and cfg.gan.fm_weight == 0.0:
+        raise ValueError("gan enabled but adv_weight and fm_weight are both 0")
+    if cfg.gan.mpd_periods and any(p <= 0 for p in cfg.gan.mpd_periods):
+        raise ValueError("gan.mpd_periods must be positive integers")
 
 
 # ============================
@@ -802,6 +866,7 @@ def generate_run_config_example() -> str:
     _emit_section(lines, "loss", cfg.loss)
     _emit_section(lines, "loss.awesome", cfg.loss.awesome)
     _emit_section(lines, "loss.mrstft", cfg.loss.mrstft)
+    _emit_section(lines, "gan", cfg.gan)
     _emit_section(lines, "vad", cfg.vad)
     _emit_section(lines, "vad.eval", cfg.vad.eval)
     _emit_section(lines, "vad.train", cfg.vad.train)
