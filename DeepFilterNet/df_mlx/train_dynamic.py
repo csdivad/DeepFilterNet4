@@ -1614,6 +1614,58 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
     return cast(dict, apply_clip(grads)), total_norm
 
 
+def accumulate_grads(accumulated: Any | None, new_grads: Any) -> Any:
+    """Accumulate gradients by summing them element-wise.
+
+    Args:
+        accumulated: Previous accumulated gradients (None for first batch)
+        new_grads: New gradients to add
+
+    Returns:
+        Combined gradient tree
+    """
+    if accumulated is None:
+        return new_grads
+
+    def add_trees(a: Any, b: Any) -> Any:
+        if isinstance(a, mx.array) and isinstance(b, mx.array):
+            return a + b
+        elif isinstance(a, dict) and isinstance(b, dict):
+            return {k: add_trees(a[k], b[k]) for k in a.keys()}
+        elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+            result = [add_trees(av, bv) for av, bv in zip(a, b)]
+            return type(a)(result)
+        return b  # fallback (shouldn't happen with valid grad trees)
+
+    return add_trees(accumulated, new_grads)
+
+
+def scale_grads(grads: Any, scale: float) -> Any:
+    """Scale all gradients by a constant factor.
+
+    Args:
+        grads: Gradient tree
+        scale: Scale factor (e.g., 1/grad_accumulation_steps)
+
+    Returns:
+        Scaled gradient tree
+    """
+    scale_arr = mx.array(scale, dtype=mx.float32)
+
+    def apply_scale(x: Any) -> Any:
+        if isinstance(x, mx.array):
+            return x * scale_arr
+        elif isinstance(x, dict):
+            return {k: apply_scale(v) for k, v in x.items()}
+        elif isinstance(x, list):
+            return [apply_scale(v) for v in x]
+        elif isinstance(x, tuple):
+            return tuple(apply_scale(v) for v in x)
+        return x
+
+    return apply_scale(grads)
+
+
 def specs_to_wavs(
     out_spec: tuple[mx.array, mx.array],
     clean_spec: tuple[mx.array, mx.array],
@@ -2668,8 +2720,14 @@ def train(
         config.snr_range = snr_range
     if snr_range_extreme is not None:
         config.snr_range_extreme = snr_range_extreme
+    if snr_range_very_low is not None:
+        config.snr_range_very_low = snr_range_very_low
     if p_extreme_snr is not None:
         config.p_extreme_snr = p_extreme_snr
+    if p_very_low_snr is not None:
+        config.p_very_low_snr = p_very_low_snr
+    if p_interfer_speech is not None:
+        config.p_interfer_speech = p_interfer_speech
     if speech_gain_range is not None:
         config.speech_gain_range = speech_gain_range
     if noise_gain_range is not None:
@@ -2723,7 +2781,7 @@ def train(
     mrstft_istft = None
     mrstft_target_len = None
     if use_mrstft_loss:
-        if not mrstft_cfg.fft_sizes:
+        if not mrstft_cfg or not mrstft_cfg.fft_sizes:
             print("Warning: mrstft enabled but fft_sizes is empty; disabling MRSTFT loss.")
             use_mrstft_loss = False
         else:
@@ -3065,8 +3123,13 @@ def train(
     print(f"  Parameters: {num_params:,}")
 
     # Estimate steps per epoch (approximate since samples may be skipped)
+    # With gradient accumulation, an optimizer "step" spans multiple batches
     approx_samples_per_epoch = len(dataset)
-    steps_per_epoch = approx_samples_per_epoch // batch_size
+    batches_per_epoch = approx_samples_per_epoch // batch_size
+    steps_per_epoch = batches_per_epoch // grad_accumulation_steps
+    if steps_per_epoch < 1:
+        steps_per_epoch = 1
+        print(f"Warning: grad_accumulation_steps={grad_accumulation_steps} >= batches_per_epoch={batches_per_epoch}; using 1 step/epoch")
     total_steps = epochs * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
@@ -3986,10 +4049,15 @@ def train(
         return valid_loss / max(num_valid_batches, 1)
 
     # Flag to use compiled step (can be disabled for debugging)
-    use_compiled_step = not (debug_numerics or nan_skip_batch or gan_enabled)
+    # Gradient accumulation requires manual gradient management, so we disable compiled step
+    use_compiled_step = not (debug_numerics or nan_skip_batch or gan_enabled or grad_accumulation_steps > 1)
     print(f"  Using compiled training step: {use_compiled_step}")
     if gan_enabled and not use_compiled_step:
         print("  GAN enabled: compiled training step disabled")
+    if grad_accumulation_steps > 1:
+        print(f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})")
+        if not use_compiled_step:
+            print("  Gradient accumulation: compiled training step disabled")
     if nan_skip_batch:
         print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
@@ -4129,6 +4197,11 @@ def train(
         total_data_time = 0.0
         total_forward_time = 0.0  # Used for compiled step timing
 
+        # Gradient accumulation tracking (only used when grad_accumulation_steps > 1)
+        accumulated_grads: dict | None = None
+        accumulated_loss = mx.array(0.0)
+        micro_batches_in_accum = 0
+
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
         if use_mlx_stream and train_stream is not None:
             if data_resume_progress is not None and epoch == data_resume_progress.get("epoch"):
@@ -4236,11 +4309,16 @@ def train(
             gan_weight_mx = mx.array(gan_weight, dtype=mx.float32)
             fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
 
+            # Track whether optimizer was updated this iteration (for gradient accumulation)
+            did_optimizer_update = False
+
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
 
             if use_compiled_step:
                 # Use compiled training step for better performance
+                # (compiled step always updates, since fwd+bwd+update is atomic)
+                did_optimizer_update = True
                 loss = compiled_step(
                     noisy_real,
                     noisy_imag,
@@ -4322,14 +4400,32 @@ def train(
                     mx.eval(loss)
 
                 if not skip_update:
-                    # Gradient clipping (returns clipped grads and norm as MLX array)
-                    if max_grad_norm > 0:
-                        grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
-                        if should_sync:
-                            grad_norm = float(grad_norm_arr)
+                    # Accumulate gradients (for grad_accumulation_steps > 1)
+                    accumulated_grads = accumulate_grads(accumulated_grads, grads)
+                    accumulated_loss = accumulated_loss + loss
+                    micro_batches_in_accum += 1
 
-                    # Update parameters
-                    optimizer.update(model, grads)
+                    # Check if accumulation window is complete
+                    is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
+                    if is_accum_complete:
+                        did_optimizer_update = True
+
+                        # Scale by 1/grad_accumulation_steps for proper averaging
+                        final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+
+                        # Gradient clipping (returns clipped grads and norm as MLX array)
+                        if max_grad_norm > 0:
+                            final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
+                            if should_sync:
+                                grad_norm = float(grad_norm_arr)
+
+                        # Update parameters
+                        optimizer.update(model, final_grads)
+
+                        # Reset accumulator for next window
+                        accumulated_grads = None
+                        accumulated_loss = mx.array(0.0)
+                        micro_batches_in_accum = 0
 
                 # Only sync periodically for better throughput
                 if should_sync:
@@ -4391,7 +4487,10 @@ def train(
                     train_gan_d_loss += gan_d_loss_val * eval_frequency
             num_train_batches += 1
             samples_processed += current_batch_size
-            global_step += 1
+            # Only increment global_step when optimizer actually updates
+            # (for gradient accumulation > 1, updates happen every N batches)
+            if did_optimizer_update:
+                global_step += 1
 
             # Track progress for interruption-safe resume metadata
             _update_interrupt_state(
