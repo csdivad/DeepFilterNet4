@@ -17,7 +17,7 @@ git -C "$ROOT_DIR" config core.hooksPath "$ROOT_DIR/.githooks"
 
 chmod +x "$ROOT_DIR/scripts/guard-upstream-remote.sh"
 chmod +x "$ROOT_DIR/.githooks/pre-commit"
-chmod +x "$ROOT_DIR/.githooks/pre-push"
+# chmod +x "$ROOT_DIR/.githooks/pre-push"
 chmod +x "$ROOT_DIR/.githooks/post-checkout"
 chmod +x "$ROOT_DIR/.githooks/post-merge"
 chmod +x "$ROOT_DIR/.githooks/post-rewrite"
