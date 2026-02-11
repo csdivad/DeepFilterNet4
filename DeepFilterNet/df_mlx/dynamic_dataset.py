@@ -36,9 +36,10 @@ import json
 import random
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, cast
 
 import mlx.core as mx
@@ -966,7 +967,6 @@ class DynamicDataset:
 
         # Epoch and randomization
         self._epoch = 0
-        self._rng = random.Random(config.seed)
 
         # Current split
         self._current_split = "train"
@@ -1025,7 +1025,7 @@ class DynamicDataset:
                 return self.rir_cache.load(path)
         return self.audio_cache.load(path)
 
-    def _load_speech(self, idx: int) -> Optional[np.ndarray]:
+    def _load_speech(self, idx: int, rng: random.Random) -> Optional[np.ndarray]:
         """Load and prepare a speech sample.
 
         Returns None if the audio is shorter than segment_samples.
@@ -1044,19 +1044,19 @@ class DynamicDataset:
 
             # Extract random segment
             if len(audio) > self.segment_samples:
-                start = self._rng.randint(0, len(audio) - self.segment_samples)
+                start = rng.randint(0, len(audio) - self.segment_samples)
                 audio = audio[start : start + self.segment_samples]
 
             return audio
         except Exception:
             return None
 
-    def _load_noise(self) -> Tuple[np.ndarray, float]:
+    def _load_noise(self, rng: random.Random) -> Tuple[np.ndarray, float]:
         """Load a random noise sample or generate synthetic noise."""
         # Occasionally generate synthetic noise
-        if self._rng.random() < self.config.p_random_noise:
+        if rng.random() < self.config.p_random_noise:
             noise = self.noise_generator.generate_random(self.segment_samples)
-            gain = self._rng.choice([-24.0, -12.0, -6.0, 0.0])
+            gain = rng.choice([-24.0, -12.0, -6.0, 0.0])
             return noise, gain
 
         # Load from file
@@ -1065,22 +1065,22 @@ class DynamicDataset:
             # Fallback to white noise
             return self.noise_generator.generate(0.0, self.segment_samples), 0.0
 
-        path = self._rng.choice(noise_files)
+        path = rng.choice(noise_files)
         try:
             noise = self._load_audio(path, "noise")
-            gain = self._rng.uniform(*self.config.noise_gain_range)
+            gain = rng.uniform(*self.config.noise_gain_range)
             return noise, gain
         except Exception:
             # Fallback
             return self.noise_generator.generate(0.0, self.segment_samples), 0.0
 
-    def _load_rir(self) -> Optional[np.ndarray]:
+    def _load_rir(self, rng: random.Random) -> Optional[np.ndarray]:
         """Load a random RIR if available."""
         rir_files = self.config.rir_files
         if not rir_files:
             return None
 
-        path = self._rng.choice(rir_files)
+        path = rng.choice(rir_files)
         try:
             return self._load_audio(path, "rir")
         except Exception:
@@ -1097,34 +1097,34 @@ class DynamicDataset:
         5. Mix at random SNR/gain
         6. Compute STFT and features
         """
-        # Set RNG seed for reproducibility within epoch
+        # Use per-sample RNG so get_sample() remains thread-safe under prefetch workers.
         sample_seed = self.config.seed + self._epoch * 1000000 + idx
-        self._rng = random.Random(sample_seed)
+        rng = random.Random(sample_seed)
 
         # Load speech
-        speech = self._load_speech(self._indices[idx])
+        speech = self._load_speech(self._indices[idx], rng)
         if speech is None:
             return None
 
         # Sample SNR and gain with 3-tier SNR distribution
-        r = self._rng.random()
+        r = rng.random()
         if self.config.p_very_low_snr > 0 and r < self.config.p_very_low_snr:
             # Very low SNR: severely obscured speech (for whisper/distant mic training)
-            snr = self._rng.uniform(*self.config.snr_range_very_low)
+            snr = rng.uniform(*self.config.snr_range_very_low)
         elif self.config.p_extreme_snr > 0 and r < (self.config.p_very_low_snr + self.config.p_extreme_snr):
             # Extreme SNR: near-obscured speech
-            snr = self._rng.uniform(*self.config.snr_range_extreme)
+            snr = rng.uniform(*self.config.snr_range_extreme)
         else:
             # Base SNR: normal range
-            snr = self._rng.uniform(*self.config.snr_range)
-        gain = self._rng.uniform(*self.config.speech_gain_range)
+            snr = rng.uniform(*self.config.snr_range)
+        gain = rng.uniform(*self.config.speech_gain_range)
 
         # Load and combine multiple noises (2-5 like Rust)
-        n_noises = self._rng.randint(self.config.n_noise_min, self.config.n_noise_max)
+        n_noises = rng.randint(self.config.n_noise_min, self.config.n_noise_max)
         noises = []
         noise_gains = []
         for _ in range(n_noises):
-            noise, ng = self._load_noise()
+            noise, ng = self._load_noise(rng)
             noises.append(noise)
             noise_gains.append(ng)
 
@@ -1132,8 +1132,8 @@ class DynamicDataset:
 
         # Optionally apply RIR
         speech_for_mix = speech.copy()
-        if self.config.rir_files and self._rng.random() < self.config.p_reverb:
-            rir = self._load_rir()
+        if self.config.rir_files and rng.random() < self.config.p_reverb:
+            rir = self._load_rir(rng)
             if rir is not None:
                 speech_for_mix, combined_noise, _, _ = self.reverb.apply(speech, combined_noise, rir)
 
@@ -1156,14 +1156,14 @@ class DynamicDataset:
                 )
 
             # Add interfering speaker (vocal music / competing talker simulation)
-            if self.config.p_interfer_speech > 0 and self._rng.random() < self.config.p_interfer_speech:
+            if self.config.p_interfer_speech > 0 and rng.random() < self.config.p_interfer_speech:
                 # Load a different speech file as interferer
-                interfer_idx = self._rng.randint(0, len(self._indices) - 1)
+                interfer_idx = rng.randint(0, len(self._indices) - 1)
                 if interfer_idx != self._indices[idx]:
-                    interfer_speech = self._load_speech(interfer_idx)
+                    interfer_speech = self._load_speech(interfer_idx, rng)
                     if interfer_speech is not None:
                         # Mix interferer into noise at a random SNR relative to target
-                        interfer_snr = self._rng.uniform(*self.config.interfer_speech_snr_range)
+                        interfer_snr = rng.uniform(*self.config.interfer_speech_snr_range)
                         # Scale interferer relative to target speech
                         target_rms = np.sqrt(np.mean(speech_for_mix**2) + 1e-8)
                         interfer_rms = np.sqrt(np.mean(interfer_speech**2) + 1e-8)
@@ -1295,15 +1295,71 @@ class PrefetchDataLoader:
         prefetch_queue: Queue = Queue(maxsize=self.prefetch_factor)
         stop_event = threading.Event()
 
+        def _to_batch(samples: List[Sample]) -> Dict[str, mx.array]:
+            return {
+                "noisy_real": mx.array(np.stack([s.noisy_spec.real for s in samples])),
+                "noisy_imag": mx.array(np.stack([s.noisy_spec.imag for s in samples])),
+                "clean_real": mx.array(np.stack([s.clean_spec.real for s in samples])),
+                "clean_imag": mx.array(np.stack([s.clean_spec.imag for s in samples])),
+                "feat_erb": mx.array(np.stack([s.feat_erb for s in samples])),
+                "feat_spec": mx.array(np.stack([s.feat_spec for s in samples])),
+                "snr": mx.array(np.array([s.snr for s in samples], dtype=np.float32)),
+            }
+
+        def _queue_put(item: Optional[Dict[str, mx.array]]) -> bool:
+            while not stop_event.is_set():
+                try:
+                    prefetch_queue.put(item, timeout=0.1)
+                    return True
+                except Full:
+                    continue
+            return False
+
         def worker():
             """Background worker that fills the prefetch queue."""
+            n_samples = len(self.dataset)
+            max_workers = max(1, self.num_workers)
+            max_pending = max(max_workers, max_workers * self.prefetch_factor)
+            pending: Dict[int, Future[Optional[Sample]]] = {}
+            next_submit = 0
+            next_consume = 0
+            batch_samples: List[Sample] = []
+
+            def submit_pending(executor: ThreadPoolExecutor) -> None:
+                nonlocal next_submit
+                while next_submit < n_samples and len(pending) < max_pending and not stop_event.is_set():
+                    pending[next_submit] = executor.submit(self.dataset.get_sample, next_submit)
+                    next_submit += 1
+
             try:
-                for batch in self.dataset.iter_batches(self.batch_size, self.drop_last):
-                    if stop_event.is_set():
-                        break
-                    prefetch_queue.put(batch)
+                with ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="df-mlx-prefetch",
+                ) as executor:
+                    submit_pending(executor)
+                    while next_consume < n_samples and not stop_event.is_set():
+                        future = pending.pop(next_consume)
+                        next_consume += 1
+                        submit_pending(executor)
+
+                        try:
+                            sample = future.result()
+                        except Exception:
+                            sample = None
+                        if sample is None:
+                            continue
+
+                        batch_samples.append(sample)
+                        if len(batch_samples) == self.batch_size:
+                            if not _queue_put(_to_batch(batch_samples)):
+                                return
+                            batch_samples = []
+
+                    if batch_samples and not self.drop_last and not stop_event.is_set():
+                        _queue_put(_to_batch(batch_samples))
             finally:
-                prefetch_queue.put(None)  # Signal completion
+                if not stop_event.is_set():
+                    _queue_put(None)  # Signal completion
 
         # Start worker thread
         worker_thread = threading.Thread(target=worker, daemon=True)

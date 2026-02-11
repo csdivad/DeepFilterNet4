@@ -3544,7 +3544,7 @@ def train(
         This compiles the forward pass, backward pass, and optimizer update
         into a single optimized computation graph.
         """
-        (loss, _), grads = loss_and_grad(
+        (loss, out), grads = loss_and_grad(
             model,
             noisy_real,
             noisy_imag,
@@ -3564,7 +3564,7 @@ def train(
         if max_grad_norm_val > 0:
             grads, _ = clip_grad_norm(grads, max_grad_norm_val)
         optimizer.update(model, grads)
-        return loss
+        return loss, out
 
     def run_validation(label: str = "  Validating", *, do_vad_eval: bool = False) -> float:
         """Run validation on the fixed validation split and return average loss."""
@@ -4336,7 +4336,7 @@ def train(
                 # Use compiled training step for better performance
                 # (compiled step always updates, since fwd+bwd+update is atomic)
                 did_optimizer_update = True
-                loss = compiled_step(
+                loss, model_out = compiled_step(
                     noisy_real,
                     noisy_imag,
                     feat_erb,
