@@ -3129,7 +3129,9 @@ def train(
     steps_per_epoch = batches_per_epoch // grad_accumulation_steps
     if steps_per_epoch < 1:
         steps_per_epoch = 1
-        print(f"Warning: grad_accumulation_steps={grad_accumulation_steps} >= batches_per_epoch={batches_per_epoch}; using 1 step/epoch")
+        print(
+            f"Warning: grad_accumulation_steps={grad_accumulation_steps} >= batches_per_epoch={batches_per_epoch}; using 1 step/epoch"
+        )
     total_steps = epochs * steps_per_epoch
     warmup_steps = warmup_epochs * steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
@@ -3368,7 +3370,9 @@ def train(
             )
             total_loss = total_loss + vad_reg_weight * vad_reg_loss
 
-        return total_loss
+        # Return model output as auxiliary data so callers can reuse it for
+        # logging/discriminator updates without triggering a second forward.
+        return total_loss, out
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
@@ -3540,7 +3544,7 @@ def train(
         This compiles the forward pass, backward pass, and optimizer update
         into a single optimized computation graph.
         """
-        loss, grads = loss_and_grad(
+        (loss, _), grads = loss_and_grad(
             model,
             noisy_real,
             noisy_imag,
@@ -3608,12 +3612,22 @@ def train(
         if max_valid_batches is not None:
             valid_steps = min(valid_steps, max_valid_batches)
 
-        valid_loader = PrefetchDataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=2,
-            prefetch_factor=1,
-        )
+        if use_mlx_stream:
+            valid_loader = MLXDataStream(
+                dataset=dataset,
+                batch_size=batch_size,
+                prefetch_size=max(1, prefetch_size // 2),
+                num_workers=max(1, min(num_workers, 4)),
+            )
+            valid_loader.set_split("valid")
+            valid_loader.set_epoch(0)
+        else:
+            valid_loader = PrefetchDataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=max(1, num_workers),
+                prefetch_factor=2,
+            )
 
         valid_pbar = tqdm(
             valid_loader,
@@ -4055,7 +4069,9 @@ def train(
     if gan_enabled and not use_compiled_step:
         print("  GAN enabled: compiled training step disabled")
     if grad_accumulation_steps > 1:
-        print(f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})")
+        print(
+            f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
+        )
         if not use_compiled_step:
             print("  Gradient accumulation: compiled training step disabled")
     if nan_skip_batch:
@@ -4315,6 +4331,7 @@ def train(
             # Forward, backward, and update (either compiled or standard)
             fwd_start = time.time()
 
+            model_out = None
             if use_compiled_step:
                 # Use compiled training step for better performance
                 # (compiled step always updates, since fwd+bwd+update is atomic)
@@ -4343,7 +4360,7 @@ def train(
                 grad_norm = float("nan")  # Not tracked in compiled step
             else:
                 # Standard training step
-                loss, grads = loss_and_grad(
+                (loss, model_out), grads = loss_and_grad(
                     model,
                     noisy_real,
                     noisy_imag,
@@ -4431,13 +4448,28 @@ def train(
                 if should_sync:
                     mx.eval(model.parameters(), optimizer.state)
 
+            pred_spec_for_logging = None
+            if model_out is not None:
+                pred_spec_for_logging = (
+                    mx.stop_gradient(model_out[0]),
+                    mx.stop_gradient(model_out[1]),
+                )
+
             gan_d_loss_val = 0.0
             if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
                 do_disc_update = (global_step % gan_disc_update_freq) == 0
                 if do_disc_update:
                     _, disc_loss_fn = gan_loss_fns
 
-                    pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                    if pred_spec_for_logging is None:
+                        pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        pred_spec = (
+                            mx.stop_gradient(pred_spec[0]),
+                            mx.stop_gradient(pred_spec[1]),
+                        )
+                    else:
+                        pred_spec = pred_spec_for_logging
+                    pred_spec_for_logging = pred_spec
                     if gan_istft is not None:
                         pred_wav, clean_wav = specs_to_wavs(
                             pred_spec,
@@ -4547,8 +4579,13 @@ def train(
                     or use_mrstft_loss
                     or gan_active
                 ):
-                    # Extra forward pass for component logging (only on sync steps)
-                    out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                    out = pred_spec_for_logging
+                    if out is None:
+                        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        out = (
+                            mx.stop_gradient(out[0]),
+                            mx.stop_gradient(out[1]),
+                        )
                     if debugger is not None:
                         debugger.check("model.out_real", out[0], debug_ctx)
                         debugger.check("model.out_imag", out[1], debug_ctx)
