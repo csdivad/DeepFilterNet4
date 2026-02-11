@@ -91,6 +91,34 @@ python -m df_mlx.train_dynamic \
     --p-reverb 0.5
 ```
 
+#### Benchmark Dynamic Data Pipeline
+
+Use the benchmark harness to compare loader throughput and tail latency
+across worker counts for both `PrefetchDataLoader` and `MLXDataStream`.
+
+```bash
+# Cache-backed benchmark (recommended)
+python -m df_mlx.benchmark_pipeline \
+    --cache-dir /path/to/audio_cache \
+    --batch-size 8 \
+    --batches 200 \
+    --workers 1,2,4,8 \
+    --backends prefetch,mlx_stream \
+    --json-out ./benchmarks/df_mlx_pipeline.json
+
+# Raw file-list benchmark (without cache)
+python -m df_mlx.benchmark_pipeline \
+    --speech-list ./file_lists/speech.txt \
+    --noise-list ./file_lists/noise.txt \
+    --rir-list ./file_lists/rir.txt \
+    --batch-size 8 \
+    --batches 100 \
+    --workers 1,2,4,8
+```
+
+The script reports mean/p50/p95/p99 batch fetch latency, throughput
+(`batches/s`, `samples/s`), and measured batch/sample counts.
+
 #### Run-config (CLI/runtime settings)
 
 `--config` remains the dataset/mixer JSON. Use `--run-config` for all CLI/runtime
