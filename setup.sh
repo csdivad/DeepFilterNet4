@@ -409,13 +409,38 @@ if [[ $BUILD_PYDF -eq 1 ]]; then
 fi
 
 if [[ $BUILD_PYDF_DATA -eq 1 ]]; then
+  # hdf5-rust rev pinned by this repo supports HDF5 1.x.
+  # Homebrew now defaults to hdf5 2.x, which causes pyDF-data dynamic linking to fail.
+  # Detect this case and switch to static HDF5 build proactively.
+  if [[ "$PLATFORM_OS" == "Darwin" && "$PYDF_DATA_FEATURES" != *"hdf5-static"* ]] \
+    && command -v brew >/dev/null 2>&1; then
+    brew_hdf5_prefix="$(brew --prefix hdf5 2>/dev/null || true)"
+    brew_hdf5_cfg="${brew_hdf5_prefix}/include/H5pubconf.h"
+    if [[ -f "$brew_hdf5_cfg" ]]; then
+      brew_hdf5_version="$(awk -F'"' '/#define H5_VERSION / { print $2; exit }' "$brew_hdf5_cfg")"
+      if [[ "$brew_hdf5_version" == 2.* ]]; then
+        echo "Detected Homebrew HDF5 ${brew_hdf5_version}; using hdf5-static for pyDF-data."
+        PYDF_DATA_FEATURES="--features hdf5-static"
+      fi
+    fi
+  fi
+
   pydf_data_args=(--release -m pyDF-data/Cargo.toml)
   if [[ -n "$PYDF_DATA_FEATURES" ]]; then
     # shellcheck disable=SC2206
     pydf_data_args+=($PYDF_DATA_FEATURES)
   fi
   echo "  - Building pyDF-data (maturin develop ${pydf_data_args[*]})"
-  maturin develop "${pydf_data_args[@]}"
+  if ! maturin develop "${pydf_data_args[@]}"; then
+    if [[ "$PYDF_DATA_FEATURES" == *"hdf5-static"* ]]; then
+      echo "ERROR: pyDF-data build failed even with hdf5-static enabled." >&2
+      exit 1
+    fi
+    echo "⚠️  pyDF-data build failed with system HDF5; retrying with bundled static HDF5."
+    pydf_data_retry_args=(--release --features hdf5-static -m pyDF-data/Cargo.toml)
+    echo "  - Retrying pyDF-data (maturin develop ${pydf_data_retry_args[*]})"
+    maturin develop "${pydf_data_retry_args[@]}"
+  fi
 fi
 
 echo "==> Done."
