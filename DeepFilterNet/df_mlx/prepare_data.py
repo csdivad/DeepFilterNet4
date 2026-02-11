@@ -27,7 +27,7 @@ Requirements:
 import argparse
 import random
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List, Optional, Tuple, cast
 
 import numpy as np
@@ -780,19 +780,16 @@ def main():
                                 files_exhausted = True
                                 break
 
-                        # Process results and submit new tasks as slots become available
+                        # Process results and submit new tasks as slots become available.
+                        # Use wait(FIRST_COMPLETED) to avoid busy-wait polling.
                         while active_futures and not is_shutdown_requested():
-                            # Wait for any future to complete (with timeout to check shutdown)
-                            done_futures = []
-                            for future in list(active_futures.keys()):
-                                if future.done():
-                                    done_futures.append(future)
+                            done_futures, _ = wait(
+                                active_futures.keys(),
+                                timeout=0.1,
+                                return_when=FIRST_COMPLETED,
+                            )
 
                             if not done_futures:
-                                # Brief sleep to avoid busy-waiting
-                                import time
-
-                                time.sleep(0.001)
                                 continue
 
                             for future in done_futures:

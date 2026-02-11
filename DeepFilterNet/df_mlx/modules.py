@@ -514,43 +514,19 @@ class DfOp(nn.Module):
         df_real_pad = mx.pad(df_real, [(0, 0), (pad_past, pad_future), (0, 0)])
         df_imag_pad = mx.pad(df_imag, [(0, 0), (pad_past, pad_future), (0, 0)])
 
-        # Apply filtering frame by frame
-        out_real_list = []
-        out_imag_list = []
+        # Build all tap-aligned input windows at once:
+        # (batch, time, nb_df, df_order). This removes the O(time) Python loop.
+        in_real = mx.stack([df_real_pad[:, k : k + time, :] for k in range(self.df_order)], axis=-1)
+        in_imag = mx.stack([df_imag_pad[:, k : k + time, :] for k in range(self.df_order)], axis=-1)
 
-        for t in range(time):
-            # Get filter coefficients for this frame
-            coef_t = coef[:, t, :, :, :]  # (batch, nb_df, df_order, 2)
-            coef_real = coef_t[:, :, :, 0]  # (batch, nb_df, df_order)
-            coef_imag = coef_t[:, :, :, 1]
+        # Filter coefficients: (batch, time, nb_df, df_order)
+        coef_real = coef[:, :, :, :, 0]
+        coef_imag = coef[:, :, :, :, 1]
 
-            # Get input frames for this output
-            # (batch, df_order, nb_df)
-            in_real = []
-            in_imag = []
-            for k in range(self.df_order):
-                in_real.append(df_real_pad[:, t + k, :])
-                in_imag.append(df_imag_pad[:, t + k, :])
-
-            in_real = mx.stack(in_real, axis=1)  # (batch, df_order, nb_df)
-            in_imag = mx.stack(in_imag, axis=1)
-
-            # Transpose for multiplication: (batch, nb_df, df_order)
-            in_real = mx.transpose(in_real, (0, 2, 1))
-            in_imag = mx.transpose(in_imag, (0, 2, 1))
-
-            # Complex multiplication and sum over filter taps
-            # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-            # Sum over df_order dimension
-            y_real = mx.sum(coef_real * in_real - coef_imag * in_imag, axis=-1)
-            y_imag = mx.sum(coef_real * in_imag + coef_imag * in_real, axis=-1)
-
-            out_real_list.append(y_real)
-            out_imag_list.append(y_imag)
-
-        # Stack time frames
-        df_out_real = mx.stack(out_real_list, axis=1)  # (batch, time, nb_df)
-        df_out_imag = mx.stack(out_imag_list, axis=1)
+        # Complex multiplication and sum over taps:
+        # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+        df_out_real = mx.sum(coef_real * in_real - coef_imag * in_imag, axis=-1)
+        df_out_imag = mx.sum(coef_real * in_imag + coef_imag * in_real, axis=-1)
 
         # Combine with non-DF frequencies (pass-through)
         if n_freqs > self.nb_df:
