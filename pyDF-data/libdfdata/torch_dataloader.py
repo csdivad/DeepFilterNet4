@@ -16,6 +16,10 @@ from torch.utils.data._utils.pin_memory import _pin_memory_loop
 from libdfdata import _FdDataLoader
 
 
+class DataLoaderTimeoutError(RuntimeError):
+    """Raised when the Rust dataloader backend times out."""
+
+
 class Batch:
     def __init__(self, b: Tuple[np.ndarray, ...]):
         # Pytorch complains that the returned numpy arrays are not writable. Since they were
@@ -222,7 +226,7 @@ class PytorchDataLoader:
                     if str(e) == "DF dataloader error: TimeoutError":
                         logger.error("{}. Stopping epoch.".format(str(e)))
                         self.cleanup_pin_memory_thread()
-                        exit(1)
+                        raise DataLoaderTimeoutError(str(e)) from e
                     logger.error("Error during get_batch(): {}".format(str(e)))
                     raise e
                 except StopIteration:

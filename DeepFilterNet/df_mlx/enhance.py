@@ -21,7 +21,7 @@ import mlx.core as mx
 import numpy as np
 from loguru import logger
 
-from .config import ModelParams4
+from .config import ModelParams4, load_config
 from .model import DfNet4, StreamingDfNet4
 
 # Default pretrained models
@@ -190,6 +190,8 @@ def load_model(
     elif model_path in PRETRAINED_MODELS:
         model_path = maybe_download_model(model_path)
 
+    epoch = normalize_epoch_spec(epoch)
+
     model_dir = Path(model_path)
     if not model_dir.exists():
         raise FileNotFoundError(f"Model directory not found: {model_dir}")
@@ -199,7 +201,7 @@ def load_model(
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
-    params = ModelParams4()  # Use defaults for now
+    params = load_config(str(config_path))
 
     # Initialize model
     model = DfNet4(params)
@@ -213,7 +215,7 @@ def load_model(
         if checkpoint_path:
             weights: Dict[str, mx.array] = mx.load(str(checkpoint_path))  # type: ignore[assignment]
             model.load_weights(list(weights.items()))
-            loaded_epoch = 0  # TODO: extract epoch from checkpoint
+            loaded_epoch = parse_epoch_from_checkpoint_name(checkpoint_path.name)
             logger.info(f"Loaded checkpoint from {checkpoint_path.name}")
         else:
             logger.warning(f"No checkpoint found in {checkpoint_dir}")
@@ -279,6 +281,36 @@ def find_checkpoint(
         return checkpoints[0] if checkpoints else None
 
     return None
+
+
+def normalize_epoch_spec(epoch: Union[str, int]) -> Union[str, int]:
+    """Normalize epoch CLI/input value.
+
+    Accepts:
+    - int values
+    - 'best', 'latest', 'none'
+    - integer strings (e.g. '12')
+    """
+    if isinstance(epoch, int):
+        return epoch
+    epoch_norm = str(epoch).strip().lower()
+    if epoch_norm in {"best", "latest", "none"}:
+        return epoch_norm
+    if epoch_norm.isdigit():
+        return int(epoch_norm)
+    raise ValueError(f"Invalid epoch '{epoch}'. Expected 'best', 'latest', 'none', or integer.")
+
+
+def parse_epoch_from_checkpoint_name(name: str) -> int:
+    """Extract epoch number from checkpoint filename if present."""
+    stem = Path(name).stem
+    if "epoch_" not in stem:
+        return 0
+    try:
+        token = stem.split("epoch_")[-1].split("_")[0]
+        return int(token)
+    except ValueError:
+        return 0
 
 
 def maybe_download_model(name: str) -> str:
@@ -442,6 +474,9 @@ def enhance_streaming(
     Yields:
         Enhanced audio chunks
     """
+    if chunk_size_samples <= 0:
+        raise ValueError(f"chunk_size_samples must be > 0, got {chunk_size_samples}")
+
     streaming_model = StreamingDfNet4(model)
     state = streaming_model.init_state(batch_size=1)
 
@@ -548,6 +583,7 @@ def enhance_batch(
     suffix: Optional[str] = None,
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
+    chunk_size_ms: float = 100.0,
 ) -> List[str]:
     """Enhance multiple audio files.
 
@@ -581,6 +617,103 @@ def enhance_batch(
         )
         output_paths.append(out_path)
 
+    return output_paths
+
+
+def enhance_file_streaming(
+    model: DfNet4,
+    params: ModelParams4,
+    input_path: str,
+    output_dir: Optional[str] = None,
+    suffix: Optional[str] = None,
+    compensate_delay: bool = True,
+    atten_lim_db: Optional[float] = None,
+    chunk_size_ms: float = 100.0,
+) -> str:
+    """Enhance a single file using frame-by-frame streaming inference."""
+    if atten_lim_db is not None:
+        raise ValueError("--atten-lim is not supported with --streaming")
+
+    if not compensate_delay:
+        logger.warning("--no-delay-compensation is ignored in streaming mode")
+
+    if chunk_size_ms <= 0:
+        raise ValueError(f"chunk_size_ms must be > 0, got {chunk_size_ms}")
+
+    audio, orig_sr = load_audio(input_path, target_sr=params.sr)
+    chunk_size_samples = max(params.hop_size, int(params.sr * (chunk_size_ms / 1000.0)))
+
+    def chunk_iter() -> Iterator[mx.array]:
+        n_samples = int(audio.shape[-1])
+        for start in range(0, n_samples, chunk_size_samples):
+            yield audio[start : start + chunk_size_samples]
+
+    t0 = time.time()
+    enhanced_chunks = list(
+        enhance_streaming(
+            model,
+            chunk_iter(),
+            params,
+            chunk_size_samples=chunk_size_samples,
+        )
+    )
+    if enhanced_chunks:
+        enhanced = mx.concatenate(enhanced_chunks, axis=0)
+        enhanced = enhanced[: audio.shape[-1]]
+    else:
+        enhanced = mx.zeros_like(audio)
+    mx.eval(enhanced)
+    t1 = time.time()
+
+    if orig_sr != params.sr:
+        enhanced_np = resample(enhanced, params.sr, orig_sr)
+    else:
+        enhanced_np = np.array(enhanced)
+
+    audio_duration = len(audio) / params.sr
+    processing_time = t1 - t0
+    rtf = processing_time / max(audio_duration, 1e-8)
+
+    out_path = save_audio(
+        enhanced_np,
+        input_path,
+        sr=orig_sr,
+        output_dir=output_dir,
+        suffix=suffix,
+    )
+    logger.info(
+        f"Streaming-enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s " f"(RT factor: {rtf:.3f})"
+    )
+    return out_path
+
+
+def enhance_batch_streaming(
+    model: DfNet4,
+    params: ModelParams4,
+    input_paths: List[str],
+    output_dir: Optional[str] = None,
+    suffix: Optional[str] = None,
+    compensate_delay: bool = True,
+    atten_lim_db: Optional[float] = None,
+    chunk_size_ms: float = 100.0,
+) -> List[str]:
+    """Enhance multiple files using streaming inference."""
+    output_paths = []
+    n_files = len(input_paths)
+    for i, path in enumerate(input_paths):
+        progress = (i + 1) / n_files * 100
+        logger.info(f"[{progress:5.1f}%] Streaming: {os.path.basename(path)}")
+        out_path = enhance_file_streaming(
+            model,
+            params,
+            path,
+            output_dir=output_dir,
+            suffix=suffix,
+            compensate_delay=compensate_delay,
+            atten_lim_db=atten_lim_db,
+            chunk_size_ms=chunk_size_ms,
+        )
+        output_paths.append(out_path)
     return output_paths
 
 
@@ -656,6 +789,12 @@ def setup_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use streaming mode for real-time processing",
     )
+    parser.add_argument(
+        "--streaming-chunk-ms",
+        type=float,
+        default=100.0,
+        help="Chunk size in milliseconds for streaming mode",
+    )
 
     # Logging
     parser.add_argument(
@@ -719,7 +858,8 @@ def main(args: Optional[argparse.Namespace] = None):
     # Enhance files
     t_start = time.time()
 
-    output_paths = enhance_batch(
+    enhance_fn = enhance_batch_streaming if args.streaming else enhance_batch
+    output_paths = enhance_fn(
         model,
         params,
         input_files,
@@ -727,6 +867,7 @@ def main(args: Optional[argparse.Namespace] = None):
         suffix=suffix,
         compensate_delay=not args.no_delay_compensation,
         atten_lim_db=args.atten_lim,
+        chunk_size_ms=getattr(args, "streaming_chunk_ms", 100.0),
     )
 
     t_total = time.time() - t_start

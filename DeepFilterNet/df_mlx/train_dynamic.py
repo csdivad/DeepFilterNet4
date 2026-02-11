@@ -51,6 +51,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Tuple, cast
 
@@ -1858,6 +1859,23 @@ def compute_resume_epoch(state: dict) -> int:
     if kind in _COMPLETED_KINDS:
         return epoch + 1
     return epoch
+
+
+def maybe_skip_resume_batches(
+    data_iterator,
+    *,
+    resume_from: str | None,
+    epoch: int,
+    start_epoch: int,
+    resume_batch_idx: int,
+):
+    """Skip already-processed batches when resuming an in-progress epoch.
+
+    Returns a tuple of (iterator, did_skip).
+    """
+    if resume_from and epoch == start_epoch and resume_batch_idx > 0:
+        return islice(data_iterator, resume_batch_idx, None), True
+    return data_iterator, False
 
 
 def validate_checkpoint_dir(
@@ -4240,6 +4258,15 @@ def train(
                 num_workers=config.num_workers,
                 prefetch_factor=2,
             )
+            data_iterator, did_skip = maybe_skip_resume_batches(
+                data_iterator,
+                resume_from=resume_from,
+                epoch=epoch,
+                start_epoch=start_epoch,
+                resume_batch_idx=resume_batch_idx,
+            )
+            if did_skip:
+                print(f"  Resuming epoch {epoch + 1} from batch {resume_batch_idx}")
 
         # Training progress bar
         train_total = steps_per_epoch

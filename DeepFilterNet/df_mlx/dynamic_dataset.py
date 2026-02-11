@@ -971,6 +971,7 @@ class DynamicDataset:
         # Current split
         self._current_split = "train"
         self._indices: List[int] = []
+        self._regenerate_indices()
 
     def _split_files(self) -> None:
         """Split speech files into train/valid/test."""
@@ -1098,6 +1099,11 @@ class DynamicDataset:
         6. Compute STFT and features
         """
         # Use per-sample RNG so get_sample() remains thread-safe under prefetch workers.
+        if idx < 0 or idx >= len(self._indices):
+            raise IndexError(
+                f"Sample index {idx} out of range for split '{self._current_split}' " f"(size={len(self._indices)})."
+            )
+
         sample_seed = self.config.seed + self._epoch * 1000000 + idx
         rng = random.Random(sample_seed)
 
@@ -1282,18 +1288,22 @@ class PrefetchDataLoader:
         num_workers: int = 4,
         prefetch_factor: int = 2,
         drop_last: bool = True,
+        strict_failures: bool = True,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.prefetch_factor = prefetch_factor
         self.drop_last = drop_last
+        self.strict_failures = strict_failures
 
     def __iter__(self) -> Iterator[Dict[str, mx.array]]:
         """Iterate with background prefetching."""
         # Queue to hold prefetched batches
         prefetch_queue: Queue = Queue(maxsize=self.prefetch_factor)
         stop_event = threading.Event()
+        worker_errors: List[BaseException] = []
+        stats: Dict[str, int] = {"samples_succeeded": 0, "samples_failed": 0}
 
         def _to_batch(samples: List[Sample]) -> Dict[str, mx.array]:
             return {
@@ -1342,13 +1352,27 @@ class PrefetchDataLoader:
                         next_consume += 1
                         submit_pending(executor)
 
+                        sample_idx = next_consume - 1
+                        failed_on_exception = False
                         try:
                             sample = future.result()
-                        except Exception:
+                        except Exception as exc:
+                            failed_on_exception = True
+                            stats["samples_failed"] += 1
+                            if self.strict_failures:
+                                worker_errors.append(
+                                    RuntimeError(
+                                        f"PrefetchDataLoader failed while loading sample index " f"{sample_idx}: {exc}"
+                                    )
+                                )
+                                return
                             sample = None
                         if sample is None:
+                            if not failed_on_exception:
+                                stats["samples_failed"] += 1
                             continue
 
+                        stats["samples_succeeded"] += 1
                         batch_samples.append(sample)
                         if len(batch_samples) == self.batch_size:
                             if not _queue_put(_to_batch(batch_samples)):
@@ -1371,6 +1395,15 @@ class PrefetchDataLoader:
                 if batch is None:
                     break
                 yield batch
+
+            if worker_errors:
+                raise worker_errors[0]
+
+            if self.strict_failures and len(self.dataset) > 0 and stats["samples_succeeded"] == 0:
+                raise RuntimeError(
+                    "PrefetchDataLoader failed to load any samples from non-empty dataset. "
+                    "This matches MLXDataStream failure semantics; verify input files/cache."
+                )
         finally:
             stop_event.set()
             worker_thread.join(timeout=1.0)
