@@ -93,17 +93,26 @@ python -m df_mlx.train_dynamic \
 
 #### Benchmark Dynamic Data Pipeline
 
-Use the benchmark harness to compare loader throughput and tail latency
-across worker counts for both `PrefetchDataLoader` and `MLXDataStream`.
+Use the benchmark harness to compare loader throughput and tail latency.
+All tunable benchmark flags accept comma-separated lists, so one command
+can execute a full benchmark matrix across `PrefetchDataLoader` and
+`MLXDataStream`.
 
 ```bash
 # Cache-backed benchmark (recommended)
 python -m df_mlx.benchmark_pipeline \
     --cache-dir /path/to/audio_cache \
-    --batch-size 8 \
-    --batches 200 \
+    --split train,valid \
+    --epoch 0,1 \
+    --batch-size 8,12 \
+    --batches 150,300 \
+    --warmup-batches 5,10 \
+    --repeats 2 \
     --workers 1,2,4,8 \
+    --prefetch-factor 2,4 \
+    --prefetch-size 8,16 \
     --backends prefetch,mlx_stream \
+    --sync-arrays true,false \
     --json-out ./benchmarks/df_mlx_pipeline.json
 
 # Raw file-list benchmark (without cache)
@@ -111,9 +120,16 @@ python -m df_mlx.benchmark_pipeline \
     --speech-list ./file_lists/speech.txt \
     --noise-list ./file_lists/noise.txt \
     --rir-list ./file_lists/rir.txt \
-    --batch-size 8 \
+    --batch-size 8,12 \
     --batches 100 \
-    --workers 1,2,4,8
+    --workers 1,2,4,8 \
+    --sample-rate 48000 \
+    --segment-length 4.0,5.0 \
+    --fft-size 960,1024 \
+    --hop-size 480,512 \
+    --nb-erb 32 \
+    --nb-df 96 \
+    --seed 42,1337
 ```
 
 The script reports mean/p50/p95/p99 batch fetch latency, throughput
