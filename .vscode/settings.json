@@ -1,0 +1,7 @@
+{
+    "search.useGlobalIgnoreFiles": true,
+    "evenBetterToml.schema.associations": {
+        ".*run.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json",
+        ".*config.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json"
+    }
+}
