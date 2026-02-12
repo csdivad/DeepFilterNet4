@@ -45,3 +45,27 @@ def test_load_run_config_roundtrip(tmp_path):
     path.write_text(text, encoding="utf-8")
     cfg = load_run_config(path)
     assert cfg == RunConfig()
+
+
+def test_run_config_accepts_embedded_train_ini_tables():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "train_ini": {
+                "df": {"sr": 44100, "fft_size": 1024},
+                "train": {"max_epochs": 12},
+                "MultiResSpecLoss": {"factor": 0.5},
+            }
+        },
+    )
+    assert cfg.train_ini["df"]["sr"] == 44100
+    assert cfg.train_ini["df"]["fft_size"] == 1024
+    assert cfg.train_ini["train"]["max_epochs"] == 12
+    assert cfg.train_ini["MultiResSpecLoss"]["factor"] == 0.5
+
+
+def test_run_config_accepts_pipeline_awesome_dynamic_loss():
+    cfg = RunConfig()
+    apply_run_config_dict(cfg, {"loss": {"dynamic_loss": "pipeline_awesome"}})
+    assert cfg.loss.dynamic_loss == "pipeline_awesome"

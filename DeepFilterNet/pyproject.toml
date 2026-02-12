@@ -31,6 +31,10 @@ classifiers = [
 [project.urls]
 Repository = "https://github.com/sealad886/DeepFilterNet4"
 
+[project.includes]
+"df" = "**/*"
+"df_mlx" = "**/*"
+
 [project.optional-dependencies]
 train = ["deepfilterdataloader", "icecream"]
 eval = ["pystoi", "pesq", "scipy"]

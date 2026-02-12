@@ -363,6 +363,13 @@ def checkpoint_exists(checkpoint_dir: Path | str) -> bool:
     return (checkpoint_dir / CHECKPOINT_FILE).exists()
 
 
+def _extract_checkpoint_num(path: Path) -> int:
+    try:
+        return int(path.name.split("_")[-1])
+    except ValueError:
+        return -1
+
+
 def get_latest_checkpoint(base_dir: Path | str) -> Optional[Path]:
     """Find the latest checkpoint in a base directory.
 
@@ -387,14 +394,7 @@ def get_latest_checkpoint(base_dir: Path | str) -> Optional[Path]:
             return base_dir
         return None
 
-    # Sort by number
-    def extract_num(p: Path) -> int:
-        try:
-            return int(p.name.split("_")[-1])
-        except ValueError:
-            return -1
-
-    checkpoint_dirs.sort(key=extract_num, reverse=True)
+    checkpoint_dirs.sort(key=_extract_checkpoint_num, reverse=True)
 
     for d in checkpoint_dirs:
         if checkpoint_exists(d):
@@ -492,14 +492,7 @@ class CheckpointManager:
     def _scan_existing(self) -> None:
         """Scan for existing checkpoints."""
         checkpoint_dirs = list(self.checkpoint_dir.glob("checkpoint_*"))
-
-        def extract_num(p: Path) -> int:
-            try:
-                return int(p.name.split("_")[-1])
-            except ValueError:
-                return -1
-
-        checkpoint_dirs.sort(key=extract_num)
+        checkpoint_dirs.sort(key=_extract_checkpoint_num)
         self._checkpoints = [d for d in checkpoint_dirs if checkpoint_exists(d)]
 
     def save(

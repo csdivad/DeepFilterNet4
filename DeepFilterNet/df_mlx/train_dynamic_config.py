@@ -41,6 +41,16 @@ def _get_section(parser: configparser.ConfigParser, name: str) -> tuple[configpa
     return None, None
 
 
+def _serialize_ini_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
 def apply_train_ini_config(
     path: str,
     run_cfg: RunConfig,
@@ -49,7 +59,39 @@ def apply_train_ini_config(
     parser = configparser.ConfigParser()
     parser.optionxform = str.lower
     parser.read(path)
+    return _apply_train_ini_parser(parser, run_cfg, model_cfg)
 
+
+def apply_train_ini_tables(
+    tables: dict[str, Any],
+    run_cfg: RunConfig,
+    model_cfg: ModelParams4,
+) -> TrainIniOverrides:
+    """Apply train.py INI-compatible tables embedded in run-config TOML.
+
+    Expected shape:
+        [train_ini.df]
+        sr = 48000
+        ...
+
+        [train_ini.train]
+        max_epochs = 100
+        ...
+    """
+    parser = configparser.ConfigParser()
+    parser.optionxform = str.lower
+    for section, values in tables.items():
+        if not isinstance(values, dict):
+            continue
+        parser[section] = {str(k): _serialize_ini_value(v) for k, v in values.items() if v is not None}
+    return _apply_train_ini_parser(parser, run_cfg, model_cfg)
+
+
+def _apply_train_ini_parser(
+    parser: configparser.ConfigParser,
+    run_cfg: RunConfig,
+    model_cfg: ModelParams4,
+) -> TrainIniOverrides:
     warnings: list[str] = []
     dataset_overrides: dict[str, Any] = {}
 

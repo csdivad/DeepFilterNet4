@@ -150,6 +150,38 @@ python -m df_mlx.train_dynamic \
     --config ./file_lists/config.json
 ```
 
+Single-file mode (no separate `--train-config` INI): inline train.py-compatible
+INI sections inside the run-config TOML under `train_ini.*`.
+
+```toml
+[train_ini.df]
+sr = 48000
+fft_size = 960
+hop_size = 480
+nb_erb = 32
+nb_df = 96
+
+[train_ini.train]
+max_epochs = 100
+batch_size = 12
+num_workers = 6
+num_prefetch_batches = 18
+
+[train_ini.deepfilternet4]
+backbone = "attention"
+model_variant = "full"
+conv_ch = 64
+conv_kernel = [1, 3]
+conv_stride = [1, 2]
+
+[train_ini.MultiResSpecLoss]
+factor = 0.6
+gamma = 0.5
+factor_complex = 0.25
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+```
+
 #### Train-config (train.py-compatible INI)
 
 `train_dynamic` also accepts a train.py-style `config.ini` and maps supported

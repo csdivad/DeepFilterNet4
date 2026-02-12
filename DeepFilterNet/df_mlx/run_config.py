@@ -165,6 +165,14 @@ def _normalize_optional_int_list(value: Any) -> list[int] | None:
     raise TypeError("expected list of ints")
 
 
+def _normalize_table(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    raise TypeError("expected table")
+
+
 # ============================
 # Config dataclasses
 # ============================
@@ -669,6 +677,18 @@ class RunConfig:
     vad: VADConfig = field(default_factory=VADConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    train_ini: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "help": "Embedded train.py INI compatibility tables (optional)",
+            "normalize": _normalize_table,
+            "notes": (
+                "Use [train_ini.<section>] to inline legacy train.ini sections. "
+                "Supported sections: df, train, optim, distortion, deepfilternet4, "
+                "loss, MultiResSpecLoss, GANLoss, FeatureMatchingLoss."
+            ),
+        },
+    )
 
 
 # ============================
@@ -855,6 +875,9 @@ def generate_run_config_example() -> str:
     lines.append("# DeepFilterNet4 train_dynamic run-config (TOML)")
     lines.append("# Precedence: defaults < run-config < explicit CLI flags")
     lines.append("# NOTE: --config remains the dataset/mixer config (JSON).")
+    lines.append("# Includes all training/runtime CLI settings except meta flags:")
+    lines.append("#   --run-config (path to this TOML file)")
+    lines.append("#   --print-run-config (prints template and exits)")
     lines.append("")
 
     _emit_section(lines, "dataset", cfg.dataset)
@@ -872,5 +895,39 @@ def generate_run_config_example() -> str:
     _emit_section(lines, "vad.train", cfg.vad.train)
     _emit_section(lines, "metrics", cfg.metrics)
     _emit_section(lines, "debug", cfg.debug)
+    lines.append("# Optional: inline train.py INI-compatible sections in TOML")
+    lines.append("# This lets you use a single run-config file without --train-config.")
+    lines.append("# Example:")
+    lines.append("# [train_ini.df]")
+    lines.append("# sr = 48000")
+    lines.append("# fft_size = 960")
+    lines.append("# hop_size = 480")
+    lines.append("# nb_erb = 32")
+    lines.append("# nb_df = 96")
+    lines.append("#")
+    lines.append("# [train_ini.train]")
+    lines.append("# max_epochs = 100")
+    lines.append("# batch_size = 12")
+    lines.append("# num_workers = 6")
+    lines.append("# num_prefetch_batches = 18")
+    lines.append("# max_sample_len_s = 5.0")
+    lines.append("#")
+    lines.append("# [train_ini.deepfilternet4]")
+    lines.append("# backbone = \"attention\"")
+    lines.append("# model_variant = \"full\"")
+    lines.append("# conv_ch = 64")
+    lines.append("# conv_kernel = [1, 3]")
+    lines.append("# conv_stride = [1, 2]")
+    lines.append("# emb_hidden_dim = 256")
+    lines.append("# emb_num_layers = 4")
+    lines.append("# df_hidden_dim = 256")
+    lines.append("# df_num_layers = 3")
+    lines.append("#")
+    lines.append("# [train_ini.MultiResSpecLoss]")
+    lines.append("# factor = 0.6")
+    lines.append("# gamma = 0.5")
+    lines.append("# factor_complex = 0.25")
+    lines.append("# fft_sizes = [512, 1024, 2048]")
+    lines.append("# hop_sizes = [128, 256, 512]")
 
     return "\n".join(lines).rstrip() + "\n"

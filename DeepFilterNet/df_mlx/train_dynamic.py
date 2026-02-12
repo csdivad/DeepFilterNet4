@@ -70,7 +70,8 @@ from df_mlx.run_config import (  # noqa: E402
     set_by_path,
     validate_run_config,
 )
-from df_mlx.train_dynamic_config import apply_train_ini_config  # noqa: E402
+from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
+from df_mlx.train_dynamic_config import apply_train_ini_config, apply_train_ini_tables  # noqa: E402
 
 if TYPE_CHECKING:
     from df_mlx.config import ModelParams4
@@ -1578,41 +1579,8 @@ def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
         Tuple of (clipped_grads, grad_norm) where grad_norm is an MLX array.
         Call float(grad_norm) outside compiled functions to get the scalar value.
     """
-    flat_grads = []
-
-    def flatten(x):
-        if isinstance(x, mx.array):
-            flat_grads.append(x.reshape(-1))
-        elif isinstance(x, dict):
-            for v in x.values():
-                flatten(v)
-        elif isinstance(x, (list, tuple)):
-            for v in x:
-                flatten(v)
-
-    flatten(grads)
-
-    if not flat_grads:
-        return grads, mx.array(0.0)
-
-    total_norm_sq = sum(mx.sum(g**2) for g in flat_grads)
-    total_norm = mx.sqrt(total_norm_sq)
-
-    clip_coef = max_norm / (total_norm + 1e-6)
-    clip_coef = mx.minimum(clip_coef, mx.array(1.0))
-
-    def apply_clip(x):
-        if isinstance(x, mx.array):
-            return x * clip_coef
-        elif isinstance(x, dict):
-            return {k: apply_clip(v) for k, v in x.items()}
-        elif isinstance(x, list):
-            return [apply_clip(v) for v in x]
-        elif isinstance(x, tuple):
-            return tuple(apply_clip(v) for v in x)
-        return x
-
-    return cast(dict, apply_clip(grads)), total_norm
+    clipped, total_norm = clip_grad_norm_tree(grads, max_norm)
+    return cast(dict, clipped), total_norm
 
 
 def accumulate_grads(accumulated: Any | None, new_grads: Any) -> Any:
@@ -5357,7 +5325,7 @@ def main():
         "--learning-rate-min",
         type=float,
         default=None,
-        help="Minimum learning rate for cosine schedule (defaults to 1% of base)",
+        help="Minimum learning rate for cosine schedule (defaults to 1%% of base)",
     )
     parser.add_argument(
         "--weight-decay",
@@ -5901,26 +5869,32 @@ def main():
     if args.run_config:
         run_cfg = load_run_config(args.run_config, base=run_cfg)
     train_config_path = args.train_config or run_cfg.training.train_config
-    model_cfg = None
+    from df_mlx.config import get_default_config
+
+    model_cfg = get_default_config()
     dataset_overrides: dict[str, Any] = {}
     ini_warnings: list[str] = []
     if train_config_path:
-        from df_mlx.config import get_default_config
-
-        model_cfg = get_default_config()
         ini_overrides = apply_train_ini_config(train_config_path, run_cfg, model_cfg)
-        dataset_overrides = ini_overrides.dataset_overrides
-        ini_warnings = ini_overrides.warnings
+        dataset_overrides.update(ini_overrides.dataset_overrides)
+        ini_warnings.extend(ini_overrides.warnings)
+    # Enforce documented precedence: defaults < train-config < run-config < CLI.
+    if args.run_config:
+        run_cfg = load_run_config(args.run_config, base=run_cfg)
+    # Single-file mode: apply INI-compatible sections in run-config.
+    # Then re-apply run-config so explicit top-level TOML values win over train_ini.* compatibility tables.
+    if run_cfg.train_ini:
+        toml_ini_overrides = apply_train_ini_tables(run_cfg.train_ini, run_cfg, model_cfg)
+        dataset_overrides.update(toml_ini_overrides.dataset_overrides)
+        ini_warnings.extend(toml_ini_overrides.warnings)
+        if args.run_config:
+            run_cfg = load_run_config(args.run_config, base=run_cfg)
     _apply_cli_overrides(run_cfg, args, sys.argv[1:])
     validate_run_config(run_cfg)
     if ini_warnings:
-        print("Train-config warnings:")
+        print("Train-config compatibility warnings:")
         for warning in ini_warnings:
             print(f"  - {warning}")
-    if model_cfg is None:
-        from df_mlx.config import get_default_config
-
-        model_cfg = get_default_config()
     # Ensure backbone override from CLI/run-config wins
     model_cfg.backbone.backbone_type = run_cfg.model.backbone_type  # type: ignore[assignment]
 
