@@ -1,0 +1,670 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/sealad886/DeepFilterNet4/schemas/run-config.schema.json",
+  "title": "DeepFilterNet4 Run Configuration",
+  "description": "Configuration schema for df_mlx.train_dynamic run configs",
+  "type": "object",
+  "properties": {
+    "dataset": {
+      "type": "object",
+      "description": "Dataset configuration",
+      "properties": {
+        "cache_dir": {
+          "type": ["string", "null"],
+          "description": "Path to pre-built audio cache (from build_audio_cache.py)"
+        },
+        "speech_list": {
+          "type": ["string", "null"],
+          "description": "Path to file containing speech file paths (one per line)"
+        },
+        "noise_list": {
+          "type": ["string", "null"],
+          "description": "Path to file containing noise file paths (one per line)"
+        },
+        "rir_list": {
+          "type": ["string", "null"],
+          "description": "Path to file containing RIR file paths (one per line)"
+        },
+        "config": {
+          "type": ["string", "null"],
+          "description": "Dataset/mixer config JSON path (same as --config)"
+        },
+        "snr_range": {
+          "type": ["array", "null"],
+          "description": "Override base SNR range in dB (e.g., [-5, 40])",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "snr_range_extreme": {
+          "type": ["array", "null"],
+          "description": "Override extreme SNR range in dB (e.g., [-20, -5])",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "p_extreme_snr": {
+          "type": ["number", "null"],
+          "description": "Probability of sampling from extreme SNR range (0-1)",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "snr_range_very_low": {
+          "type": ["array", "null"],
+          "description": "Override very-low SNR range in dB (e.g., [-30, -20])",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "p_very_low_snr": {
+          "type": ["number", "null"],
+          "description": "Probability of sampling from very-low SNR range (0-1)",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "p_interfer_speech": {
+          "type": ["number", "null"],
+          "description": "Probability of adding interfering speaker (0-1)",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "speech_gain_range": {
+          "type": ["array", "null"],
+          "description": "Override speech gain range in dB (e.g., [-12, 12])",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "noise_gain_range": {
+          "type": ["array", "null"],
+          "description": "Override noise gain range in dB (e.g., [-12, 12])",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "augmentation": {
+      "type": "object",
+      "description": "Audio augmentation configuration",
+      "properties": {
+        "p_reverb": {
+          "type": "number",
+          "description": "Probability of applying reverb",
+          "default": 0.5,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "p_clipping": {
+          "type": "number",
+          "description": "Probability of clipping distortion",
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "training": {
+      "type": "object",
+      "description": "Training hyperparameters",
+      "properties": {
+        "epochs": {
+          "type": "integer",
+          "description": "Number of training epochs",
+          "default": 100,
+          "minimum": 1
+        },
+        "batch_size": {
+          "type": "integer",
+          "description": "Batch size",
+          "default": 8,
+          "minimum": 1
+        },
+        "learning_rate": {
+          "type": "number",
+          "description": "Initial learning rate",
+          "default": 0.0001,
+          "minimum": 0.0
+        },
+        "learning_rate_min": {
+          "type": ["number", "null"],
+          "description": "Minimum learning rate for cosine schedule (None=1% of base)",
+          "minimum": 0.0
+        },
+        "weight_decay": {
+          "type": "number",
+          "description": "Weight decay for AdamW",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "warmup_epochs": {
+          "type": "integer",
+          "description": "Warmup epochs",
+          "default": 5,
+          "minimum": 0
+        },
+        "curriculum_warmup_epochs": {
+          "type": "integer",
+          "description": "Curriculum learning warmup epochs (0=disabled). SNR/interferer probabilities ramp from 0 to target.",
+          "default": 0,
+          "minimum": 0
+        },
+        "patience": {
+          "type": "integer",
+          "description": "Early stopping patience",
+          "default": 10,
+          "minimum": 0
+        },
+        "grad_accumulation_steps": {
+          "type": "integer",
+          "description": "Gradient accumulation steps",
+          "default": 1,
+          "minimum": 1
+        },
+        "max_grad_norm": {
+          "type": "number",
+          "description": "Maximum gradient norm",
+          "default": 1.0,
+          "minimum": 0.0
+        },
+        "eval_frequency": {
+          "type": "integer",
+          "description": "Sync/eval frequency in batches",
+          "default": 10,
+          "minimum": 1
+        },
+        "fp16": {
+          "description": "Enable FP16 (true/false) or 'auto' for hardware default",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string", "enum": ["auto"] },
+            { "type": "null" }
+          ],
+          "default": "auto"
+        },
+        "seed": {
+          "type": ["integer", "null"],
+          "description": "Optional RNG seed override (-1 disables override)",
+          "minimum": 0
+        },
+        "train_config": {
+          "type": ["string", "null"],
+          "description": "Path to train.py-compatible INI config (optional)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataloader": {
+      "type": "object",
+      "description": "Data loading configuration",
+      "properties": {
+        "num_workers": {
+          "type": "integer",
+          "description": "Data loader workers",
+          "default": 4,
+          "minimum": 0
+        },
+        "prefetch_size": {
+          "type": "integer",
+          "description": "Prefetch size",
+          "default": 8,
+          "minimum": 1
+        },
+        "use_mlx_data": {
+          "type": "boolean",
+          "description": "Use MLXDataStream if available",
+          "default": true
+        },
+        "max_train_batches": {
+          "type": ["integer", "null"],
+          "description": "Limit number of train batches per epoch (-1 disables)",
+          "minimum": 1
+        },
+        "max_valid_batches": {
+          "type": ["integer", "null"],
+          "description": "Limit number of validation batches (-1 disables)",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "description": "Checkpoint and resumption configuration",
+      "properties": {
+        "checkpoint_dir": {
+          "type": "string",
+          "description": "Directory for checkpoints",
+          "default": "checkpoints"
+        },
+        "save_strategy": {
+          "type": "string",
+          "description": "Checkpoint cadence: no | epoch | steps",
+          "enum": ["no", "epoch", "steps"],
+          "default": "epoch"
+        },
+        "save_steps": {
+          "type": "integer",
+          "description": "Steps between checkpoints",
+          "default": 500,
+          "minimum": 1
+        },
+        "save_total_limit": {
+          "type": ["integer", "null"],
+          "description": "Max checkpoints to keep (-1 disables pruning)",
+          "minimum": 1
+        },
+        "checkpoint_batches": {
+          "type": "integer",
+          "description": "Save data checkpoint every N batches (0 disables)",
+          "default": 0,
+          "minimum": 0
+        },
+        "validate_every": {
+          "type": "integer",
+          "description": "Validate every N epochs",
+          "default": 1,
+          "minimum": 1
+        },
+        "resume": {
+          "description": "Resume from checkpoint: true (auto) | false | path",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string" }
+          ],
+          "default": false
+        },
+        "resume_data": {
+          "description": "Resume data state: true (auto) | false | path",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string" }
+          ],
+          "default": false
+        },
+        "check_chkpts": {
+          "type": "boolean",
+          "description": "Validate checkpoints before start",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "description": "Model architecture configuration",
+      "properties": {
+        "backbone_type": {
+          "type": "string",
+          "description": "Backbone type: mamba | gru | attention",
+          "enum": ["mamba", "gru", "attention"],
+          "default": "mamba"
+        },
+        "variant": {
+          "type": "string",
+          "description": "Model variant: full | lite",
+          "enum": ["full", "lite"],
+          "default": "full"
+        }
+      },
+      "additionalProperties": false
+    },
+    "loss": {
+      "type": "object",
+      "description": "Loss function configuration",
+      "properties": {
+        "dynamic_loss": {
+          "type": "string",
+          "description": "Dynamic loss: baseline | awesome | pipeline_awesome",
+          "enum": ["baseline", "awesome", "pipeline_awesome"],
+          "default": "baseline"
+        },
+        "awesome": {
+          "type": "object",
+          "description": "Awesome loss configuration (used when dynamic_loss is 'awesome' or 'pipeline_awesome')",
+          "properties": {
+            "loss_weight": {
+              "type": "number",
+              "description": "Awesome loss weight",
+              "default": 0.4,
+              "minimum": 0.0
+            },
+            "mask_sharpness": {
+              "type": "number",
+              "description": "Mask sharpness",
+              "default": 6.0,
+              "minimum": 0.0
+            },
+            "warmup_steps": {
+              "type": "integer",
+              "description": "Warmup steps for awesome loss",
+              "default": 0,
+              "minimum": 0
+            },
+            "proxy_enabled": {
+              "type": "boolean",
+              "description": "Enable cheap VAD proxy gating",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "mrstft": {
+          "type": "object",
+          "description": "Multi-resolution STFT loss configuration",
+          "properties": {
+            "factor": {
+              "type": "number",
+              "description": "Multi-res STFT loss weight (0 disables)",
+              "default": 0.0,
+              "minimum": 0.0
+            },
+            "gamma": {
+              "type": "number",
+              "description": "Magnitude compression exponent",
+              "default": 1.0,
+              "minimum": 0.0
+            },
+            "f_complex": {
+              "type": ["number", "null"],
+              "description": "Complex loss weight (None disables)",
+              "minimum": 0.0
+            },
+            "fft_sizes": {
+              "type": "array",
+              "description": "FFT sizes for multi-res loss",
+              "items": { "type": "integer", "minimum": 1 },
+              "default": [512, 1024, 2048]
+            },
+            "hop_sizes": {
+              "type": ["array", "null"],
+              "description": "Hop sizes for multi-res loss (None=fft_size//4)",
+              "items": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "gan": {
+      "type": "object",
+      "description": "GAN adversarial training configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable GAN adversarial training",
+          "default": false
+        },
+        "start_epoch": {
+          "type": "integer",
+          "description": "Epoch to start GAN training (0-based)",
+          "default": 0,
+          "minimum": 0
+        },
+        "ramp_epochs": {
+          "type": "integer",
+          "description": "Linearly ramp GAN weights over N epochs (0 disables ramp)",
+          "default": 0,
+          "minimum": 0
+        },
+        "adv_weight": {
+          "type": "number",
+          "description": "Generator adversarial loss weight",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "fm_weight": {
+          "type": "number",
+          "description": "Feature matching loss weight",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "discriminator": {
+          "type": "string",
+          "description": "Discriminator type: combined | mpd | msd",
+          "enum": ["combined", "mpd", "msd"],
+          "default": "combined"
+        },
+        "mpd_periods": {
+          "type": "array",
+          "description": "MPD periods",
+          "items": { "type": "integer", "minimum": 1 },
+          "default": [2, 3, 5, 7, 11]
+        },
+        "msd_scales": {
+          "type": "integer",
+          "description": "MSD number of scales",
+          "default": 3,
+          "minimum": 1
+        },
+        "disc_lr": {
+          "type": "number",
+          "description": "Discriminator learning rate",
+          "default": 0.0001,
+          "minimum": 0.0
+        },
+        "disc_weight_decay": {
+          "type": "number",
+          "description": "Discriminator weight decay",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "disc_grad_clip": {
+          "type": "number",
+          "description": "Discriminator gradient clipping",
+          "default": 1.0,
+          "minimum": 0.0
+        },
+        "disc_update_freq": {
+          "type": "integer",
+          "description": "Update discriminator every N steps",
+          "default": 1,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "vad": {
+      "type": "object",
+      "description": "Voice Activity Detection configuration",
+      "properties": {
+        "loss_weight": {
+          "type": "number",
+          "description": "VAD loss weight",
+          "default": 0.05,
+          "minimum": 0.0
+        },
+        "threshold": {
+          "type": "number",
+          "description": "VAD probability threshold for speech gating",
+          "default": 0.6,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "margin": {
+          "type": "number",
+          "description": "VAD margin",
+          "default": 0.05,
+          "minimum": 0.0
+        },
+        "speech_loss_weight": {
+          "type": "number",
+          "description": "VAD speech-structure loss weight",
+          "default": 0.0,
+          "minimum": 0.0
+        },
+        "warmup_epochs": {
+          "type": "integer",
+          "description": "VAD warmup epochs",
+          "default": 5,
+          "minimum": 0
+        },
+        "snr_gate_db": {
+          "type": "number",
+          "description": "SNR gate threshold (dB)",
+          "default": -10.0
+        },
+        "snr_gate_width": {
+          "type": "number",
+          "description": "SNR gate softness (dB)",
+          "default": 6.0,
+          "minimum": 0.001
+        },
+        "band_low_hz": {
+          "type": "number",
+          "description": "Speech band low cutoff (Hz)",
+          "default": 300.0,
+          "minimum": 1.0
+        },
+        "band_high_hz": {
+          "type": "number",
+          "description": "Speech band high cutoff (Hz)",
+          "default": 3400.0,
+          "minimum": 1.0
+        },
+        "z_threshold": {
+          "type": "number",
+          "description": "VAD z-score threshold",
+          "default": 0.0
+        },
+        "z_slope": {
+          "type": "number",
+          "description": "VAD z-score slope",
+          "default": 1.0,
+          "minimum": 0.001
+        },
+        "eval": {
+          "type": "object",
+          "description": "VAD evaluation configuration",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "VAD eval mode: auto | proxy | silero | off",
+              "enum": ["auto", "proxy", "silero", "off"],
+              "default": "auto"
+            },
+            "every": {
+              "type": "integer",
+              "description": "Evaluate VAD metrics every N epochs",
+              "default": 1,
+              "minimum": 1
+            },
+            "batches": {
+              "type": "integer",
+              "description": "Number of batches for VAD eval",
+              "default": 8,
+              "minimum": 1
+            },
+            "max_seconds": {
+              "type": "number",
+              "description": "Max seconds per clip for VAD eval (0 disables)",
+              "default": 0.0,
+              "minimum": 0.0
+            },
+            "silero_model_path": {
+              "type": ["string", "null"],
+              "description": "Path to silero_vad.onnx (optional)"
+            },
+            "silero_sample_rate": {
+              "type": "integer",
+              "description": "Silero sample rate (Hz)",
+              "default": 16000,
+              "minimum": 8000
+            }
+          },
+          "additionalProperties": false
+        },
+        "train": {
+          "type": "object",
+          "description": "VAD training regularizer configuration",
+          "properties": {
+            "prob": {
+              "type": "number",
+              "description": "Probability of VAD regularizer per batch",
+              "default": 0.0,
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "every_steps": {
+              "type": "integer",
+              "description": "Apply VAD regularizer every N steps (0 disables)",
+              "default": 0,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Evaluation metrics configuration",
+      "properties": {
+        "eval_sisdr": {
+          "type": "boolean",
+          "description": "Compute SI-SDR during validation",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "debug": {
+      "type": "object",
+      "description": "Debugging configuration",
+      "properties": {
+        "verbose": {
+          "type": "boolean",
+          "description": "Verbose timing/logging",
+          "default": false
+        },
+        "debug_numerics": {
+          "type": "boolean",
+          "description": "Enable numeric debug mode",
+          "default": false
+        },
+        "debug_numerics_fail_fast": {
+          "type": "boolean",
+          "description": "Fail fast on non-finite",
+          "default": true
+        },
+        "debug_numerics_every": {
+          "type": "integer",
+          "description": "Check every N steps",
+          "default": 1,
+          "minimum": 1
+        },
+        "debug_numerics_dump_dir": {
+          "type": ["string", "null"],
+          "description": "Directory for numeric debug dumps (empty disables override)"
+        },
+        "debug_numerics_dump_arrays": {
+          "type": "boolean",
+          "description": "Dump small tensor slices",
+          "default": false
+        },
+        "debug_numerics_max_dumps": {
+          "type": "integer",
+          "description": "Max debug dumps",
+          "default": 5,
+          "minimum": 1
+        },
+        "nan_skip_batch": {
+          "type": "boolean",
+          "description": "Skip optimizer update on non-finite",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "train_ini": {
+      "type": "object",
+      "description": "Embedded train.py INI compatibility tables (optional). Use [train_ini.<section>] to inline legacy train.ini sections. Supported sections: df, train, optim, distortion, deepfilternet4, loss, MultiResSpecLoss, GANLoss, FeatureMatchingLoss.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
