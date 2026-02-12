@@ -32,22 +32,22 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Set
 
 import mlx.core as mx
-import numpy as np
 
+from df_mlx.benchmark_common import batch_size_from_batch as _batch_size_from_batch
+from df_mlx.benchmark_common import build_dataset as _build_dataset
+from df_mlx.benchmark_common import load_source_lists as _load_source_lists
 from df_mlx.benchmark_common import (
-    build_dataset as _build_dataset,
-    load_source_lists as _load_source_lists,
     parse_backend_list,
     parse_bool_list,
     parse_float_list,
     parse_int_list,
     parse_split_list,
-    require_min as _require_min,
-    require_positive_float as _require_positive_float,
 )
+from df_mlx.benchmark_common import require_min as _require_min
+from df_mlx.benchmark_common import require_positive_float as _require_positive_float
+from df_mlx.benchmark_common import safe_percentile as _safe_percentile
 from df_mlx.dynamic_dataset import (
     HAS_MLX_DATA,
-    DynamicDataset,
     MLXDataStream,
     PrefetchDataLoader,
 )
@@ -114,6 +114,7 @@ class BenchmarkCase:
     @property
     def prefetch(self) -> int:
         return self.prefetch_factor if self.backend == "prefetch" else self.prefetch_size
+
 
 def _choices_for_backend(backends: Sequence[str]) -> Set[str]:
     return set(backends)
@@ -234,23 +235,9 @@ def _build_benchmark_cases(args: argparse.Namespace) -> List[BenchmarkCase]:
     return cases
 
 
-def _safe_percentile(latencies_ms: List[float], q: float) -> float:
-    if not latencies_ms:
-        return math.nan
-    return float(np.percentile(latencies_ms, q))
-
-
 def _materialize_batch(batch: Dict[str, mx.array]) -> None:
     # Synchronize all arrays to include host->device staging costs in latency.
     mx.eval(*batch.values())
-
-
-def _batch_size_from_batch(batch: Dict[str, mx.array]) -> int:
-    snr = batch.get("snr")
-    if snr is not None:
-        return int(snr.shape[0])
-    first_val = next(iter(batch.values()))
-    return int(first_val.shape[0])
 
 
 def _benchmark_loader_once(
@@ -294,6 +281,7 @@ def _benchmark_loader_once(
         "batches": batches,
         "elapsed_s": elapsed,
     }
+
 
 def _aggregate_results(
     case: BenchmarkCase,

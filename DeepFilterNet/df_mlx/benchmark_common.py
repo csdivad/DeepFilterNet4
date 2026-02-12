@@ -7,7 +7,10 @@ used by benchmark_pipeline.py and benchmark_train_step.py.
 from __future__ import annotations
 
 import argparse
+import math
 from typing import Any, Dict, List, Sequence
+
+import numpy as np
 
 from df_mlx.dynamic_dataset import DatasetConfig, DynamicDataset, read_file_list
 
@@ -83,6 +86,20 @@ def require_positive_float(name: str, values: Sequence[float]) -> None:
     invalid = [value for value in values if value <= 0.0]
     if invalid:
         raise ValueError(f"{name} must be > 0, got {invalid}")
+
+
+def safe_percentile(values: Sequence[float], q: float) -> float:
+    if not values:
+        return math.nan
+    return float(np.percentile(values, q))
+
+
+def batch_size_from_batch(batch: Dict[str, Any]) -> int:
+    snr = batch.get("snr")
+    if snr is not None:
+        return int(snr.shape[0])
+    first = next(iter(batch.values()))
+    return int(first.shape[0])
 
 
 def load_source_lists(args: argparse.Namespace) -> Dict[str, List[str]]:

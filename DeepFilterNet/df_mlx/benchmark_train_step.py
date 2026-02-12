@@ -44,25 +44,27 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
 
+from df_mlx.benchmark_common import batch_size_from_batch as _batch_size_from_batch
+from df_mlx.benchmark_common import build_dataset as _build_dataset
+from df_mlx.benchmark_common import load_source_lists as _load_source_lists
 from df_mlx.benchmark_common import (
-    build_dataset as _build_dataset,
-    load_source_lists as _load_source_lists,
     parse_backend_list,
     parse_bool_list,
     parse_float_list,
     parse_int_list,
     parse_split_list,
-    require_min as _require_min,
-    require_positive_float as _require_positive_float,
 )
+from df_mlx.benchmark_common import require_min as _require_min
+from df_mlx.benchmark_common import require_positive_float as _require_positive_float
+from df_mlx.benchmark_common import safe_percentile as _safe_percentile
 from df_mlx.config import get_default_config
-from df_mlx.grad_utils import clip_grad_norm_tree
 from df_mlx.dynamic_dataset import (
     HAS_MLX_DATA,
     DynamicDataset,
     MLXDataStream,
     PrefetchDataLoader,
 )
+from df_mlx.grad_utils import clip_grad_norm_tree
 from df_mlx.model import init_model
 from df_mlx.train import spectral_loss
 
@@ -136,11 +138,6 @@ class BenchmarkResult:
     loss_mean: float
     loss_std: float
     loss_last: float
-
-def _safe_percentile(values: List[float], q: float) -> float:
-    if not values:
-        return math.nan
-    return float(np.percentile(values, q))
 
 
 def _build_cases(args: argparse.Namespace) -> List[BenchmarkCase]:
@@ -238,6 +235,7 @@ def _build_cases(args: argparse.Namespace) -> List[BenchmarkCase]:
             )
 
     return cases
+
 
 def _make_loader(case: BenchmarkCase, dataset: DynamicDataset, epoch: int) -> Iterable[Dict[str, mx.array]]:
     dataset.set_split(case.split)
@@ -339,14 +337,6 @@ def _build_train_step(case: BenchmarkCase):
             return loss
 
     return model, optimizer, step_fn
-
-
-def _batch_size_from_batch(batch: Dict[str, mx.array]) -> int:
-    snr = batch.get("snr")
-    if snr is not None:
-        return int(snr.shape[0])
-    first = next(iter(batch.values()))
-    return int(first.shape[0])
 
 
 def _step_args(batch: Dict[str, mx.array]) -> Tuple[mx.array, ...]:
