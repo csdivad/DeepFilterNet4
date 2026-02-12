@@ -15,7 +15,7 @@ Usage:
     fig.savefig("comparison.png")
 """
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 
 import mlx.core as mx
 import numpy as np
@@ -199,14 +199,14 @@ def specshow(
         axis = plt.axis
 
     n_fft = n_fft or (spec.shape[0] - 1) * 2
-    hop = hop or n_fft // 4
+    hop = hop or cast(int, n_fft) // 4
 
     if t is None:
         t = np.arange(0, spec.shape[-1]) * hop / sr
     if f is None:
-        f = np.arange(0, spec.shape[0]) * sr // 2 / (n_fft // 2)
+        f = np.arange(0, spec.shape[0]) * sr // 2 / (cast(int, n_fft) // 2)
         if kHz:
-            f = f / 1000
+            f = cast(np.ndarray, f) / 1000
 
     im = pcolormesh(t, f, spec, rasterized=True, shading="auto", vmin=vmin, vmax=vmax, cmap=cmap)
 
