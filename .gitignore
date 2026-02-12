@@ -8,7 +8,6 @@ out/
 export/
 assets/valid_cache*
 DeepFilterNet/poetry.lock
-.vscode
 data/
 .*ignore
 !.gitignore
