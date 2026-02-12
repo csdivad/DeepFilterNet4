@@ -815,10 +815,9 @@ class ASRLoss:
         factor_lm: float = 1.0,
         model: str = "base.en",
     ):
-        self.factor = factor
-        self.factor_lm = factor_lm
-        self.model = model
-        self._initialized = False
+        raise NotImplementedError(
+            "MLX ASRLoss is not yet implemented. " "Use df.loss.ASRLoss (PyTorch) or disable ASR loss in your config."
+        )
 
     def _lazy_init(self):
         """Lazy initialization of Whisper model."""

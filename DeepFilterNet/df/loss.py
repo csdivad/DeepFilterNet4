@@ -301,6 +301,11 @@ class DfAlphaLoss(nn.Module):
 
     def __init__(self, factor: float = 1, lsnr_thresh: float = -7.5, lsnr_min: float = -10.0):
         super().__init__()
+        if lsnr_thresh == lsnr_min:
+            raise ValueError(
+                f"lsnr_thresh ({lsnr_thresh}) must differ from lsnr_min ({lsnr_min}) "
+                "to avoid division by zero in lsnr_mapping"
+            )
         self.factor = factor
         self.lsnr_thresh = lsnr_thresh
         self.lsnr_min = lsnr_min
@@ -345,6 +350,9 @@ class SiSdr(nn.Module):
         t = input.shape[-1]
         target = target.reshape(-1, t)
         input = input.reshape(-1, t)
+        # Zero-mean normalization (required for scale-invariant SDR)
+        target = target - target.mean(dim=-1, keepdim=True)
+        input = input - input.mean(dim=-1, keepdim=True)
         # Einsum for batch vector dot product
         Rss: Tensor = torch.einsum("bi,bi->b", target, target).unsqueeze(-1)
         a: Tensor = torch.einsum("bi,bi->b", target, input).add(eps).unsqueeze(-1) / Rss.add(eps)
@@ -479,7 +487,7 @@ class ASRLoss(nn.Module):
             features_i = self.backend.embed_audio(self.preprocess(input))
             features_t = self.backend.embed_audio(self.preprocess(target))
         # Loss based on the audio encoding:
-        loss = 0
+        loss: Tensor = torch.zeros((), device=input.device)
         if self.factor > 0:
             loss = F.mse_loss(features_i[0], features_t[0]) * self.factor
         if self.factor_lm > 0:
