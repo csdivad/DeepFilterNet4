@@ -15,6 +15,7 @@ data/
 .ruff_cache/
 .fastembed_cache
 .codanna/
+models/
 
 ### Rust gitignore ###
 

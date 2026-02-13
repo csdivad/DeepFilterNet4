@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Debug script to find NaN source in single-frame case."""
+
 import sys
 
 sys.path.insert(0, "/Users/andrew/zRepos/DeepFilterNet/DeepFilterNet/df_mlx")

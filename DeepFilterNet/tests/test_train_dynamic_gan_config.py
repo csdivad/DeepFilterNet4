@@ -5,8 +5,7 @@ from df_mlx.train_dynamic_config import apply_train_ini_config
 
 def test_apply_train_ini_config_gan(tmp_path):
     ini_path = tmp_path / "train.ini"
-    ini_path.write_text(
-        """
+    ini_path.write_text("""
 [train]
 GAN_ENABLED = true
 GAN_START_EPOCH = 3
@@ -25,8 +24,7 @@ type = hinge
 
 [FeatureMatchingLoss]
 factor = 1.5
-""".strip()
-    )
+""".strip())
 
     run_cfg = RunConfig()
     model_cfg = get_default_config()

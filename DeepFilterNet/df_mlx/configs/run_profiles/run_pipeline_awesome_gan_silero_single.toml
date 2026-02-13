@@ -5,7 +5,7 @@
 # - your current run wiring (dataset config, checkpoint dir, resume flags)
 
 [dataset]
-cache_dir = "~/DataDump/datasets/mlx_datastore"
+cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 100
@@ -70,7 +70,7 @@ disc_update_freq = 1
 
 [vad]
 loss_weight = 0.05
-threshold = 0.6
+threshold = 0.1
 margin = 0.05
 speech_loss_weight = 0.01
 warmup_epochs = 5
@@ -85,7 +85,7 @@ z_slope = 1.0
 mode = "silero"
 every = 1
 batches = 8
-max_seconds = 20.0
+max_seconds = 0.0
 # silero_model_path = ""
 silero_sample_rate = 16000
 

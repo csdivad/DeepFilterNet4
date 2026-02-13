@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Analyze mask saturation penalty logic."""
+
 import mlx.core as mx
 
 print("Mask Saturation Penalty Analysis")

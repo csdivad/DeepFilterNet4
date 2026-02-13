@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Debug script to investigate single-frame NaN issue."""
+
 import mlx.core as mx
 import numpy as np
 
