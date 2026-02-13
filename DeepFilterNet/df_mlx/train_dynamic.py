@@ -63,6 +63,7 @@ from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
 from df_mlx.run_config import (  # noqa: E402
     RunConfig,
     generate_run_config_example,
@@ -70,7 +71,6 @@ from df_mlx.run_config import (  # noqa: E402
     set_by_path,
     validate_run_config,
 )
-from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
 from df_mlx.train_dynamic_config import apply_train_ini_config, apply_train_ini_tables  # noqa: E402
 
 if TYPE_CHECKING:
@@ -3918,7 +3918,7 @@ def train(
                 elif vad_eval_mode == "silero":
                     if silero_vad is None or silero_istft is None:
                         raise RuntimeError("Silero VAD requested but not initialized")
-                    vad_start = time.time()
+                    vad_start = time.perf_counter()
                     clean_wav = silero_istft(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
                     out_wav = silero_istft(out, n_fft=config.fft_size, hop_length=config.hop_size)
                     mx.eval(clean_wav, out_wav)
@@ -3931,7 +3931,7 @@ def train(
                     vad_eval_delta += float(np.mean(np.maximum(p_ref_batch - p_out_batch - vad_margin, 0.0)))
                     vad_eval_batches_done += 1
                     vad_eval_clips += int(len(p_ref_batch))
-                    vad_eval_seconds += time.time() - vad_start
+                    vad_eval_seconds += time.perf_counter() - vad_start
 
             if sisdr_fn is not None:
                 si_sdr_fn, istft_fn = sisdr_fn
@@ -4096,7 +4096,7 @@ def train(
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
-        epoch_start = time.time()
+        epoch_start = time.perf_counter()
         final_epoch = epoch
 
         # Set epoch for reproducible shuffling
@@ -4250,11 +4250,14 @@ def train(
             **_TQDM_KWARGS,
         )
 
-        data_start = time.time()
+        # Throughput tracking: accumulate samples and wall-clock time over sync windows
+        window_samples = 0
+        window_start = time.perf_counter()
+
+        data_start = time.perf_counter()
         for batch_idx, batch in train_pbar:
-            data_time = time.time() - data_start
+            data_time = time.perf_counter() - data_start
             total_data_time += data_time
-            step_start = time.time()
 
             # Unpack batch
             noisy_real = batch["noisy_real"]
@@ -4324,7 +4327,7 @@ def train(
             did_optimizer_update = False
 
             # Forward, backward, and update (either compiled or standard)
-            fwd_start = time.time()
+            fwd_start = time.perf_counter()
 
             model_out = None
             if use_compiled_step:
@@ -4402,7 +4405,7 @@ def train(
                 if nan_skip_batch:
                     if not loss_finite or not grads_finite:
                         skip_update = True
-                        print(
+                        tqdm.write(
                             "⚠️  Non-finite detected; skipping optimizer update "
                             f"(loss_finite={loss_finite}, grads_finite={grads_finite})"
                         )
@@ -4495,10 +4498,8 @@ def train(
                             gan_d_loss_val = float(disc_loss)
                             train_gan_d_updates += 1
 
-            fwd_time = time.time() - fwd_start
+            fwd_time = time.perf_counter() - fwd_start
             total_forward_time += fwd_time
-
-            step_time = time.time() - step_start
 
             # Only convert loss to float when synced (avoids blocking)
             if should_sync:
@@ -4514,6 +4515,7 @@ def train(
                     train_gan_d_loss += gan_d_loss_val * eval_frequency
             num_train_batches += 1
             samples_processed += current_batch_size
+            window_samples += current_batch_size
             # Only increment global_step when optimizer actually updates
             # (for gradient accumulation > 1, updates happen every N batches)
             if did_optimizer_update:
@@ -4536,9 +4538,11 @@ def train(
             # Update progress bar with real-time metrics (only on sync)
             if should_sync:
                 lr = float(schedule(global_step))
-                samples_per_sec = (
-                    (current_batch_size * eval_frequency) / (step_time * eval_frequency) if step_time > 0 else 0
-                )
+                # Throughput: samples processed in this sync window / wall-clock time
+                window_elapsed = time.perf_counter() - window_start
+                samples_per_sec = window_samples / max(window_elapsed, 1e-6)
+                window_samples = 0
+                window_start = time.perf_counter()
 
                 # Defaults for logging
                 spec_loss_val = loss_val
@@ -4880,9 +4884,9 @@ def train(
                         mask=f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00",
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
-                        step=f"{fwd_time * 1000:.0f}ms",
+                        fwd=f"{fwd_time * 1000:.0f}ms",
                         spd=f"{samples_per_sec:.0f}/s",
-                        sync=f"1/{eval_frequency}",
+                        gstep=global_step,
                     )
                 else:
                     grad_display = f"{grad_norm:.2f}" if math.isfinite(grad_norm) else "n/a"
@@ -4904,7 +4908,8 @@ def train(
                         vad_reg=f"{vad_reg_loss_val:.4f}" if use_vad_train_reg else "0.0000",
                         lr=f"{lr:.1e}",
                         grad=grad_display,
-                        speed=f"{samples_per_sec:.0f}s/s",
+                        spd=f"{samples_per_sec:.0f}/s",
+                        gstep=global_step,
                     )
 
             # Save data checkpoint periodically (for resume capability)
@@ -4935,16 +4940,16 @@ def train(
                     kind="step",
                 )
                 if step_saved:
-                    print(f"\n  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
                 else:
-                    print(f"\n  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
                     cleanup_checkpoints(ckpt_dir, save_total_limit)
 
             # Start timing for next data fetch
-            data_start = time.time()
+            data_start = time.perf_counter()
 
         train_pbar.close()
 
@@ -5042,7 +5047,7 @@ def train(
                 epochs_without_improvement += 1
 
         # ====== Epoch Summary ======
-        epoch_time = time.time() - epoch_start
+        epoch_time = time.perf_counter() - epoch_start
         epoch_throughput = samples_processed / epoch_time if epoch_time > 0 else 0
 
         # Update interrupt state with final epoch metrics

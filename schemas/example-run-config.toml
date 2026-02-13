@@ -1,3 +1,4 @@
+#:schema file:///Users/andrew/zRepos/DeepFilterNet/schemas/run-config.schema.json
 # Example DeepFilterNet4 Run Configuration
 # This file demonstrates IDE autocomplete via the JSON Schema
 # Open this file in VS Code with "Even Better TOML" extension installed

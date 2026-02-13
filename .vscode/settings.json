@@ -1,7 +1,7 @@
 {
     "search.useGlobalIgnoreFiles": true,
+    "evenBetterToml.schema.enabled": true,
     "evenBetterToml.schema.associations": {
-        ".*run.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json",
-        ".*config.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json"
+        ".*DeepFilterNet/df_mlx/configs/run_profiles/.*\\.toml$": "/Users/andrew/zRepos/DeepFilterNet/DeepFilterNet/schemas/run-config.schema.json"
     }
 }

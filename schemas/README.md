@@ -23,13 +23,14 @@ Add to your `.vscode/settings.json` (or use the provided template below):
 ```json
 {
   "evenBetterToml.schema.associations": {
-    ".*run.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json",
-    ".*config.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json"
+    "^file:///ABSOLUTE/PATH/TO/CONFIGS/.*\\.toml$": "file:///ABSOLUTE/PATH/TO/REPO/schemas/run-config.schema.json"
   }
 }
 ```
 
-This will apply the schema to any TOML file with "run" or "config" in its name.
+Important:
+- Keys are matched against **absolute document URIs** (e.g. `file:///Users/name/.../run.toml`)
+- Values must be **absolute schema URIs** (e.g. `file:///Users/name/repo/schemas/run-config.schema.json`)
 
 ### 3. (Optional) Set Up Local Development Environment
 
@@ -43,8 +44,7 @@ mkdir -p .vscode
 cat >> .vscode/settings.json << 'EOF'
 {
   "evenBetterToml.schema.associations": {
-    ".*run.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json",
-    ".*config.*\\.toml$": "${workspaceFolder}/schemas/run-config.schema.json"
+    "^file:///ABSOLUTE/PATH/TO/CONFIGS/.*\\.toml$": "file:///ABSOLUTE/PATH/TO/REPO/schemas/run-config.schema.json"
   }
 }
 EOF
@@ -122,7 +122,7 @@ backbone_type = "transformer"
 You can also add a schema comment at the top of any TOML file:
 
 ```toml
-# yaml-language-server: $schema=../schemas/run-config.schema.json
+#:schema file:///ABSOLUTE/PATH/TO/REPO/schemas/run-config.schema.json
 
 [training]
 epochs = 100
