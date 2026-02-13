@@ -8,7 +8,14 @@ import mlx.optimizers as optim
 # Ensure the df_mlx package is importable when running tests from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from df_mlx.train_dynamic import maybe_skip_resume_batches, resolve_resume_batch_count, save_checkpoint  # noqa: E402
+from df_mlx.train_dynamic import (  # noqa: E402
+    _TRAIN_MODE_COMPILED,
+    _TRAIN_MODE_EAGER,
+    maybe_skip_resume_batches,
+    resolve_epoch_train_mode,
+    resolve_resume_batch_count,
+    save_checkpoint,
+)
 
 
 class TinyModel(nn.Module):
@@ -91,3 +98,55 @@ def test_train_loop_bounds_iterator_to_progress_total():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
     assert "train_total = max(epoch_target_micro_batches - resume_batches_for_epoch, 0)" in source
     assert "enumerate(islice(data_iterator, train_total))" in source
+
+
+def test_resolve_epoch_train_mode_before_at_after_gan_start():
+    mode = None
+    snapshots: list[tuple[str, bool]] = []
+    gan_start_epoch = 3
+
+    for epoch in (2, 3, 4):
+        gan_active = epoch >= gan_start_epoch
+        mode, use_compiled = resolve_epoch_train_mode(
+            compiled_step_base_enabled=True,
+            gan_enabled=True,
+            gan_active=gan_active,
+            previous_mode=mode,
+        )
+        snapshots.append((mode, use_compiled))
+
+    assert snapshots == [
+        (_TRAIN_MODE_COMPILED, True),
+        (_TRAIN_MODE_EAGER, False),
+        (_TRAIN_MODE_EAGER, False),
+    ]
+
+
+def test_resolve_epoch_train_mode_resume_after_switch_stays_eager():
+    mode, use_compiled = resolve_epoch_train_mode(
+        compiled_step_base_enabled=True,
+        gan_enabled=True,
+        gan_active=True,
+        previous_mode=_TRAIN_MODE_EAGER,
+    )
+    assert mode == _TRAIN_MODE_EAGER
+    assert use_compiled is False
+
+
+def test_resolve_epoch_train_mode_respects_base_compiled_blockers():
+    mode, use_compiled = resolve_epoch_train_mode(
+        compiled_step_base_enabled=False,
+        gan_enabled=False,
+        gan_active=False,
+        previous_mode=None,
+    )
+    assert mode == _TRAIN_MODE_EAGER
+    assert use_compiled is False
+
+
+def test_train_loop_logs_modes_and_guards_against_gan_compiled_mix():
+    source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
+    assert '_TRAIN_MODE_COMPILED = "COMPILED"' in source
+    assert '_TRAIN_MODE_EAGER = "EAGER"' in source
+    assert "TRAIN_MODE={train_mode}" in source
+    assert "GAN active epoch cannot run compiled step" in source

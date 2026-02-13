@@ -1870,6 +1870,33 @@ def maybe_skip_resume_batches(
     return data_iterator, False
 
 
+_TRAIN_MODE_COMPILED = "COMPILED"
+_TRAIN_MODE_EAGER = "EAGER"
+
+
+def resolve_epoch_train_mode(
+    *,
+    compiled_step_base_enabled: bool,
+    gan_enabled: bool,
+    gan_active: bool,
+    previous_mode: Literal["COMPILED", "EAGER"] | None,
+) -> tuple[Literal["COMPILED", "EAGER"], bool]:
+    """Resolve training mode for an epoch with one-way COMPILED->EAGER semantics.
+
+    Rules:
+    - If compiled mode is globally blocked (debug, nan-skip, grad accumulation), use EAGER.
+    - If GAN is active for this epoch, use EAGER.
+    - Once EAGER is entered, do not switch back to COMPILED in later epochs.
+    """
+    if previous_mode == _TRAIN_MODE_EAGER:
+        return _TRAIN_MODE_EAGER, False
+    if not compiled_step_base_enabled:
+        return _TRAIN_MODE_EAGER, False
+    if gan_enabled and gan_active:
+        return _TRAIN_MODE_EAGER, False
+    return _TRAIN_MODE_COMPILED, True
+
+
 def validate_checkpoint_dir(
     checkpoint_dir: Path,
     strict: bool = True,
@@ -4108,17 +4135,34 @@ def train(
 
         return valid_loss / max(num_valid_batches, 1)
 
-    # Flag to use compiled step (can be disabled for debugging)
-    # Gradient accumulation requires manual gradient management, so we disable compiled step
-    use_compiled_step = not (debug_numerics or nan_skip_batch or gan_enabled or grad_accumulation_steps > 1)
-    print(f"  Using compiled training step: {use_compiled_step}")
-    if gan_enabled and not use_compiled_step:
-        print("  GAN enabled: compiled training step disabled")
+    # Base compiled-step eligibility (epoch-level mode selection may still choose eager)
+    # Gradient accumulation requires manual gradient management, so we disable compiled step.
+    base_compiled_step_enabled = not (debug_numerics or nan_skip_batch or grad_accumulation_steps > 1)
+    compiled_disable_reasons: list[str] = []
+    if debug_numerics:
+        compiled_disable_reasons.append("debug_numerics")
+    if nan_skip_batch:
+        compiled_disable_reasons.append("nan_skip_batch")
+    if grad_accumulation_steps > 1:
+        compiled_disable_reasons.append("grad_accumulation")
+
+    print(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
+    if base_compiled_step_enabled:
+        if gan_enabled and gan_start_epoch <= 0:
+            print("  GAN starts at epoch 1: training will run eager from the first epoch")
+        elif gan_enabled:
+            print(
+                "  GAN delayed start: training will use compiled mode until GAN activation "
+                f"(gan_start_epoch={gan_start_epoch + 1})"
+            )
+    else:
+        joined = ", ".join(compiled_disable_reasons) if compiled_disable_reasons else "unknown"
+        print(f"  Compiled-step disabled by: {joined}")
     if grad_accumulation_steps > 1:
         print(
             f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
         )
-        if not use_compiled_step:
+        if not base_compiled_step_enabled:
             print("  Gradient accumulation: compiled training step disabled")
     if nan_skip_batch:
         print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
@@ -4147,6 +4191,7 @@ def train(
     avg_train_loss = float("nan")
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
+    train_mode: Literal["COMPILED", "EAGER"] | None = None
 
     max_train_batches = train_config.get("max_train_batches")
     max_valid_batches = train_config.get("max_valid_batches")
@@ -4195,6 +4240,34 @@ def train(
         gan_weight = gan_adv_weight * gan_scale
         fm_weight = gan_fm_weight * gan_scale
         gan_active = gan_enabled and gan_scale > 0.0
+
+        prev_train_mode = train_mode
+        train_mode, epoch_use_compiled_step = resolve_epoch_train_mode(
+            compiled_step_base_enabled=base_compiled_step_enabled,
+            gan_enabled=gan_enabled,
+            gan_active=gan_active,
+            previous_mode=train_mode,
+        )
+        if prev_train_mode == _TRAIN_MODE_EAGER and train_mode != _TRAIN_MODE_EAGER:
+            raise RuntimeError(
+                "Invariant violation: training mode switched from EAGER back to COMPILED. "
+                "Mode switches must be one-way to preserve deterministic behavior after GAN activation."
+            )
+        if gan_active and epoch_use_compiled_step:
+            raise RuntimeError(
+                "Invariant violation: GAN active epoch cannot run compiled step. "
+                f"epoch={epoch}, gan_start_epoch={gan_start_epoch}"
+            )
+
+        if train_mode != prev_train_mode:
+            if not base_compiled_step_enabled:
+                mode_reason = "compiled_blocked"
+            elif gan_enabled and gan_active:
+                mode_reason = "gan_active"
+            else:
+                mode_reason = "gan_inactive"
+            print(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
+
         if gan_enabled and verbose:
             print(
                 f"  GAN schedule (epoch {epoch + 1}/{epochs}): "
@@ -4406,7 +4479,7 @@ def train(
             fwd_start = time.perf_counter()
 
             model_out = None
-            if use_compiled_step:
+            if epoch_use_compiled_step:
                 # Use compiled training step for better performance
                 # (compiled step always updates, since fwd+bwd+update is atomic)
                 did_optimizer_update = True
@@ -5072,7 +5145,7 @@ def train(
                 f"    Train step (fwd+bwd+upd): {total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)"
             )
             print(f"    TOTAL:              {total_time:6.1f}s")
-            print(f"    Compiled training:  {'enabled' if use_compiled_step else 'disabled'}")
+            print(f"    Compiled training:  {'enabled' if epoch_use_compiled_step else 'disabled'}")
             if total_data_time > total_forward_time:
                 print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
 

@@ -192,6 +192,32 @@ For general coding standards (formatting, linting, commit messages), see [CONTRI
 - [DeepFilterNet/df_mlx/dynamic_dataset.py](../DeepFilterNet/df_mlx/dynamic_dataset.py)
 - [DeepFilterNet/tests/test_train_control_semantics.py](../DeepFilterNet/tests/test_train_control_semantics.py)
 
+---
+
+### Epoch-Boundary Training Mode Switch (Compiled → Eager with GAN)
+
+**Status:** REQUIRED
+
+**Scope:** `DeepFilterNet/df_mlx/train_dynamic.py` and trainer control-flow tests
+
+**Rule:**
+
+- Determine training mode once per epoch (before the batch loop), never mid-epoch.
+- Allow compiled mode only while GAN is inactive and compiled-step base constraints are satisfied.
+- Once GAN-active epochs begin, switch to eager mode and do not switch back to compiled mode later in the run.
+- Emit explicit mode markers (`TRAIN_MODE=COMPILED` / `TRAIN_MODE=EAGER`) and fail fast if a GAN-active epoch tries to run the compiled step.
+
+**Rationale:**
+
+- Prevents mixed execution semantics within a single epoch and keeps checkpoint/resume behavior deterministic.
+- Preserves pre-GAN performance gains from compiled training while ensuring GAN/discriminator updates run on the eager path.
+- One-way switching avoids subtle resume-dependent mode oscillation and reduces incident surface area.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py)
+- [DeepFilterNet/tests/test_train_control_semantics.py](../DeepFilterNet/tests/test_train_control_semantics.py)
+
 ## 3. Known Exceptions
 
 _None documented yet._
@@ -200,3 +226,4 @@ _None documented yet._
 
 - **2025-01-06**: Initial conventions document created during AI integration optimization.
 - **2026-02-13**: Added MLX training counter semantics convention (micro-batch vs optimizer-step units, checkpoint resume invariants).
+- **2026-02-13**: Added epoch-boundary compiled→eager training mode convention for delayed GAN activation.
