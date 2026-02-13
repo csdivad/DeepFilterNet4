@@ -23,6 +23,7 @@ from loguru import logger
 
 from .config import ModelParams4, load_config
 from .model import DfNet4, StreamingDfNet4
+from .vad_silero import SileroVAD, SileroVADConfig
 
 # Default pretrained models
 PRETRAINED_MODELS = ("DeepFilterNet4-MLX",)
@@ -53,6 +54,35 @@ class EnhanceConfig:
     batch_size: int = 1
     streaming: bool = False
     chunk_size_ms: float = 100.0  # For streaming mode
+
+
+@dataclass
+class SpeechBoostConfig:
+    """VAD-driven speech segment amplification settings."""
+
+    gain_db: float = 0.0
+    threshold: float = 0.5
+    min_speech_duration_ms: int = 250
+    min_silence_duration_ms: int = 100
+    speech_pad_ms: int = 30
+    ramp_ms: float = 8.0
+    peak_limit: float = 0.99
+    silero_model_path: Optional[str] = None
+    silero_sample_rate: int = 16000
+
+
+def _init_speech_boost_vad(speech_boost: Optional[SpeechBoostConfig]) -> Optional[SileroVAD]:
+    """Initialize Silero VAD once for batch enhancement when speech boost is enabled."""
+    if speech_boost is None or speech_boost.gain_db <= 0.0:
+        return None
+
+    return SileroVAD(
+        SileroVADConfig(
+            sample_rate=speech_boost.silero_sample_rate,
+            model_path=speech_boost.silero_model_path,
+            force_cpu=True,
+        )
+    )
 
 
 def load_audio(
@@ -518,6 +548,8 @@ def enhance_file(
     suffix: Optional[str] = None,
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
+    speech_boost: Optional[SpeechBoostConfig] = None,
+    speech_boost_vad: Optional[SileroVAD] = None,
 ) -> str:
     """Enhance a single audio file.
 
@@ -529,6 +561,8 @@ def enhance_file(
         suffix: Suffix for output filename
         compensate_delay: Whether to pad for delay compensation
         atten_lim_db: Optional attenuation limit in dB
+        speech_boost: Optional VAD-based speech amplification settings
+        speech_boost_vad: Optional pre-initialized Silero VAD instance
 
     Returns:
         Path to enhanced audio file
@@ -555,6 +589,30 @@ def enhance_file(
         enhanced_np = resample(enhanced, params.sr, orig_sr)
     else:
         enhanced_np = np.array(enhanced)
+
+    if speech_boost is not None and speech_boost.gain_db > 0.0:
+        vad = speech_boost_vad or _init_speech_boost_vad(speech_boost)
+        if vad is None:
+            raise RuntimeError("Failed to initialize Silero VAD for speech boost")
+
+        enhanced_np, segments = vad.apply_speech_gain(
+            enhanced_np,
+            sample_rate=orig_sr,
+            gain_db=speech_boost.gain_db,
+            threshold=speech_boost.threshold,
+            min_speech_duration_ms=speech_boost.min_speech_duration_ms,
+            min_silence_duration_ms=speech_boost.min_silence_duration_ms,
+            speech_pad_ms=speech_boost.speech_pad_ms,
+            ramp_ms=speech_boost.ramp_ms,
+            peak_limit=speech_boost.peak_limit,
+        )
+        segment_count = len(segments[0]) if segments else 0
+        logger.info(
+            "Applied speech boost (+{:.1f} dB) on {} detected segment(s)".format(
+                speech_boost.gain_db,
+                segment_count,
+            )
+        )
 
     # Calculate RTF
     audio_duration = len(audio) / params.sr
@@ -584,6 +642,7 @@ def enhance_batch(
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
     chunk_size_ms: float = 100.0,
+    speech_boost: Optional[SpeechBoostConfig] = None,
 ) -> List[str]:
     """Enhance multiple audio files.
 
@@ -602,6 +661,8 @@ def enhance_batch(
     output_paths = []
     n_files = len(input_paths)
 
+    speech_boost_vad = _init_speech_boost_vad(speech_boost)
+
     for i, path in enumerate(input_paths):
         progress = (i + 1) / n_files * 100
         logger.info(f"[{progress:5.1f}%] Processing: {os.path.basename(path)}")
@@ -614,6 +675,8 @@ def enhance_batch(
             suffix=suffix,
             compensate_delay=compensate_delay,
             atten_lim_db=atten_lim_db,
+            speech_boost=speech_boost,
+            speech_boost_vad=speech_boost_vad,
         )
         output_paths.append(out_path)
 
@@ -629,6 +692,8 @@ def enhance_file_streaming(
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
     chunk_size_ms: float = 100.0,
+    speech_boost: Optional[SpeechBoostConfig] = None,
+    speech_boost_vad: Optional[SileroVAD] = None,
 ) -> str:
     """Enhance a single file using frame-by-frame streaming inference."""
     if atten_lim_db is not None:
@@ -670,6 +735,30 @@ def enhance_file_streaming(
     else:
         enhanced_np = np.array(enhanced)
 
+    if speech_boost is not None and speech_boost.gain_db > 0.0:
+        vad = speech_boost_vad or _init_speech_boost_vad(speech_boost)
+        if vad is None:
+            raise RuntimeError("Failed to initialize Silero VAD for speech boost")
+
+        enhanced_np, segments = vad.apply_speech_gain(
+            enhanced_np,
+            sample_rate=orig_sr,
+            gain_db=speech_boost.gain_db,
+            threshold=speech_boost.threshold,
+            min_speech_duration_ms=speech_boost.min_speech_duration_ms,
+            min_silence_duration_ms=speech_boost.min_silence_duration_ms,
+            speech_pad_ms=speech_boost.speech_pad_ms,
+            ramp_ms=speech_boost.ramp_ms,
+            peak_limit=speech_boost.peak_limit,
+        )
+        segment_count = len(segments[0]) if segments else 0
+        logger.info(
+            "Applied speech boost (+{:.1f} dB) on {} detected segment(s)".format(
+                speech_boost.gain_db,
+                segment_count,
+            )
+        )
+
     audio_duration = len(audio) / params.sr
     processing_time = t1 - t0
     rtf = processing_time / max(audio_duration, 1e-8)
@@ -696,10 +785,13 @@ def enhance_batch_streaming(
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
     chunk_size_ms: float = 100.0,
+    speech_boost: Optional[SpeechBoostConfig] = None,
 ) -> List[str]:
     """Enhance multiple files using streaming inference."""
     output_paths = []
     n_files = len(input_paths)
+    speech_boost_vad = _init_speech_boost_vad(speech_boost)
+
     for i, path in enumerate(input_paths):
         progress = (i + 1) / n_files * 100
         logger.info(f"[{progress:5.1f}%] Streaming: {os.path.basename(path)}")
@@ -712,6 +804,8 @@ def enhance_batch_streaming(
             compensate_delay=compensate_delay,
             atten_lim_db=atten_lim_db,
             chunk_size_ms=chunk_size_ms,
+            speech_boost=speech_boost,
+            speech_boost_vad=speech_boost_vad,
         )
         output_paths.append(out_path)
     return output_paths
@@ -781,6 +875,60 @@ def setup_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Attenuation limit in dB",
+    )
+    parser.add_argument(
+        "--speech-boost-db",
+        type=float,
+        default=0.0,
+        help="Boost dB applied only to Silero-detected speech segments (0 disables)",
+    )
+    parser.add_argument(
+        "--speech-boost-threshold",
+        type=float,
+        default=0.5,
+        help="Silero speech probability threshold for segment detection",
+    )
+    parser.add_argument(
+        "--speech-boost-min-speech-ms",
+        type=int,
+        default=250,
+        help="Minimum speech segment length in milliseconds",
+    )
+    parser.add_argument(
+        "--speech-boost-min-silence-ms",
+        type=int,
+        default=100,
+        help="Minimum silence length to split speech segments (milliseconds)",
+    )
+    parser.add_argument(
+        "--speech-boost-pad-ms",
+        type=int,
+        default=30,
+        help="Padding added around detected speech segments (milliseconds)",
+    )
+    parser.add_argument(
+        "--speech-boost-ramp-ms",
+        type=float,
+        default=8.0,
+        help="Fade-in/out ramp around boosted segments (milliseconds)",
+    )
+    parser.add_argument(
+        "--speech-boost-peak-limit",
+        type=float,
+        default=0.99,
+        help="Peak limiter after speech boost (set <=0 to disable)",
+    )
+    parser.add_argument(
+        "--speech-boost-silero-model-path",
+        type=str,
+        default=None,
+        help="Optional path to silero_vad.onnx for speech-segment detection",
+    )
+    parser.add_argument(
+        "--speech-boost-silero-sample-rate",
+        type=int,
+        default=16000,
+        help="Silero VAD sample rate used for speech-segment detection",
     )
 
     # Processing arguments
@@ -852,6 +1000,18 @@ def main(args: Optional[argparse.Namespace] = None):
 
     suffix = args.suffix or default_suffix
 
+    speech_boost = SpeechBoostConfig(
+        gain_db=float(args.speech_boost_db),
+        threshold=float(args.speech_boost_threshold),
+        min_speech_duration_ms=int(args.speech_boost_min_speech_ms),
+        min_silence_duration_ms=int(args.speech_boost_min_silence_ms),
+        speech_pad_ms=int(args.speech_boost_pad_ms),
+        ramp_ms=float(args.speech_boost_ramp_ms),
+        peak_limit=float(args.speech_boost_peak_limit),
+        silero_model_path=args.speech_boost_silero_model_path,
+        silero_sample_rate=int(args.speech_boost_silero_sample_rate),
+    )
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -868,6 +1028,7 @@ def main(args: Optional[argparse.Namespace] = None):
         compensate_delay=not args.no_delay_compensation,
         atten_lim_db=args.atten_lim,
         chunk_size_ms=getattr(args, "streaming_chunk_ms", 100.0),
+        speech_boost=speech_boost,
     )
 
     t_total = time.time() - t_start
