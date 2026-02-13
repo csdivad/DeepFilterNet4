@@ -9,7 +9,7 @@ cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 100
-batch_size = 20
+batch_size = 16
 learning_rate = 1e-6
 weight_decay = 0.0
 warmup_epochs = 5
@@ -21,8 +21,8 @@ fp16 = "auto"
 seed = 42
 
 [dataloader]
-num_workers = 6
-prefetch_size = 18
+num_workers = 12
+prefetch_size = 24
 use_mlx_data = true
 
 [checkpoint]
@@ -108,7 +108,7 @@ nan_skip_batch = false
 
 [enhance]
 # Set > 0 to enable VAD-driven speech segment amplification during enhancement.
-speech_boost_db = 0.0
+speech_boost_db = 5.0
 speech_boost_threshold = 0.5
 speech_boost_min_speech_ms = 250
 speech_boost_min_silence_ms = 100
