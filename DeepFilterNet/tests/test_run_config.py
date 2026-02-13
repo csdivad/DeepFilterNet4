@@ -69,3 +69,41 @@ def test_run_config_accepts_pipeline_awesome_dynamic_loss():
     cfg = RunConfig()
     apply_run_config_dict(cfg, {"loss": {"dynamic_loss": "pipeline_awesome"}})
     assert cfg.loss.dynamic_loss == "pipeline_awesome"
+
+
+def test_run_config_accepts_speech_boost_options():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "enhance": {
+                "speech_boost_db": 4.5,
+                "speech_boost_threshold": 0.65,
+                "speech_boost_min_speech_ms": 180,
+                "speech_boost_min_silence_ms": 90,
+                "speech_boost_pad_ms": 40,
+                "speech_boost_ramp_ms": 10.0,
+                "speech_boost_peak_limit": 0.95,
+                "speech_boost_silero_model_path": "models/silero_vad.onnx",
+                "speech_boost_silero_sample_rate": 16000,
+            }
+        },
+    )
+    assert cfg.enhance.speech_boost_db == 4.5
+    assert cfg.enhance.speech_boost_threshold == 0.65
+    assert cfg.enhance.speech_boost_min_speech_ms == 180
+    assert cfg.enhance.speech_boost_min_silence_ms == 90
+    assert cfg.enhance.speech_boost_pad_ms == 40
+    assert cfg.enhance.speech_boost_ramp_ms == 10.0
+    assert cfg.enhance.speech_boost_peak_limit == 0.95
+    assert cfg.enhance.speech_boost_silero_model_path == "models/silero_vad.onnx"
+    assert cfg.enhance.speech_boost_silero_sample_rate == 16000
+
+
+def test_run_config_example_includes_speech_boost_descriptions():
+    text = generate_run_config_example()
+    assert "[enhance]" in text
+    assert "# Boost dB applied only to Silero-detected speech segments (0 disables)" in text
+    assert "speech_boost_db = 0.0" in text
+    assert "# Silero speech probability threshold for segment detection" in text
+    assert "speech_boost_threshold = 0.5" in text

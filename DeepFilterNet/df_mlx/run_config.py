@@ -665,6 +665,64 @@ class DebugConfig:
 
 
 @dataclass
+class EnhanceRunConfig:
+    speech_boost_db: float = cfg_field(
+        0.0,
+        help="Boost dB applied only to Silero-detected speech segments (0 disables)",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    speech_boost_threshold: float = cfg_field(
+        0.5,
+        help="Silero speech probability threshold for segment detection",
+        normalize=_normalize_probability,
+        min=0.0,
+        max=1.0,
+    )
+    speech_boost_min_speech_ms: int = cfg_field(
+        250,
+        help="Minimum speech segment length in milliseconds",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+        min=0,
+    )
+    speech_boost_min_silence_ms: int = cfg_field(
+        100,
+        help="Minimum silence length to split speech segments (milliseconds)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+        min=0,
+    )
+    speech_boost_pad_ms: int = cfg_field(
+        30,
+        help="Padding added around detected speech segments (milliseconds)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+        min=0,
+    )
+    speech_boost_ramp_ms: float = cfg_field(
+        8.0,
+        help="Fade-in/out ramp around boosted segments (milliseconds)",
+        normalize=lambda v: _normalize_float(v, min_value=0.0),
+        min=0.0,
+    )
+    speech_boost_peak_limit: float = cfg_field(
+        0.99,
+        help="Peak limiter after speech boost (set <=0 to disable)",
+        normalize=_normalize_float,
+    )
+    speech_boost_silero_model_path: str | None = cfg_field(
+        None,
+        help="Optional path to silero_vad.onnx for speech-segment detection",
+        normalize=_normalize_optional_str,
+        none_sentinel="",
+    )
+    speech_boost_silero_sample_rate: int = cfg_field(
+        16000,
+        help="Silero VAD sample rate used for speech-segment detection",
+        normalize=lambda v: _normalize_int(v, min_value=8000),
+        min=8000,
+    )
+
+
+@dataclass
 class RunConfig:
     dataset: DatasetRunConfig = field(default_factory=DatasetRunConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
@@ -677,6 +735,7 @@ class RunConfig:
     vad: VADConfig = field(default_factory=VADConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
+    enhance: EnhanceRunConfig = field(default_factory=EnhanceRunConfig)
     train_ini: dict[str, Any] = field(
         default_factory=dict,
         metadata={
@@ -895,6 +954,7 @@ def generate_run_config_example() -> str:
     _emit_section(lines, "vad.train", cfg.vad.train)
     _emit_section(lines, "metrics", cfg.metrics)
     _emit_section(lines, "debug", cfg.debug)
+    _emit_section(lines, "enhance", cfg.enhance)
     lines.append("# Optional: inline train.py INI-compatible sections in TOML")
     lines.append("# This lets you use a single run-config file without --train-config.")
     lines.append("# Example:")
