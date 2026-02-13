@@ -105,3 +105,15 @@ debug_numerics_dump_dir = ""
 debug_numerics_dump_arrays = false
 debug_numerics_max_dumps = 5
 nan_skip_batch = false
+
+[enhance]
+# Set > 0 to enable VAD-driven speech segment amplification during enhancement.
+speech_boost_db = 0.0
+speech_boost_threshold = 0.5
+speech_boost_min_speech_ms = 250
+speech_boost_min_silence_ms = 100
+speech_boost_pad_ms = 30
+speech_boost_ramp_ms = 8.0
+speech_boost_peak_limit = 0.99
+speech_boost_silero_model_path = ""
+speech_boost_silero_sample_rate = 16000
