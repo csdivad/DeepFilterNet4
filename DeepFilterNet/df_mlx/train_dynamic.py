@@ -3639,6 +3639,43 @@ def train(
         optimizer.update(model, grads)
         return loss, out
 
+    # Compiled forward/backward step (no optimizer update).
+    # Used when gradient accumulation is enabled so updates remain aligned to
+    # optimizer-step semantics while still compiling the expensive fwd+bwd path.
+    @partial(mx.compile, inputs=[model.state], outputs=[model.state])
+    def compiled_loss_and_grad_step(
+        noisy_real,
+        noisy_imag,
+        feat_erb,
+        feat_spec,
+        clean_real,
+        clean_imag,
+        snr,
+        vad_weight,
+        speech_weight,
+        awesome_weight,
+        vad_reg_weight,
+        gan_weight,
+        fm_weight,
+    ):
+        (loss, out), grads = loss_and_grad(
+            model,
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+        )
+        return loss, out, grads
+
     def run_validation(label: str = "  Validating", *, do_vad_eval: bool = False) -> float:
         """Run validation on the fixed validation split and return average loss."""
         model.eval()
@@ -4135,16 +4172,14 @@ def train(
 
         return valid_loss / max(num_valid_batches, 1)
 
-    # Base compiled-step eligibility (epoch-level mode selection may still choose eager)
-    # Gradient accumulation requires manual gradient management, so we disable compiled step.
-    base_compiled_step_enabled = not (debug_numerics or nan_skip_batch or grad_accumulation_steps > 1)
+    # Base compiled-step eligibility (epoch-level mode selection may still choose eager).
+    # Gradient accumulation is supported via compiled fwd+bwd with eager optimizer updates.
+    base_compiled_step_enabled = not (debug_numerics or nan_skip_batch)
     compiled_disable_reasons: list[str] = []
     if debug_numerics:
         compiled_disable_reasons.append("debug_numerics")
     if nan_skip_batch:
         compiled_disable_reasons.append("nan_skip_batch")
-    if grad_accumulation_steps > 1:
-        compiled_disable_reasons.append("grad_accumulation")
 
     print(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
     if base_compiled_step_enabled:
@@ -4162,7 +4197,9 @@ def train(
         print(
             f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
         )
-        if not base_compiled_step_enabled:
+        if base_compiled_step_enabled:
+            print("  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated")
+        else:
             print("  Gradient accumulation: compiled training step disabled")
     if nan_skip_batch:
         print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
@@ -4480,31 +4517,70 @@ def train(
 
             model_out = None
             if epoch_use_compiled_step:
-                # Use compiled training step for better performance
-                # (compiled step always updates, since fwd+bwd+update is atomic)
-                did_optimizer_update = True
-                loss, model_out = compiled_step(
-                    noisy_real,
-                    noisy_imag,
-                    feat_erb,
-                    feat_spec,
-                    clean_real,
-                    clean_imag,
-                    snr,
-                    vad_weight_mx,
-                    speech_weight_mx,
-                    awesome_weight_mx,
-                    vad_reg_weight_mx,
-                    gan_weight_mx,
-                    fm_weight_mx,
-                    max_grad_norm,
-                )
-                # OPTIMIZATION: Only sync periodically to reduce GPU stalls
-                # This allows MLX to batch operations for better throughput
                 should_sync = (batch_idx + 1) % eval_frequency == 0
-                if should_sync:
-                    mx.eval(state)
-                grad_norm = float("nan")  # Not tracked in compiled step
+                if grad_accumulation_steps > 1:
+                    # Compiled fwd+bwd with eager accumulated optimizer updates.
+                    loss, model_out, grads = compiled_loss_and_grad_step(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        vad_weight_mx,
+                        speech_weight_mx,
+                        awesome_weight_mx,
+                        vad_reg_weight_mx,
+                        gan_weight_mx,
+                        fm_weight_mx,
+                    )
+                    accumulated_grads = accumulate_grads(accumulated_grads, grads)
+                    accumulated_loss = accumulated_loss + loss
+                    micro_batches_in_accum += 1
+
+                    is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
+                    if is_accum_complete:
+                        did_optimizer_update = True
+                        final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+                        if max_grad_norm > 0:
+                            final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
+                            if should_sync:
+                                grad_norm = float(grad_norm_arr)
+                        optimizer.update(model, final_grads)
+                        accumulated_grads = None
+                        accumulated_loss = mx.array(0.0)
+                        micro_batches_in_accum = 0
+
+                    if should_sync:
+                        if did_optimizer_update:
+                            mx.eval(loss, model.parameters(), optimizer.state)
+                        else:
+                            mx.eval(loss)
+                else:
+                    # Fully compiled training step (fwd+bwd+update) for best throughput.
+                    did_optimizer_update = True
+                    loss, model_out = compiled_step(
+                        noisy_real,
+                        noisy_imag,
+                        feat_erb,
+                        feat_spec,
+                        clean_real,
+                        clean_imag,
+                        snr,
+                        vad_weight_mx,
+                        speech_weight_mx,
+                        awesome_weight_mx,
+                        vad_reg_weight_mx,
+                        gan_weight_mx,
+                        fm_weight_mx,
+                        max_grad_norm,
+                    )
+                    # OPTIMIZATION: Only sync periodically to reduce GPU stalls
+                    # This allows MLX to batch operations for better throughput
+                    if should_sync:
+                        mx.eval(state)
+                grad_norm = float("nan")  # Not tracked in compiled path
             else:
                 # Standard training step
                 (loss, model_out), grads = loss_and_grad(

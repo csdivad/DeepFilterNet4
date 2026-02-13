@@ -150,3 +150,17 @@ def test_train_loop_logs_modes_and_guards_against_gan_compiled_mix():
     assert '_TRAIN_MODE_EAGER = "EAGER"' in source
     assert "TRAIN_MODE={train_mode}" in source
     assert "GAN active epoch cannot run compiled step" in source
+
+
+def test_compiled_base_eligibility_not_blocked_by_grad_accumulation():
+    source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
+    assert "base_compiled_step_enabled = not (debug_numerics or nan_skip_batch)" in source
+    assert "grad_accumulation_steps > 1" in source
+    assert "compiled forward/backward enabled; optimizer updates remain accumulated" in source
+
+
+def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
+    source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
+    assert "def compiled_loss_and_grad_step(" in source
+    assert "if grad_accumulation_steps > 1:" in source
+    assert "loss, model_out, grads = compiled_loss_and_grad_step(" in source
