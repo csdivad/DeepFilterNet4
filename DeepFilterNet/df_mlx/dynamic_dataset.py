@@ -1677,6 +1677,27 @@ class MLXDataStream:
         self.dataset.set_split(split)
         self._stream = None
 
+    def set_resume_position(self, epoch: int, batch_idx: int, *, split: str | None = None) -> None:
+        """Set an explicit resume position for deterministic mid-epoch recovery.
+
+        Args:
+            epoch: Epoch index to resume within.
+            batch_idx: Number of micro-batches already consumed in that epoch.
+            split: Optional split override (defaults to current split).
+        """
+        if batch_idx < 0:
+            raise ValueError(f"batch_idx must be >= 0, got {batch_idx}")
+
+        if split is not None and split != self._checkpoint.split:
+            self.set_split(split)
+
+        self._checkpoint.epoch = epoch
+        self._checkpoint.batch_idx = batch_idx
+        self._checkpoint.samples_processed = batch_idx * self.batch_size
+        self.dataset.set_epoch(epoch)
+        self._batch_count = batch_idx
+        self._stream = None
+
     def __iter__(self) -> Iterator[Dict[str, mx.array]]:
         """Iterate over batches with prefetching.
 

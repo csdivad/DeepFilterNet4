@@ -1709,6 +1709,7 @@ def compute_mrstft_loss(
 _CHECKPOINT_KINDS = {"step", "epoch_end", "best", "best_final", "final", "interrupted"}
 _COMPLETED_KINDS = {"epoch_end", "best", "best_final", "final"}
 _IN_PROGRESS_KINDS = {"step", "interrupted"}
+_COUNTER_SEMANTICS_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -1829,6 +1830,29 @@ def compute_resume_epoch(state: dict) -> int:
     return epoch
 
 
+def resolve_resume_batch_count(state: dict[str, Any]) -> int:
+    """Resolve resume micro-batch count from checkpoint state.
+
+    Returns the number of micro-batches already consumed in the in-progress
+    epoch. For legacy checkpoints (without counter_semantics_version),
+    batch_idx is interpreted as a 0-based index of the last processed batch and
+    is converted to a processed-count via +1.
+    """
+    kind = state.get("kind", "epoch_end")
+    if kind not in _IN_PROGRESS_KINDS:
+        return 0
+
+    raw_counter = state.get("micro_batches_completed", state.get("batch_idx"))
+    if not isinstance(raw_counter, int) or raw_counter < 0:
+        return 0
+
+    version_raw = state.get("counter_semantics_version", 1)
+    version = version_raw if isinstance(version_raw, int) else 1
+    if version >= _COUNTER_SEMANTICS_VERSION:
+        return raw_counter
+    return raw_counter + 1
+
+
 def maybe_skip_resume_batches(
     data_iterator,
     *,
@@ -1837,7 +1861,7 @@ def maybe_skip_resume_batches(
     start_epoch: int,
     resume_batch_idx: int,
 ):
-    """Skip already-processed batches when resuming an in-progress epoch.
+    """Skip already-processed micro-batches when resuming an in-progress epoch.
 
     Returns a tuple of (iterator, did_skip).
     """
@@ -1924,8 +1948,8 @@ def validate_checkpoint_dir(
         kind = state.get("kind")
         epoch = state.get("epoch")
         last_completed = state.get("last_completed_epoch")
-        batch_idx = state.get("batch_idx")
-        global_step = state.get("global_step")
+        batch_idx = state.get("micro_batches_completed", state.get("batch_idx"))
+        global_step = state.get("optimizer_steps_completed", state.get("global_step"))
 
         if kind not in _CHECKPOINT_KINDS:
             record.errors.append("missing/invalid kind")
@@ -2029,10 +2053,10 @@ def validate_checkpoint_dir(
         report["latest_state"] = latest.state
         if latest.state:
             report["resume_epoch"] = compute_resume_epoch(latest.state)
-            resume_batch = latest.state.get("batch_idx")
-            if latest.kind in _IN_PROGRESS_KINDS and isinstance(resume_batch, int):
-                report["resume_batch"] = resume_batch
-            report["resume_global_step"] = latest.state.get("global_step")
+            report["resume_batch"] = resolve_resume_batch_count(latest.state)
+            report["resume_global_step"] = latest.state.get(
+                "optimizer_steps_completed", latest.state.get("global_step")
+            )
 
     # Detect monotonicity issues across valid checkpoints (by modification time).
     valid_by_time = sorted(valid_records, key=lambda rec: rec.mtime)
@@ -2127,8 +2151,8 @@ def save_checkpoint(
         model: Model to save
         path: Path to checkpoint file (.safetensors)
         epoch: Current epoch index (0-based)
-        batch_idx: Batch index within epoch (for in-progress checkpoints)
-        global_step: Global training step
+        batch_idx: Number of micro-batches completed within the current epoch
+        global_step: Number of optimizer updates completed globally
         loss: Current training loss
         best_valid_loss: Best validation loss so far
         config: Training configuration dict
@@ -2195,7 +2219,9 @@ def save_checkpoint(
         state = {
             "epoch": epoch,
             "batch_idx": batch_idx,
+            "micro_batches_completed": batch_idx,
             "global_step": global_step,
+            "optimizer_steps_completed": global_step,
             "loss": loss,
             "best_valid_loss": best_valid_loss,
             "config": config,
@@ -2204,6 +2230,9 @@ def save_checkpoint(
             "last_completed_epoch": last_completed_epoch,
             "kind": kind,
             "checkpoint_kind": checkpoint_kind,
+            "counter_semantics_version": _COUNTER_SEMANTICS_VERSION,
+            "batch_unit": "microbatch_count",
+            "step_unit": "optimizer_step",
             "current_epoch": epoch,
             "last_saved_global_step": global_step,
             "last_saved_batch_idx": batch_idx,
@@ -3108,19 +3137,30 @@ def train(
     num_params = count_parameters(model)
     print(f"  Parameters: {num_params:,}")
 
-    # Estimate steps per epoch (approximate since samples may be skipped)
-    # With gradient accumulation, an optimizer "step" spans multiple batches
+    # Counter semantics:
+    # - micro_batches_per_epoch: number of dataloader micro-batches consumed per epoch
+    # - optimizer_steps_per_epoch: number of optimizer updates per epoch
+    #   (with accumulation this is floor(micro_batches / grad_accumulation_steps))
     approx_samples_per_epoch = len(dataset)
-    batches_per_epoch = approx_samples_per_epoch // batch_size
-    steps_per_epoch = batches_per_epoch // grad_accumulation_steps
-    if steps_per_epoch < 1:
-        steps_per_epoch = 1
-        print(
-            f"Warning: grad_accumulation_steps={grad_accumulation_steps} >= batches_per_epoch={batches_per_epoch}; using 1 step/epoch"
+    micro_batches_per_epoch = approx_samples_per_epoch // batch_size
+    if micro_batches_per_epoch < 1:
+        raise ValueError(
+            f"Dataset too small for batch_size={batch_size}: "
+            f"{approx_samples_per_epoch} samples -> 0 micro-batches/epoch"
         )
-    total_steps = epochs * steps_per_epoch
-    warmup_steps = warmup_epochs * steps_per_epoch
-    vad_warmup_steps = vad_warmup_epochs * steps_per_epoch if use_vad_loss else 0
+
+    optimizer_steps_per_epoch = micro_batches_per_epoch // grad_accumulation_steps
+    if optimizer_steps_per_epoch < 1:
+        optimizer_steps_per_epoch = 1
+        print(
+            "Warning: "
+            f"grad_accumulation_steps={grad_accumulation_steps} >= "
+            f"micro_batches_per_epoch={micro_batches_per_epoch}; "
+            "using 1 optimizer step/epoch for scheduler bookkeeping"
+        )
+    total_steps = epochs * optimizer_steps_per_epoch
+    warmup_steps = warmup_epochs * optimizer_steps_per_epoch
+    vad_warmup_steps = vad_warmup_epochs * optimizer_steps_per_epoch if use_vad_loss else 0
     awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
 
     schedule = WarmupCosineSchedule(
@@ -3142,6 +3182,7 @@ def train(
     last_completed_epoch = -1
     resume_global_step = 0
     resume_batch_idx = 0
+    resume_checkpoint_kind = "epoch_end"
 
     if resume_from:
         state = load_checkpoint(
@@ -3154,7 +3195,11 @@ def train(
         if state:
             ckpt_epoch = int(state.get("epoch", 0))
             ckpt_kind = state.get("kind", "epoch_end")
-            resume_global_step = state.get("global_step", ckpt_epoch * steps_per_epoch)
+            resume_checkpoint_kind = ckpt_kind if isinstance(ckpt_kind, str) else "epoch_end"
+            resume_global_step = state.get(
+                "optimizer_steps_completed",
+                state.get("global_step", ckpt_epoch * optimizer_steps_per_epoch),
+            )
             start_epoch = compute_resume_epoch(state)
             completed_kinds = {"epoch_end", "best", "best_final", "final"}
             if ckpt_kind in completed_kinds:
@@ -3162,9 +3207,7 @@ def train(
             else:
                 last_completed_epoch = state.get("last_completed_epoch", ckpt_epoch - 1)
             if ckpt_kind in _IN_PROGRESS_KINDS:
-                batch_val = state.get("batch_idx")
-                if isinstance(batch_val, int) and batch_val >= 0:
-                    resume_batch_idx = batch_val
+                resume_batch_idx = resolve_resume_batch_count(state)
             best_valid_loss = state.get("best_valid_loss", float("inf"))
             print(
                 "  Resumed from: "
@@ -3174,7 +3217,7 @@ def train(
             print(
                 "  Resume target: "
                 f"epoch {start_epoch + 1} (idx {start_epoch}), "
-                f"batch {resume_batch_idx}, global_step {resume_global_step}"
+                f"micro_batch {resume_batch_idx}, global_step {resume_global_step}"
             )
             if start_epoch >= epochs:
                 print(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
@@ -3185,16 +3228,33 @@ def train(
 
     if train_stream is not None and data_resume_progress is not None:
         data_epoch = data_resume_progress.get("epoch")
-        if isinstance(data_epoch, int) and data_epoch != start_epoch:
-            print(
-                "⚠️  Data checkpoint epoch does not match resume epoch "
-                f"(data={data_epoch}, resume={start_epoch}). "
-                f"Ignoring data checkpoint: {data_resume_source}"
+        data_batch = data_resume_progress.get("batch")
+        if not isinstance(data_epoch, int) or not isinstance(data_batch, int):
+            raise RuntimeError(
+                "Data checkpoint progress is malformed. "
+                f"source={data_resume_source}, progress={data_resume_progress}"
             )
-            train_stream.set_epoch(start_epoch)
-            data_resume_progress = None
-        elif data_resume_progress.get("batch", 0) in (0, None):
-            data_resume_progress = None
+
+        resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
+        if resume_requires_mid_epoch:
+            if data_epoch != start_epoch or data_batch != resume_batch_idx:
+                raise RuntimeError(
+                    "Model checkpoint and data checkpoint disagree on resume position. "
+                    f"model=(epoch={start_epoch}, micro_batch={resume_batch_idx}, kind={resume_checkpoint_kind}), "
+                    f"data=(epoch={data_epoch}, micro_batch={data_batch}) from {data_resume_source}. "
+                    "Remediation: remove stale data_checkpoint.json or choose matching resume artifacts."
+                )
+        else:
+            # Resuming from an epoch-boundary checkpoint should always restart at batch 0.
+            if data_epoch != start_epoch or data_batch > 0:
+                print(
+                    "ℹ️  Ignoring mid-epoch data checkpoint for epoch-boundary resume: "
+                    f"data=(epoch={data_epoch}, micro_batch={data_batch}), resume_epoch={start_epoch}."
+                )
+                train_stream.set_epoch(start_epoch)
+                data_resume_progress = None
+            elif data_batch == 0:
+                data_resume_progress = None
 
     if resume_from:
         lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
@@ -4081,7 +4141,7 @@ def train(
     print(f"  Est. total steps: {total_steps:,}")
     print()
 
-    global_step = resume_global_step if resume_from else start_epoch * steps_per_epoch
+    global_step = resume_global_step if resume_from else start_epoch * optimizer_steps_per_epoch
     final_epoch = start_epoch
     last_completed_epoch = max(last_completed_epoch, start_epoch - 1)
     avg_train_loss = float("nan")
@@ -4205,20 +4265,41 @@ def train(
         micro_batches_in_accum = 0
 
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
+        resume_batches_for_epoch = 0
+        if resume_from and resume_checkpoint_kind in _IN_PROGRESS_KINDS and epoch == start_epoch:
+            resume_batches_for_epoch = resume_batch_idx
+
+        epoch_target_micro_batches = micro_batches_per_epoch
+        if max_train_batches is not None:
+            epoch_target_micro_batches = min(epoch_target_micro_batches, max_train_batches)
+        if resume_batches_for_epoch > epoch_target_micro_batches:
+            raise RuntimeError(
+                "Resume micro-batch position exceeds epoch boundary. "
+                f"resume_micro_batch={resume_batches_for_epoch}, "
+                f"epoch_target_micro_batches={epoch_target_micro_batches}."
+            )
+        train_total = max(epoch_target_micro_batches - resume_batches_for_epoch, 0)
+
         if use_mlx_stream and train_stream is not None:
             if data_resume_progress is not None and epoch == data_resume_progress.get("epoch"):
                 # Continue from saved data checkpoint without resetting epoch state.
                 data_iterator = train_stream
                 progress = train_stream.get_progress()
-                print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
+                if progress["batch"] != resume_batches_for_epoch:
+                    raise RuntimeError(
+                        "Data stream resume position does not match model resume position: "
+                        f"data={progress['batch']}, model={resume_batches_for_epoch}."
+                    )
+                if resume_batches_for_epoch > 0:
+                    print(f"  Resuming epoch {epoch + 1} from micro-batch {progress['batch']}")
                 data_resume_progress = None
+            elif resume_batches_for_epoch > 0:
+                train_stream.set_resume_position(epoch=epoch, batch_idx=resume_batches_for_epoch, split="train")
+                data_iterator = train_stream
+                print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
             else:
                 train_stream.set_epoch(epoch)
                 data_iterator = train_stream
-                # Check if resuming mid-epoch
-                progress = train_stream.get_progress()
-                if progress["batch"] > 0 and epoch == progress["epoch"]:
-                    print(f"  Resuming epoch {epoch + 1} from batch {progress['batch']}")
         else:
             data_iterator = PrefetchDataLoader(
                 dataset,
@@ -4231,18 +4312,13 @@ def train(
                 resume_from=resume_from,
                 epoch=epoch,
                 start_epoch=start_epoch,
-                resume_batch_idx=resume_batch_idx,
+                resume_batch_idx=resume_batches_for_epoch,
             )
             if did_skip:
-                print(f"  Resuming epoch {epoch + 1} from batch {resume_batch_idx}")
-
-        # Training progress bar
-        train_total = steps_per_epoch
-        if max_train_batches is not None:
-            train_total = min(train_total, max_train_batches)
+                print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
 
         train_pbar = tqdm(
-            enumerate(data_iterator),
+            enumerate(islice(data_iterator, train_total)),
             total=train_total,
             desc=f"Epoch {epoch + 1}/{epochs}",
             unit="batch",
@@ -4526,7 +4602,7 @@ def train(
                 epoch,
                 loss_val,
                 best_valid_loss,
-                batch_idx=batch_idx,
+                batch_idx=num_train_batches,
                 global_step=global_step,
                 last_completed_epoch=last_completed_epoch,
             )
@@ -4928,7 +5004,7 @@ def train(
                     model,
                     ckpt_path,
                     epoch=epoch,
-                    batch_idx=batch_idx,
+                    batch_idx=num_train_batches,
                     global_step=global_step,
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=best_valid_loss,

@@ -165,6 +165,33 @@ For general coding standards (formatting, linting, commit messages), see [CONTRI
 - [.claude/skills/beads/](../.claude/skills/beads/)
 - [AGENTS.md](../AGENTS.md)
 
+---
+
+### Training Counter Semantics (MLX Dynamic Trainer)
+
+**Status:** REQUIRED
+
+**Scope:** `DeepFilterNet/df_mlx/train_dynamic.py`, `DeepFilterNet/df_mlx/dynamic_dataset.py`, and related checkpoint/resume tests
+
+**Rule:**
+
+- Treat epoch progress in **micro-batches** (dataloader iterations), and treat `global_step` in **optimizer steps** (parameter updates).
+- In checkpoint state, `batch_idx` represents **micro-batches completed in the current epoch** (count), not the 0-based index of the last seen batch.
+- Progress bars must use micro-batch totals and iterate over a bounded iterator to avoid overshooting epoch boundaries.
+- When both model and data checkpoints are present for in-progress resume, their `(epoch, micro-batch)` positions must match exactly; otherwise fail loudly.
+
+**Rationale:**
+
+- Mixing units (optimizer-step totals vs micro-batch iteration) causes misleading progress bars and apparent epoch overruns.
+- Count-vs-index ambiguity in `batch_idx` causes off-by-one resume behavior and can duplicate or skip data after interruption.
+- Strict model/data checkpoint reconciliation prevents silent divergence during recovery and makes incidents reproducible.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py)
+- [DeepFilterNet/df_mlx/dynamic_dataset.py](../DeepFilterNet/df_mlx/dynamic_dataset.py)
+- [DeepFilterNet/tests/test_train_control_semantics.py](../DeepFilterNet/tests/test_train_control_semantics.py)
+
 ## 3. Known Exceptions
 
 _None documented yet._
@@ -172,3 +199,4 @@ _None documented yet._
 ## 4. Change History (Human-Readable)
 
 - **2025-01-06**: Initial conventions document created during AI integration optimization.
+- **2026-02-13**: Added MLX training counter semantics convention (micro-batch vs optimizer-step units, checkpoint resume invariants).
