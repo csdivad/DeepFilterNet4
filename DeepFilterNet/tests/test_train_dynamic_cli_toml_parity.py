@@ -59,7 +59,7 @@ def test_all_runtime_cli_flags_have_toml_mapping():
     mapped_flags = _collect_override_flags(module)
 
     # These control how the TOML is loaded/printed and are intentionally CLI-only.
-    meta_only_flags = {"--run-config", "--print-run-config"}
+    meta_only_flags = {"--run-config", "--print-run-config", "--preset"}
 
     missing = sorted(parser_flags - mapped_flags - meta_only_flags)
     assert missing == [], f"CLI flags missing TOML mapping: {missing}"
