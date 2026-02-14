@@ -29,12 +29,16 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import itertools
 import json
 import math
+import platform
 import statistics
+import subprocess
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -67,6 +71,199 @@ from df_mlx.dynamic_dataset import (
 from df_mlx.grad_utils import clip_grad_norm_tree
 from df_mlx.model import init_model
 from df_mlx.train import spectral_loss
+
+# ---------------------------------------------------------------------------
+# Reproducibility metadata helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_chip_name() -> str:
+    """Return the Apple Silicon chip name via sysctl, or a fallback."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return platform.processor() or platform.machine()
+
+
+def _get_gpu_cores() -> int:
+    """Return GPU core count on macOS via system_profiler, or -1."""
+    try:
+        result = subprocess.run(
+            ["system_profiler", "SPDisplaysDataType"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "Total Number of Cores" in line:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        return int(parts[1].strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return -1
+
+
+def _get_memory_gb() -> int:
+    """Return total physical memory in GB via sysctl, or -1."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip()) // (1024**3)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return -1
+
+
+def _get_git_commit() -> str:
+    """Return the short git commit hash, or 'unknown'."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
+
+
+def collect_reproducibility_metadata(
+    config: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Collect hardware, OS, runtime, and git metadata for reproducible benchmarking."""
+    chip = _get_chip_name()
+    commit = _get_git_commit()
+
+    mlx_nn_version = ""
+    try:
+        import mlx.nn as _nn  # noqa: F811
+
+        mlx_nn_version = getattr(_nn, "__version__", "")
+    except Exception:
+        pass
+
+    metadata: Dict[str, Any] = {
+        "hardware": {
+            "chip": chip,
+            "gpu_cores": _get_gpu_cores(),
+            "memory_gb": _get_memory_gb(),
+        },
+        "os": {
+            "name": platform.system(),
+            "version": platform.mac_ver()[0] or platform.release(),
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "mlx": mx.__version__,
+            "mlx_nn": mlx_nn_version,
+        },
+        "commit": commit,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if config is not None:
+        metadata["config"] = config
+        hash_input = commit + json.dumps(config, sort_keys=True) + chip
+        metadata["reproducibility_hash"] = hashlib.sha256(hash_input.encode()).hexdigest()
+
+    return metadata
+
+
+# ---------------------------------------------------------------------------
+# Threshold / pass-fail helpers
+# ---------------------------------------------------------------------------
+
+THRESHOLD_THROUGHPUT_FACTOR = 0.90
+THRESHOLD_LATENCY_FACTOR = 1.15
+THRESHOLD_CV_MAX = 0.20
+
+
+def check_regression(
+    new_p5: float,
+    baseline_p5: float,
+    new_p95: float,
+    baseline_p95: float,
+    new_std: float,
+    new_mean: float,
+) -> Dict[str, Any]:
+    """Evaluate pass/fail for a single config point against baseline.
+
+    Returns a dict with per-gate results and an overall ``passed`` flag.
+    """
+    import os
+
+    override = os.environ.get("BENCHMARK_OVERRIDE", "") == "1"
+
+    throughput_ok = new_p5 >= baseline_p5 * THRESHOLD_THROUGHPUT_FACTOR
+    latency_ok = new_p95 <= baseline_p95 * THRESHOLD_LATENCY_FACTOR
+    cv = (new_std / new_mean) if new_mean > 0 else float("inf")
+    variance_ok = cv <= THRESHOLD_CV_MAX
+
+    passed = throughput_ok and latency_ok and variance_ok
+    if override and not passed:
+        passed = True
+
+    return {
+        "passed": passed,
+        "override": override and not (throughput_ok and latency_ok and variance_ok),
+        "throughput": {"ok": throughput_ok, "new_p5": new_p5, "baseline_p5": baseline_p5},
+        "latency": {"ok": latency_ok, "new_p95": new_p95, "baseline_p95": baseline_p95},
+        "variance": {"ok": variance_ok, "cv": cv},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Contract matrix generation
+# ---------------------------------------------------------------------------
+
+CONTRACT_BACKBONES = ["dfnet4", "mamba"]
+CONTRACT_BATCH_SIZES = [1, 4, 8]
+CONTRACT_COMPILED = [True, False]
+CONTRACT_GRAD_ACCUM = [1, 2]
+CONTRACT_FP16 = [True, False]
+CONTRACT_WARMUP = 5
+CONTRACT_STEPS = 50
+CONTRACT_REPEATS = 3
+
+
+def generate_contract_matrix() -> List[Dict[str, Any]]:
+    """Return the canonical benchmark matrix as a list of config dicts."""
+    configs: List[Dict[str, Any]] = []
+    for backbone, bs, compiled, grad_accum, fp16 in itertools.product(
+        CONTRACT_BACKBONES,
+        CONTRACT_BATCH_SIZES,
+        CONTRACT_COMPILED,
+        CONTRACT_GRAD_ACCUM,
+        CONTRACT_FP16,
+    ):
+        configs.append(
+            {
+                "backbone": backbone,
+                "batch_size": bs,
+                "compiled": compiled,
+                "grad_accumulation": grad_accum,
+                "fp16": fp16,
+            }
+        )
+    return configs
 
 
 @dataclass(frozen=True)
@@ -554,7 +751,29 @@ def main() -> None:
     parser.add_argument("--nb-df", type=parse_int_list, default=parse_int_list("96"))
     parser.add_argument("--seed", type=parse_int_list, default=parse_int_list("42"))
     parser.add_argument("--json-out", type=str, default=None, help="Optional JSON output path")
+    parser.add_argument(
+        "--metadata",
+        action="store_true",
+        default=False,
+        help="Attach reproducibility metadata (hardware, OS, runtime, git) to JSON output",
+    )
+    parser.add_argument(
+        "--contract",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the canonical benchmark matrix defined in docs/BENCHMARK_CONTRACT.md. "
+            "Overrides --batch-size, --compiled, --warmup-steps, --steps, and --repeats."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.contract:
+        args.batch_size = parse_int_list(",".join(str(b) for b in CONTRACT_BATCH_SIZES))
+        args.compiled = parse_bool_list(",".join(str(c).lower() for c in CONTRACT_COMPILED))
+        args.warmup_steps = parse_int_list(str(CONTRACT_WARMUP))
+        args.steps = parse_int_list(str(CONTRACT_STEPS))
+        args.repeats = parse_int_list(str(CONTRACT_REPEATS))
 
     if "mlx_stream" in args.backends and not HAS_MLX_DATA:
         print("Skipping mlx_stream backend: mlx-data is not installed.")
@@ -621,7 +840,13 @@ def main() -> None:
     if args.json_out:
         out_path = Path(args.json_out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps([asdict(r) for r in results], indent=2))
+        payload: Any
+        if args.metadata:
+            metadata = collect_reproducibility_metadata()
+            payload = {"metadata": metadata, "results": [asdict(r) for r in results]}
+        else:
+            payload = [asdict(r) for r in results]
+        out_path.write_text(json.dumps(payload, indent=2))
         print(f"\nWrote JSON results to {out_path}")
 
 
