@@ -67,6 +67,7 @@ from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
 from df_mlx.run_config import (  # noqa: E402
     RunConfig,
     generate_run_config_example,
+    load_preset_config,
     load_run_config,
     set_by_path,
     validate_run_config,
@@ -2693,6 +2694,7 @@ def train(
     debug_numerics_dump_arrays: bool = False,
     debug_numerics_max_dumps: int = 5,
     nan_skip_batch: bool = False,
+    sync_mode: str = "normal",
     model_config: ModelParams4 | None = None,
     dataset_overrides: dict[str, Any] | None = None,
     mrstft_config: MultiResSpecLossConfig | None = None,
@@ -2781,6 +2783,7 @@ def train(
         debug_numerics_dump_arrays: Save small tensor slices alongside JSON dumps
         debug_numerics_max_dumps: Maximum number of non-finite dumps to write
         nan_skip_batch: Skip optimizer update when loss/grads are non-finite (debug-friendly)
+        sync_mode: Sync barrier budget (fast | normal | debug | profile)
         model_config: Optional MLX model config overrides (ModelParams4)
         dataset_overrides: Optional dataset config overrides (applied before CLI overrides)
         mrstft_config: Optional multi-res STFT loss config
@@ -4478,7 +4481,10 @@ def train(
     print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
     # Training loop
+    # Sync cadence derived from sync_mode (see docs/SYNC_BARRIER_POLICY.md)
+    emit_detailed_metrics = sync_mode != "fast"
     print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
+    print(f"  Sync mode: {sync_mode} (eval_frequency={eval_frequency})")
     print(f"  Warmup steps: {warmup_steps:,}")
     print(f"  Est. total steps: {total_steps:,}")
     print()
@@ -5044,6 +5050,19 @@ def train(
                 train_loss += loss_val * eval_frequency  # Approximate accumulated loss
                 if gan_active and gan_d_loss_val:
                     train_gan_d_loss += gan_d_loss_val * eval_frequency
+
+                # Debug mode: log per-step gradient norm for full observability
+                if sync_mode == "debug" and math.isfinite(grad_norm):
+                    tqdm.write(f"  [debug] step={global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
+
+                # Profile mode: log step-level timing breakdown
+                if sync_mode == "profile":
+                    tqdm.write(
+                        f"  [profile] step={global_step} "
+                        f"data={data_time * 1000:.1f}ms "
+                        f"fwd={fwd_time * 1000:.1f}ms "
+                        f"total={(data_time + fwd_time) * 1000:.1f}ms"
+                    )
             num_train_batches += 1
             samples_processed += current_batch_size
             window_samples += current_batch_size
@@ -5101,7 +5120,7 @@ def train(
                 snr_boost_mean = 0.0
                 vad_reg_loss_val = 0.0
 
-                if (
+                if emit_detailed_metrics and (
                     use_vad_loss
                     or use_awesome_loss
                     or use_pipeline_awesome_loss
@@ -5846,6 +5865,17 @@ def main():
         help="Path to train.py-compatible INI config (model + training settings)",
     )
     parser.add_argument(
+        "--preset",
+        type=str,
+        choices=["entry", "pro", "max", "ultra", "debug"],
+        default=None,
+        help=(
+            "Load a named hardware preset as the base config. "
+            "Values from --run-config and explicit CLI flags override preset defaults. "
+            "See docs/RUN_CONFIG_PRESETS.md for details."
+        ),
+    )
+    parser.add_argument(
         "--print-run-config",
         action="store_true",
         help="Print a commented run-config TOML example and exit",
@@ -6425,6 +6455,8 @@ def main():
         return
 
     run_cfg = RunConfig()
+    if args.preset:
+        run_cfg = load_preset_config(args.preset, base=run_cfg)
     if args.run_config:
         run_cfg = load_run_config(args.run_config, base=run_cfg)
     train_config_path = args.train_config or run_cfg.training.train_config
@@ -6577,6 +6609,7 @@ def main():
         debug_numerics_dump_arrays=run_cfg.debug.debug_numerics_dump_arrays,
         debug_numerics_max_dumps=run_cfg.debug.debug_numerics_max_dumps,
         nan_skip_batch=run_cfg.debug.nan_skip_batch,
+        sync_mode=run_cfg.debug.sync_mode,
         model_config=model_cfg,
         dataset_overrides=dataset_overrides,
         mrstft_config=run_cfg.loss.mrstft,

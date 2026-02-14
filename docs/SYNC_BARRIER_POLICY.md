@@ -106,6 +106,6 @@ Metrics are classified by sync cost and gated by the operating mode.
 - [x] Add `sync_mode` field to `DebugConfig` in `run_config.py`
 - [x] Add `resolve_run_config()` to apply mode-based `eval_frequency` override
 - [x] Add tests for sync_mode choices, overrides, and debug_numerics interaction
-- [ ] Wire `resolve_run_config()` into `train_dynamic.py` startup (future task)
-- [ ] Gate medium/expensive metrics behind mode checks in training loop (future task)
+- [x] Wire `resolve_run_config()` into `train_dynamic.py` startup (future task)
+- [x] Gate medium/expensive metrics behind mode checks in training loop (future task)
 - [ ] Add `--sync-mode` CLI flag passthrough (future task)

@@ -972,6 +972,61 @@ def load_run_config(path: str | Path, *, base: RunConfig | None = None) -> RunCo
     return cfg
 
 
+# ============================
+# Preset support
+# ============================
+
+PRESET_NAMES: list[str] = ["entry", "pro", "max", "ultra", "debug"]
+"""Valid preset names corresponding to TOML files in ``schemas/presets/``."""
+
+_PRESETS_DIR: Path | None = None
+
+
+def _resolve_presets_dir() -> Path:
+    """Return the ``schemas/presets/`` directory relative to the repo root."""
+    global _PRESETS_DIR
+    if _PRESETS_DIR is not None:
+        return _PRESETS_DIR
+
+    # Walk up from this file (df_mlx/run_config.py) to the repo root.
+    candidate = Path(__file__).resolve().parent.parent.parent / "schemas" / "presets"
+    if candidate.is_dir():
+        _PRESETS_DIR = candidate
+        return _PRESETS_DIR
+    raise FileNotFoundError(
+        f"Preset directory not found at {candidate}. " "Ensure you are running from the DeepFilterNet repository."
+    )
+
+
+def load_preset_config(name: str, *, base: RunConfig | None = None) -> RunConfig:
+    """Load a named preset TOML as a base ``RunConfig``.
+
+    Parameters
+    ----------
+    name:
+        One of :data:`PRESET_NAMES` (e.g. ``"pro"``).
+    base:
+        Optional existing config to overlay the preset onto.
+
+    Returns
+    -------
+    RunConfig with preset values applied.
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a recognised preset.
+    FileNotFoundError
+        If the preset TOML file is missing on disk.
+    """
+    if name not in PRESET_NAMES:
+        raise ValueError(f"Unknown preset '{name}'. Available presets: {', '.join(PRESET_NAMES)}")
+    preset_path = _resolve_presets_dir() / f"{name}.toml"
+    if not preset_path.exists():
+        raise FileNotFoundError(f"Preset file not found: {preset_path}")
+    return load_run_config(preset_path, base=base)
+
+
 def set_by_path(cfg: RunConfig, path: str, value: Any) -> None:
     parts = path.split(".")
     obj: Any = cfg
