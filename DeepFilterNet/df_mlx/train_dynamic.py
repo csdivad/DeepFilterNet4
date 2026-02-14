@@ -3722,6 +3722,44 @@ def train(
                 debug_ctx=debug_ctx,
             )
 
+    # -- Compile-boundary shape guardrails ----------------------------------
+    def _assert_compile_boundary_shapes(
+        noisy: mx.array,
+        clean: mx.array,
+        expected_batch_size: int,
+        *,
+        check_dtype: bool = True,
+        expected_dtype: mx.Dtype = mx.float32,
+    ) -> None:
+        """Validate shape invariants at compile boundary to prevent retracing.
+
+        Must be called *before* entering a compiled function so that any
+        violation surfaces as a clear Python error rather than an opaque
+        retrace or silent correctness issue.
+        """
+        if noisy.shape[0] != expected_batch_size:
+            raise ValueError(
+                f"Compile boundary shape violation: batch_size={noisy.shape[0]}, "
+                f"expected={expected_batch_size}. This would trigger an expensive retrace."
+            )
+        if noisy.shape != clean.shape:
+            raise ValueError(f"Compile boundary shape mismatch: noisy={noisy.shape}, clean={clean.shape}")
+        if check_dtype and noisy.dtype != expected_dtype:
+            raise ValueError(f"Compile boundary dtype mismatch: got {noisy.dtype}, " f"expected {expected_dtype}")
+
+    _compile_retrace_count: int = 0
+
+    def _log_compile_retrace_warning(context: str = "") -> None:
+        """Log a warning when a compiled function retrace is detected.
+
+        Call this when a shape/dtype change is observed that would force MLX
+        to re-trace the compiled graph.
+        """
+        nonlocal _compile_retrace_count
+        _compile_retrace_count += 1
+        msg = f"[RETRACE WARNING #{_compile_retrace_count}] " f"Compiled function retrace detected. {context}"
+        tqdm.write(msg)
+
     # Compiled training step for performance optimization
     # Captures model and optimizer state for graph tracing
     state = [model.state, optimizer.state]
@@ -4778,6 +4816,13 @@ def train(
 
             model_out = None
             if epoch_use_compiled_step:
+                _assert_compile_boundary_shapes(
+                    noisy_real,
+                    clean_real,
+                    batch_size,
+                    check_dtype=use_fp16,
+                    expected_dtype=mx.float16 if use_fp16 else mx.float32,
+                )
                 should_sync = (batch_idx + 1) % eval_frequency == 0
                 if grad_accumulation_steps > 1:
                     # Compiled fwd+bwd with eager accumulated optimizer updates.

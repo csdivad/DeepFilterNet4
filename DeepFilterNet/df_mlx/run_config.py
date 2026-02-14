@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+import logging
+import subprocess
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -385,11 +387,74 @@ class TrainingConfig:
     )
 
 
+# ============================
+# Hardware Tuning Profiles
+# ============================
+
+_logger = logging.getLogger(__name__)
+
+HARDWARE_PROFILES: dict[str, dict[str, Any]] = {
+    "entry": {"loader": "prefetch", "num_workers": 2, "prefetch_size": 4},
+    "pro": {"loader": "prefetch", "num_workers": 4, "prefetch_size": 8},
+    "max": {"loader": "mlx_data", "num_workers": 6, "prefetch_size": 12},
+    "ultra": {"loader": "mlx_data", "num_workers": 8, "prefetch_size": 16},
+}
+
+_CONSERVATIVE_PROFILE: dict[str, Any] = {
+    "loader": "prefetch",
+    "num_workers": 2,
+    "prefetch_size": 4,
+}
+
+
+def detect_hardware_class() -> str:
+    """Return the Apple Silicon hardware class: entry, pro, max, ultra, or unknown."""
+    try:
+        brand = (
+            subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+            .lower()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unknown"
+
+    if "ultra" in brand:
+        return "ultra"
+    if "max" in brand:
+        return "max"
+    if "pro" in brand:
+        return "pro"
+    if any(tag in brand for tag in ("m1", "m2", "m3", "m4", "apple")):
+        return "entry"
+    return "unknown"
+
+
+def get_hardware_tuning_profile() -> dict[str, Any]:
+    """Detect Apple Silicon class and return recommended data pipeline settings.
+
+    Returns a dict with keys ``loader``, ``num_workers``, and ``prefetch_size``.
+    Falls back to conservative defaults when the chip cannot be identified.
+    """
+    hw_class = detect_hardware_class()
+    profile = HARDWARE_PROFILES.get(hw_class, _CONSERVATIVE_PROFILE).copy()
+    profile["hardware_class"] = hw_class
+    return profile
+
+
 @dataclass
 class DataloaderConfig:
     num_workers: int = cfg_field(4, help="Data loader workers", normalize=lambda v: _normalize_int(v, min_value=0))
     prefetch_size: int = cfg_field(8, help="Prefetch size", normalize=lambda v: _normalize_int(v, min_value=1))
     use_mlx_data: bool = cfg_field(True, help="Use MLXDataStream if available", normalize=_normalize_bool)
+    auto_tune_dataloader: bool = cfg_field(
+        False,
+        help="Auto-detect hardware class and apply recommended worker/prefetch settings",
+        normalize=_normalize_bool,
+    )
     max_train_batches: int | None = cfg_field(
         None,
         help="Limit number of train batches per epoch (-1 disables)",
@@ -723,6 +788,25 @@ class DebugConfig:
         5, help="Max debug dumps", normalize=lambda v: _normalize_int(v, min_value=1)
     )
     nan_skip_batch: bool = cfg_field(False, help="Skip optimizer update on non-finite", normalize=_normalize_bool)
+    sync_mode: str = cfg_field(
+        "normal",
+        help="Sync barrier budget: fast | normal | debug | profile",
+        choices=["fast", "normal", "debug", "profile"],
+        normalize=lambda v: str(v),
+        notes=(
+            "Controls eval_frequency default and metric verbosity. "
+            "'fast' minimizes syncs for throughput, 'debug' syncs every step."
+        ),
+    )
+
+
+SYNC_MODE_EVAL_FREQUENCY: dict[str, int] = {
+    "fast": 50,
+    "normal": 10,
+    "debug": 1,
+    "profile": 5,
+}
+"""Recommended eval_frequency for each sync_mode."""
 
 
 @dataclass
@@ -831,9 +915,18 @@ def _suggest_keys(key: str, choices: list[str]) -> str:
     return " Did you mean: " + ", ".join(matches)
 
 
-def apply_run_config_dict(cfg: RunConfig, data: dict[str, Any], *, path: str = "") -> None:
+def apply_run_config_dict(
+    cfg: RunConfig,
+    data: dict[str, Any],
+    *,
+    path: str = "",
+    _explicitly_set: set[str] | None = None,
+) -> None:
     if not isinstance(data, dict):
         raise TypeError(f"Expected a table at '{path or 'root'}'")
+
+    if _explicitly_set is None:
+        _explicitly_set = set()
 
     fmap = _field_map(cfg)
     for key, value in data.items():
@@ -845,23 +938,30 @@ def apply_run_config_dict(cfg: RunConfig, data: dict[str, Any], *, path: str = "
         if is_dataclass(current):
             if not isinstance(value, dict):
                 raise TypeError(f"Expected table for '{_format_path(path, key)}'")
-            apply_run_config_dict(current, value, path=_format_path(path, key))
+            apply_run_config_dict(current, value, path=_format_path(path, key), _explicitly_set=_explicitly_set)
             continue
+
+        full_key = _format_path(path, key)
+        _explicitly_set.add(full_key)
 
         normalize: Callable[[Any], Any] | None = field_def.metadata.get("normalize")
         if normalize is not None:
             try:
                 normalized = normalize(value)
             except Exception as exc:
-                raise ValueError(f"Invalid value for '{_format_path(path, key)}': {exc}") from exc
+                raise ValueError(f"Invalid value for '{full_key}': {exc}") from exc
         else:
             normalized = value
 
         choices = field_def.metadata.get("choices")
         if choices is not None and normalized is not None and normalized not in choices:
-            raise ValueError(f"Invalid value for '{_format_path(path, key)}': {normalized}. Allowed: {choices}")
+            raise ValueError(f"Invalid value for '{full_key}': {normalized}. Allowed: {choices}")
 
         setattr(cfg, key, normalized)
+
+    # Stash the explicitly-set keys on the top-level RunConfig for resolve_run_config.
+    if not path and isinstance(cfg, RunConfig):
+        cfg._explicitly_set = _explicitly_set  # type: ignore[attr-defined]
 
 
 def load_run_config(path: str | Path, *, base: RunConfig | None = None) -> RunConfig:
@@ -933,6 +1033,62 @@ def validate_run_config(cfg: RunConfig) -> None:
         raise ValueError("gan enabled but adv_weight and fm_weight are both 0")
     if cfg.gan.mpd_periods and any(p <= 0 for p in cfg.gan.mpd_periods):
         raise ValueError("gan.mpd_periods must be positive integers")
+
+
+# ============================
+# Resolution
+# ============================
+
+
+def _apply_hardware_auto_tune(cfg: RunConfig) -> None:
+    """Apply hardware-detected tuning profile to dataloader settings.
+
+    Only overrides fields that were *not* explicitly set by the user in
+    the TOML / CLI layer.  Explicit values always win.
+    """
+    profile = get_hardware_tuning_profile()
+    hw_class = profile["hardware_class"]
+    explicitly_set: set[str] = getattr(cfg, "_explicitly_set", set())
+
+    if "dataloader.num_workers" not in explicitly_set:
+        cfg.dataloader.num_workers = profile["num_workers"]
+
+    if "dataloader.prefetch_size" not in explicitly_set:
+        cfg.dataloader.prefetch_size = profile["prefetch_size"]
+
+    if "dataloader.use_mlx_data" not in explicitly_set:
+        cfg.dataloader.use_mlx_data = profile["loader"] == "mlx_data"
+
+    _logger.info(
+        "auto_tune_dataloader: hw_class=%s  num_workers=%d  prefetch_size=%d  use_mlx_data=%s",
+        hw_class,
+        cfg.dataloader.num_workers,
+        cfg.dataloader.prefetch_size,
+        cfg.dataloader.use_mlx_data,
+    )
+
+
+def resolve_run_config(cfg: RunConfig) -> None:
+    """Apply mode-based defaults that depend on cross-field relationships.
+
+    Call after ``apply_run_config_dict`` / ``set_by_path`` and before
+    ``validate_run_config``.
+
+    Handles:
+    * ``debug.sync_mode`` → ``training.eval_frequency`` override when
+      eval_frequency is still at its default value (10).
+    * ``dataloader.auto_tune_dataloader`` → apply hardware-detected
+      worker/prefetch/loader settings for any field the user did not
+      explicitly set.
+    """
+    default_eval_freq = 10
+    if cfg.training.eval_frequency == default_eval_freq:
+        recommended = SYNC_MODE_EVAL_FREQUENCY.get(cfg.debug.sync_mode)
+        if recommended is not None and recommended != default_eval_freq:
+            cfg.training.eval_frequency = recommended
+
+    if cfg.dataloader.auto_tune_dataloader:
+        _apply_hardware_auto_tune(cfg)
 
 
 # ============================
