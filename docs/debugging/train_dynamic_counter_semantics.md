@@ -43,3 +43,13 @@ When resuming from an in-progress model checkpoint, model and data checkpoint po
 Mismatch is a hard error to prevent silent data duplication or skipping.
 
 For epoch-boundary resumes (`epoch_end`, `best`, `final`), mid-epoch data checkpoints are ignored deterministically.
+
+## Sync mode and counter semantics
+
+The `sync_mode` setting (`fast`/`normal`/`debug`/`profile`) affects how often
+evaluation barriers fire, but does **not** change counter semantics:
+
+- `eval_frequency` varies by mode: `debug`→1, `profile`→5, `normal`→10, `fast`→25–50.
+- All counters (`batch_idx`, `global_step`, `micro_batches_completed`) remain
+  micro-batch-based regardless of sync mode.
+- Checkpoint metadata and resume behavior are identical across all sync modes.

@@ -94,6 +94,60 @@ tqdm is configured to write to stderr. Redirect stdout for clean log capture:
 python -m df_mlx.train_dynamic ... > train_stdout.log 2> train_stderr.log
 ```
 
+## Sync Mode and Logging Verbosity
+
+The `sync_mode` setting controls how much logging detail is emitted during training.
+Each mode adjusts the eval barrier frequency, which in turn determines how often
+metrics are synchronized and printed.
+
+| Mode | `eval_frequency` | Logging Behavior |
+|------|-------------------|------------------|
+| `fast` | 50 | Minimal: aggregate loss and throughput only; component losses (spectral, ERB, etc.) are suppressed between sync points |
+| `normal` | 10 | Balanced: component losses logged at each sync point |
+| `debug` | 1 | Maximum: per-step gradient norms, all component losses, and batch-level diagnostics |
+| `profile` | 5 | Instrumented: adds per-step timing metadata (forward, backward, data load) alongside normal metrics |
+
+### Using `--preset debug` for Maximum Observability
+
+When investigating training anomalies, use the `debug` preset for full observability:
+
+```bash
+PYTHONUNBUFFERED=1 python -m df_mlx.train_dynamic \
+    --preset debug \
+    --run-config my_config.toml \
+    --max-train-batches 50 \
+    --verbose 2>&1 | tee /tmp/debug_train.log
+```
+
+This preset sets `sync_mode = "debug"`, `eval_frequency = 1`, `fp16 = off`, and
+uses conservative data pipeline settings. Every batch triggers a full `mx.eval()`
+sync, so throughput will be lower but all metrics are immediately visible.
+
+## Compile Boundary Debugging
+
+If you observe unexpected throughput drops in compiled mode, the likely cause is
+shape-triggered retracing. See [COMPILE_BOUNDARY_AUDIT.md](../COMPILE_BOUNDARY_AUDIT.md)
+for the full retrace risk inventory and shape guardrail details.
+
+Common symptoms:
+- Throughput suddenly drops mid-epoch (retrace on a shape change)
+- First batch of an epoch is much slower than subsequent batches (expected: one-time trace)
+- Throughput in compiled mode is *worse* than eager (excessive retracing)
+
+Diagnostic steps:
+1. Set `sync_mode = "profile"` to get per-step timing
+2. Check that `drop_last=True` is set on all data loaders
+3. Verify batch shapes are constant by adding a shape-logging hook
+
+## Sync Barrier Debugging
+
+For sync-related performance issues, see [SYNC_BARRIER_POLICY.md](../SYNC_BARRIER_POLICY.md)
+for the full sync trigger inventory by mode. Key things to check:
+
+- Is `sync_mode` set to `debug` in production? (This forces every-step sync and kills throughput)
+- Are there unexpected `mx.eval()` calls outside the sync budget? (Search for `mx.eval` in the training loop)
+- Is `debug.debug_numerics = true`? (This forces eager mode regardless of `sync_mode`)
+
 ## Verification Commands
 
 ```bash
