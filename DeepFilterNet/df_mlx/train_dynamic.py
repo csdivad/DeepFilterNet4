@@ -308,6 +308,81 @@ def _flag_in_argv(flags: list[str], argv: list[str]) -> bool:
     return False
 
 
+def _parse_pipeline_stages_cli(raw: str | None) -> list[dict[str, Any]]:
+    """Parse --pipeline-stages JSON string into a normalized stage list."""
+    if raw is None or raw.strip() == "":
+        return []
+
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--pipeline-stages must be valid JSON") from exc
+
+    if not isinstance(value, list):
+        raise ValueError("--pipeline-stages must be a JSON array of stage objects")
+
+    normalized: list[dict[str, Any]] = []
+    seen_epochs: set[int] = set()
+    for i, stage in enumerate(value):
+        if not isinstance(stage, dict):
+            raise ValueError(f"pipeline stage at index {i} must be an object")
+        if "start_epoch" not in stage:
+            raise ValueError(f"pipeline stage at index {i} is missing required key 'start_epoch'")
+
+        start_epoch = int(stage["start_epoch"])
+        if start_epoch < 0:
+            raise ValueError("pipeline stage start_epoch must be >= 0")
+        if start_epoch in seen_epochs:
+            raise ValueError(f"duplicate pipeline stage start_epoch={start_epoch}")
+        seen_epochs.add(start_epoch)
+
+        item: dict[str, Any] = {"start_epoch": start_epoch}
+        if "name" in stage and stage["name"] is not None:
+            item["name"] = str(stage["name"])
+
+        for key in ("awesome_loss_weight", "vad_loss_weight", "vad_speech_loss_weight"):
+            if key in stage and stage[key] is not None:
+                val = float(stage[key])
+                if val < 0.0:
+                    raise ValueError(f"pipeline stage {key} must be >= 0")
+                item[key] = val
+
+        normalized.append(item)
+
+    normalized.sort(key=lambda x: int(x["start_epoch"]))
+    return normalized
+
+
+def _resolve_pipeline_stage(epoch: int, stages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return active stage metadata for the provided epoch."""
+    if not stages:
+        return {
+            "index": 0,
+            "name": "default",
+            "start_epoch": 0,
+            "awesome_loss_weight": None,
+            "vad_loss_weight": None,
+            "vad_speech_loss_weight": None,
+        }
+
+    active_idx = 0
+    for i, stage in enumerate(stages):
+        if epoch >= int(stage["start_epoch"]):
+            active_idx = i
+        else:
+            break
+
+    active = stages[active_idx]
+    return {
+        "index": active_idx,
+        "name": str(active.get("name", f"stage_{active_idx}")),
+        "start_epoch": int(active["start_epoch"]),
+        "awesome_loss_weight": active.get("awesome_loss_weight"),
+        "vad_loss_weight": active.get("vad_loss_weight"),
+        "vad_speech_loss_weight": active.get("vad_speech_loss_weight"),
+    }
+
+
 def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[str]) -> None:
     overrides: list[tuple[list[str], str, Any]] = [
         (["--cache-dir"], "dataset.cache_dir", getattr(args, "cache_dir", None)),
@@ -442,6 +517,10 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
     for flags, path, value in overrides:
         if _flag_in_argv(flags, argv):
             set_by_path(cfg, path, value)
+
+    if _flag_in_argv(["--pipeline-stages"], argv):
+        parsed_stages = _parse_pipeline_stages_cli(getattr(args, "pipeline_stages", None))
+        set_by_path(cfg, "loss.pipeline_stages", parsed_stages)
 
 
 def _build_speech_band_mask(
@@ -1323,6 +1402,19 @@ def _compute_vad_eval_metrics(
     p_out_mean = mx.mean(p_out)
     vad_decrease = mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0))
     return p_ref_mean, p_out_mean, vad_decrease
+
+
+def _snr_bucket_name(snr_db: float) -> str:
+    """Map SNR to a stable scenario bucket label."""
+    if snr_db <= -20.0:
+        return "very_low"
+    if snr_db <= -5.0:
+        return "extreme"
+    if snr_db <= 5.0:
+        return "low"
+    if snr_db <= 20.0:
+        return "mid"
+    return "high"
 
 
 # ============================================================================
@@ -2553,6 +2645,7 @@ def train(
     speech_gain_range: Tuple[float, float] | None = None,
     noise_gain_range: Tuple[float, float] | None = None,
     dynamic_loss: Literal["baseline", "awesome", "pipeline_awesome"] = "baseline",
+    pipeline_stages: list[dict[str, Any]] | None = None,
     awesome_loss_weight: float = 0.4,
     awesome_mask_sharpness: float = 6.0,
     awesome_warmup_steps: int = 0,
@@ -2650,6 +2743,9 @@ def train(
         speech_gain_range: Optional override for speech gain range (dB)
         noise_gain_range: Optional override for noise gain range (dB)
         dynamic_loss: Which dynamic loss to use ("baseline", "awesome", or "pipeline_awesome")
+        pipeline_stages: Optional staged loss schedule with entries containing
+            start_epoch and optional overrides for awesome_loss_weight,
+            vad_loss_weight, and vad_speech_loss_weight.
         awesome_loss_weight: Weight for awesome loss term (only if enabled)
         awesome_mask_sharpness: Sharpness for speech/noise dominance mask
         awesome_warmup_steps: Warmup steps for awesome loss weight ramp
@@ -2816,6 +2912,30 @@ def train(
 
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
+    pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
+    base_awesome_loss_weight = awesome_loss_weight
+    base_vad_loss_weight = vad_loss_weight
+    base_vad_speech_loss_weight = vad_speech_loss_weight
+    stage_max_vad_weight = max(
+        [
+            base_vad_loss_weight,
+            *[
+                float(s.get("vad_loss_weight", 0.0))
+                for s in pipeline_stage_defs
+                if s.get("vad_loss_weight") is not None
+            ],
+        ]
+    )
+    stage_max_vad_speech_weight = max(
+        [
+            base_vad_speech_loss_weight,
+            *[
+                float(s.get("vad_speech_loss_weight", 0.0))
+                for s in pipeline_stage_defs
+                if s.get("vad_speech_loss_weight") is not None
+            ],
+        ]
+    )
     mrstft_cfg = mrstft_config
     use_mrstft_loss = mrstft_cfg is not None and mrstft_cfg.factor > 0
     mrstft_loss_fn = None
@@ -2894,7 +3014,7 @@ def train(
             )
         )
 
-    use_vad_loss = vad_loss_weight > 0 or vad_speech_loss_weight > 0
+    use_vad_loss = stage_max_vad_weight > 0 or stage_max_vad_speech_weight > 0
     use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
 
     need_band_mask = (
@@ -2976,12 +3096,25 @@ def train(
         print(
             "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
         )
+    if pipeline_stage_defs:
+        print("  Pipeline stages:")
+        for idx, stage in enumerate(pipeline_stage_defs):
+            stage_name = stage.get("name", f"stage_{idx}")
+            stage_parts = [f"start={stage['start_epoch']}", f"name={stage_name}"]
+            if stage.get("awesome_loss_weight") is not None:
+                stage_parts.append(f"awesome_w={stage['awesome_loss_weight']}")
+            if stage.get("vad_loss_weight") is not None:
+                stage_parts.append(f"vad_w={stage['vad_loss_weight']}")
+            if stage.get("vad_speech_loss_weight") is not None:
+                stage_parts.append(f"speech_w={stage['vad_speech_loss_weight']}")
+            print("    - " + ", ".join(stage_parts))
     print("=" * 60)
 
     train_config = {
         **config.__dict__,
         "train_config_path": train_config_path,
         "dynamic_loss": dynamic_loss,
+        "pipeline_stages": pipeline_stage_defs,
         "awesome_loss_weight": awesome_loss_weight,
         "awesome_mask_sharpness": awesome_mask_sharpness,
         "awesome_warmup_steps": awesome_warmup_steps,
@@ -3695,6 +3828,8 @@ def train(
         valid_awesome_speech = 0.0
         valid_awesome_noise = 0.0
         valid_awesome_smooth = 0.0
+        valid_music_supp_loss = 0.0
+        valid_mask_sat_loss = 0.0
         valid_mask_mean = 0.0
         valid_mask_high = 0.0
         valid_mask_low = 0.0
@@ -3711,6 +3846,7 @@ def train(
         valid_gate_pct = 0.0
         valid_residual = 0.0
         valid_sisdr = 0.0
+        bucket_metrics: dict[str, dict[str, float]] = {}
         vad_eval_p_ref = 0.0
         vad_eval_p_out = 0.0
         vad_eval_delta = 0.0
@@ -3810,6 +3946,8 @@ def train(
             awesome_speech = mx.array(0.0)
             awesome_noise = mx.array(0.0)
             awesome_smooth = mx.array(0.0)
+            music_suppression_loss = mx.array(0.0)
+            mask_saturation_loss = mx.array(0.0)
             mask = mx.array(0.0)
             proxy_frame = mx.array(0.0)
             speech_ratio = mx.array(0.0)
@@ -3859,8 +3997,8 @@ def train(
                     awesome_speech,
                     awesome_noise,
                     awesome_smooth,
-                    _,  # music_suppression_loss
-                    _,  # mask_saturation_loss
+                    music_suppression_loss,
+                    mask_saturation_loss,
                     mask,
                     proxy_frame,
                     speech_ratio,
@@ -3951,9 +4089,9 @@ def train(
                     debug_ctx=debug_ctx,
                 )
 
-            awesome_weight_val = awesome_loss_weight
+            awesome_weight_val = epoch_awesome_loss_weight
             if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
-                awesome_weight_val = awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
+                awesome_weight_val = epoch_awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
 
             loss = spec_loss
             if use_mrstft_loss:
@@ -3961,9 +4099,10 @@ def train(
             if use_awesome_loss or use_pipeline_awesome_loss:
                 loss = loss + awesome_weight_val * awesome_loss
             if use_vad_loss:
-                loss = loss + vad_loss_weight * vad_loss + vad_speech_loss_weight * speech_loss
+                loss = loss + epoch_vad_loss_weight * vad_loss + epoch_vad_speech_loss_weight * speech_loss
 
             residual = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2)
+            residual_by_sample = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2, axis=(1, 2))
 
             loss_val = float(loss)
             spec_loss_val = float(spec_loss)
@@ -3974,6 +4113,8 @@ def train(
             awesome_speech_val = float(awesome_speech)
             awesome_noise_val = float(awesome_noise)
             awesome_smooth_val = float(awesome_smooth)
+            music_suppression_loss_val = float(music_suppression_loss)
+            mask_saturation_loss_val = float(mask_saturation_loss)
             vad_reg_loss_val = float(vad_reg_loss)
             residual_val = float(residual)
 
@@ -3986,6 +4127,8 @@ def train(
             valid_awesome_speech += awesome_speech_val
             valid_awesome_noise += awesome_noise_val
             valid_awesome_smooth += awesome_smooth_val
+            valid_music_supp_loss += music_suppression_loss_val
+            valid_mask_sat_loss += mask_saturation_loss_val
             valid_vad_reg_loss += vad_reg_loss_val
             valid_residual += residual_val
             num_valid_batches += 1
@@ -3994,6 +4137,40 @@ def train(
                 valid_p_ref += float(mx.mean(p_ref))
                 valid_p_out += float(mx.mean(p_out))
                 valid_gate_pct += 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+
+            snr_np = np.asarray(snr, dtype=np.float32).reshape(-1)
+            residual_np = np.asarray(residual_by_sample, dtype=np.float32).reshape(-1)
+            if use_vad_loss:
+                vad_delta_np = np.asarray(
+                    mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0), axis=1), dtype=np.float32
+                )
+            else:
+                vad_delta_np = np.zeros_like(snr_np, dtype=np.float32)
+            if use_awesome_loss or use_pipeline_awesome_loss:
+                if isinstance(musicness, mx.array):
+                    musicness_np = np.asarray(musicness, dtype=np.float32).reshape(-1)
+                else:
+                    musicness_np = np.zeros_like(snr_np, dtype=np.float32)
+                if musicness_np.shape[0] != snr_np.shape[0]:
+                    musicness_np = np.full_like(snr_np, float(np.mean(musicness_np)), dtype=np.float32)
+            else:
+                musicness_np = np.zeros_like(snr_np, dtype=np.float32)
+
+            for i, snr_val in enumerate(snr_np):
+                bucket = _snr_bucket_name(float(snr_val))
+                metric = bucket_metrics.setdefault(
+                    bucket,
+                    {
+                        "count": 0.0,
+                        "residual_sum": 0.0,
+                        "vad_delta_sum": 0.0,
+                        "musicness_sum": 0.0,
+                    },
+                )
+                metric["count"] += 1.0
+                metric["residual_sum"] += float(residual_np[i])
+                metric["vad_delta_sum"] += float(vad_delta_np[i])
+                metric["musicness_sum"] += float(musicness_np[i])
 
             if use_awesome_loss:
                 mask_mean = float(mx.mean(mask))
@@ -4086,6 +4263,8 @@ def train(
             avg_awesome_speech = valid_awesome_speech / num_valid_batches
             avg_awesome_noise = valid_awesome_noise / num_valid_batches
             avg_awesome_smooth = valid_awesome_smooth / num_valid_batches
+            avg_music_supp = valid_music_supp_loss / num_valid_batches
+            avg_mask_sat = valid_mask_sat_loss / num_valid_batches
             avg_vad_reg = valid_vad_reg_loss / num_valid_batches
             avg_residual = valid_residual / num_valid_batches
             avg_p_ref = valid_p_ref / num_valid_batches if use_vad_loss else 0.0
@@ -4138,6 +4317,13 @@ def train(
                             f"aw_sm={avg_awesome_smooth:.4f}",
                         ]
                     )
+                if use_pipeline_awesome_loss:
+                    extras.extend(
+                        [
+                            f"mus_sup={avg_music_supp:.4f}",
+                            f"mask_sat={avg_mask_sat:.4f}",
+                        ]
+                    )
                 if use_vad_train_reg:
                     extras.append(f"vad_reg={avg_vad_reg:.4f}")
                 if use_vad_loss:
@@ -4169,6 +4355,43 @@ def train(
                 if avg_sisdr is not None:
                     extras.append(f"si-sdr={avg_sisdr:.2f}dB")
                 print(f"{label} metrics: " + " | ".join(extras))
+
+            if bucket_metrics:
+                bucket_parts = []
+                bucket_summary: dict[str, dict[str, float]] = {}
+                for bucket_name in sorted(bucket_metrics.keys()):
+                    bm = bucket_metrics[bucket_name]
+                    count = max(bm["count"], 1.0)
+                    residual_mean = bm["residual_sum"] / count
+                    vad_delta_mean = bm["vad_delta_sum"] / count
+                    musicness_mean = bm["musicness_sum"] / count
+                    bucket_summary[bucket_name] = {
+                        "count": float(count),
+                        "residual": float(residual_mean),
+                        "vad_delta": float(vad_delta_mean),
+                        "musicness": float(musicness_mean),
+                    }
+                    bucket_parts.append(
+                        f"{bucket_name}:n={int(count)} resid={residual_mean:.4f} vadΔ={vad_delta_mean:.4f} mus={musicness_mean:.3f}"
+                    )
+                print(f"{label} buckets: " + " | ".join(bucket_parts))
+
+                ablation_row = {
+                    "epoch": int(epoch + 1),
+                    "stage_index": int(active_stage_index),
+                    "stage_name": active_stage_name,
+                    "dynamic_loss": dynamic_loss,
+                    "train_mode": train_mode,
+                    "valid_loss": float(valid_loss / max(num_valid_batches, 1)),
+                    "awesome": {
+                        "music_suppression": float(avg_music_supp),
+                        "mask_saturation": float(avg_mask_sat),
+                    },
+                    "buckets": bucket_summary,
+                }
+                ablation_path = ckpt_dir / "ablation_metrics.jsonl"
+                with open(ablation_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(ablation_row) + "\n")
 
         return valid_loss / max(num_valid_batches, 1)
 
@@ -4229,6 +4452,11 @@ def train(
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
     train_mode: Literal["COMPILED", "EAGER"] | None = None
+    active_stage_name = "default"
+    active_stage_index = 0
+    epoch_awesome_loss_weight = base_awesome_loss_weight
+    epoch_vad_loss_weight = base_vad_loss_weight
+    epoch_vad_speech_loss_weight = base_vad_speech_loss_weight
 
     max_train_batches = train_config.get("max_train_batches")
     max_valid_batches = train_config.get("max_valid_batches")
@@ -4240,6 +4468,37 @@ def train(
     for epoch in range(start_epoch, epochs):
         epoch_start = time.perf_counter()
         final_epoch = epoch
+
+        active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
+        active_stage_index = int(active_stage["index"])
+        active_stage_name = str(active_stage["name"])
+        epoch_awesome_loss_weight = float(
+            active_stage["awesome_loss_weight"]
+            if active_stage["awesome_loss_weight"] is not None
+            else base_awesome_loss_weight
+        )
+        epoch_vad_loss_weight = float(
+            active_stage["vad_loss_weight"] if active_stage["vad_loss_weight"] is not None else base_vad_loss_weight
+        )
+        epoch_vad_speech_loss_weight = float(
+            active_stage["vad_speech_loss_weight"]
+            if active_stage["vad_speech_loss_weight"] is not None
+            else base_vad_speech_loss_weight
+        )
+        train_config["pipeline_stage_active"] = {
+            "index": active_stage_index,
+            "name": active_stage_name,
+            "start_epoch": int(active_stage["start_epoch"]),
+            "awesome_loss_weight": epoch_awesome_loss_weight,
+            "vad_loss_weight": epoch_vad_loss_weight,
+            "vad_speech_loss_weight": epoch_vad_speech_loss_weight,
+        }
+        print(
+            "  Stage "
+            f"{active_stage_index} ({active_stage_name}) | "
+            f"awesome_w={epoch_awesome_loss_weight:.4f} "
+            f"vad_w={epoch_vad_loss_weight:.4f} speech_w={epoch_vad_speech_loss_weight:.4f}"
+        )
 
         # Set epoch for reproducible shuffling
         dataset.set_split("train")
@@ -4326,6 +4585,8 @@ def train(
         train_awesome_speech = 0.0
         train_awesome_noise = 0.0
         train_awesome_smooth = 0.0
+        train_music_supp_loss = 0.0
+        train_mask_sat_loss = 0.0
         train_vad_reg_loss = 0.0
         train_mask_mean = 0.0
         train_mask_high = 0.0
@@ -4488,14 +4749,14 @@ def train(
             if use_vad_loss and vad_warmup_steps > 0:
                 warmup_frac = min(1.0, global_step / max(vad_warmup_steps, 1))
 
-            vad_weight = vad_loss_weight * warmup_frac
-            speech_weight = vad_speech_loss_weight * warmup_frac
+            vad_weight = epoch_vad_loss_weight * warmup_frac
+            speech_weight = epoch_vad_speech_loss_weight * warmup_frac
             vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
             speech_weight_mx = mx.array(speech_weight, dtype=mx.float32)
             awesome_frac = 1.0
             if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_frac = min(1.0, global_step / max(awesome_warmup_steps, 1))
-            awesome_weight = awesome_loss_weight * awesome_frac
+            awesome_weight = epoch_awesome_loss_weight * awesome_frac
             awesome_weight_mx = mx.array(awesome_weight, dtype=mx.float32)
 
             apply_vad_reg = False
@@ -5038,6 +5299,8 @@ def train(
                     awesome_speech_val = float(awesome_speech)
                     awesome_noise_val = float(awesome_noise)
                     awesome_smooth_val = float(awesome_smooth)
+                    music_supp_loss_val = float(music_supp_loss)
+                    mask_sat_loss_val = float(mask_sat_loss)
 
                     mask_mean = float(mx.mean(mask))
                     mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
@@ -5054,6 +5317,8 @@ def train(
                     train_awesome_speech += awesome_speech_val * eval_frequency
                     train_awesome_noise += awesome_noise_val * eval_frequency
                     train_awesome_smooth += awesome_smooth_val * eval_frequency
+                    train_music_supp_loss += music_supp_loss_val * eval_frequency
+                    train_mask_sat_loss += mask_sat_loss_val * eval_frequency
                     train_mask_mean += mask_mean
                     train_mask_high += mask_high
                     train_mask_low += mask_low
@@ -5197,6 +5462,8 @@ def train(
         avg_train_awesome_speech = train_awesome_speech / max(num_train_batches, 1)
         avg_train_awesome_noise = train_awesome_noise / max(num_train_batches, 1)
         avg_train_awesome_smooth = train_awesome_smooth / max(num_train_batches, 1)
+        avg_train_music_supp = train_music_supp_loss / max(num_train_batches, 1)
+        avg_train_mask_sat = train_mask_sat_loss / max(num_train_batches, 1)
         avg_train_vad_reg_loss = train_vad_reg_loss / max(num_train_batches, 1)
         avg_train_p_ref = train_p_ref / max(num_vad_logs, 1)
         avg_train_p_out = train_p_out / max(num_vad_logs, 1)
@@ -5311,13 +5578,20 @@ def train(
                         f"Speech: {avg_train_speech_loss:.4f}",
                     ]
                 )
-            if use_awesome_loss:
+            if use_awesome_loss or use_pipeline_awesome_loss:
                 loss_parts.extend(
                     [
                         f"Awesome: {avg_train_awesome_loss:.4f}",
                         f"AwS: {avg_train_awesome_speech:.4f}",
                         f"AwN: {avg_train_awesome_noise:.4f}",
                         f"AwSm: {avg_train_awesome_smooth:.4f}",
+                    ]
+                )
+            if use_pipeline_awesome_loss:
+                loss_parts.extend(
+                    [
+                        f"MusSup: {avg_train_music_supp:.4f}",
+                        f"MaskSat: {avg_train_mask_sat:.4f}",
                     ]
                 )
             if use_vad_train_reg:
@@ -5774,6 +6048,16 @@ def main():
         help="Dynamic loss: 'baseline' (spectral + legacy VAD), 'awesome' (speech-preserving contrastive), or 'pipeline_awesome' (improved speech preservation + music suppression)",
     )
     parser.add_argument(
+        "--pipeline-stages",
+        type=str,
+        default=None,
+        help=(
+            "JSON array of stage configs with start_epoch and optional overrides. "
+            'Example: \'[{"start_epoch":0,"name":"bootstrap","awesome_loss_weight":0.2},'
+            '{"start_epoch":5,"name":"refine","awesome_loss_weight":0.4}]\''
+        ),
+    )
+    parser.add_argument(
         "--awesome-loss-weight",
         type=float,
         default=0.4,
@@ -6200,6 +6484,7 @@ def main():
         speech_gain_range=run_cfg.dataset.speech_gain_range,
         noise_gain_range=run_cfg.dataset.noise_gain_range,
         dynamic_loss=cast(Literal["baseline", "awesome", "pipeline_awesome"], run_cfg.loss.dynamic_loss),
+        pipeline_stages=run_cfg.loss.pipeline_stages,
         awesome_loss_weight=run_cfg.loss.awesome.loss_weight,
         awesome_mask_sharpness=run_cfg.loss.awesome.mask_sharpness,
         awesome_warmup_steps=run_cfg.loss.awesome.warmup_steps,

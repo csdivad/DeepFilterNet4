@@ -173,6 +173,50 @@ def _normalize_table(value: Any) -> dict[str, Any]:
     raise TypeError("expected table")
 
 
+def _normalize_pipeline_stages(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("expected list of tables")
+
+    stages: list[dict[str, Any]] = []
+    seen_epochs: set[int] = set()
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise TypeError(f"expected table at index {i}")
+        if "start_epoch" not in item:
+            raise ValueError(f"pipeline stage at index {i} is missing required key 'start_epoch'")
+
+        stage: dict[str, Any] = {"start_epoch": _normalize_int(item["start_epoch"], min_value=0)}
+
+        if stage["start_epoch"] in seen_epochs:
+            raise ValueError(f"duplicate pipeline stage start_epoch={stage['start_epoch']}")
+        seen_epochs.add(stage["start_epoch"])
+
+        name = item.get("name")
+        if name is not None:
+            if not isinstance(name, str):
+                raise TypeError(f"pipeline stage name at index {i} must be a string")
+            stage["name"] = name
+
+        awesome_loss_weight = item.get("awesome_loss_weight")
+        if awesome_loss_weight is not None:
+            stage["awesome_loss_weight"] = _normalize_float(awesome_loss_weight, min_value=0.0)
+
+        vad_loss_weight = item.get("vad_loss_weight")
+        if vad_loss_weight is not None:
+            stage["vad_loss_weight"] = _normalize_float(vad_loss_weight, min_value=0.0)
+
+        vad_speech_loss_weight = item.get("vad_speech_loss_weight")
+        if vad_speech_loss_weight is not None:
+            stage["vad_speech_loss_weight"] = _normalize_float(vad_speech_loss_weight, min_value=0.0)
+
+        stages.append(stage)
+
+    stages.sort(key=lambda s: int(s["start_epoch"]))
+    return stages
+
+
 # ============================
 # Config dataclasses
 # ============================
@@ -482,6 +526,23 @@ class LossConfig:
         choices=["baseline", "awesome", "pipeline_awesome"],
         normalize=lambda v: str(v),
         notes="If not 'awesome' or 'pipeline_awesome', the [loss.awesome] block is ignored.",
+    )
+    pipeline_stages: list[dict[str, Any]] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Optional staged loss schedule. Each item supports: "
+                "start_epoch (required), name, awesome_loss_weight, "
+                "vad_loss_weight, vad_speech_loss_weight."
+            ),
+            "normalize": _normalize_pipeline_stages,
+            "none_sentinel": [],
+            "notes": (
+                "Example: pipeline_stages = ["
+                "{start_epoch=0, name='bootstrap', awesome_loss_weight=0.2}, "
+                "{start_epoch=5, name='refine', awesome_loss_weight=0.4, vad_loss_weight=0.05}]"
+            ),
+        },
     )
     awesome: AwesomeLossConfig = field(default_factory=AwesomeLossConfig)
     mrstft: MultiResSpecLossConfig = field(default_factory=MultiResSpecLossConfig)

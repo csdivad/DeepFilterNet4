@@ -71,6 +71,25 @@ def test_run_config_accepts_pipeline_awesome_dynamic_loss():
     assert cfg.loss.dynamic_loss == "pipeline_awesome"
 
 
+def test_run_config_accepts_pipeline_stages_table_list():
+    cfg = RunConfig()
+    apply_run_config_dict(
+        cfg,
+        {
+            "loss": {
+                "pipeline_stages": [
+                    {"start_epoch": 0, "name": "bootstrap", "awesome_loss_weight": 0.2},
+                    {"start_epoch": 5, "name": "refine", "vad_loss_weight": 0.05},
+                ]
+            }
+        },
+    )
+
+    assert len(cfg.loss.pipeline_stages) == 2
+    assert cfg.loss.pipeline_stages[0]["start_epoch"] == 0
+    assert cfg.loss.pipeline_stages[1]["start_epoch"] == 5
+
+
 def test_run_config_accepts_speech_boost_options():
     cfg = RunConfig()
     apply_run_config_dict(
