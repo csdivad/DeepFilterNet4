@@ -4655,6 +4655,8 @@ def train(
         num_debug_logs = 0
         num_vad_logs = 0
         num_awesome_logs = 0
+        partial_batch_fallbacks = 0
+        partial_batch_warning_emitted = False
         num_train_batches = 0
         samples_processed = 0
         grad_norm = 0.0
@@ -4821,7 +4823,21 @@ def train(
             fwd_start = time.perf_counter()
 
             model_out = None
+            use_compiled_step_for_batch = epoch_use_compiled_step and current_batch_size == batch_size
             if epoch_use_compiled_step:
+                if not use_compiled_step_for_batch:
+                    partial_batch_fallbacks += 1
+                    if not partial_batch_warning_emitted:
+                        _log_compile_retrace_warning(
+                            context=(
+                                "Detected non-canonical batch shape at compile boundary "
+                                f"(got {current_batch_size}, expected {batch_size}); "
+                                "falling back to eager for this batch to avoid retrace."
+                            )
+                        )
+                        partial_batch_warning_emitted = True
+
+            if use_compiled_step_for_batch:
                 _assert_compile_boundary_shapes(
                     noisy_real,
                     clean_real,
@@ -5555,6 +5571,12 @@ def train(
             print(f"    Compiled training:  {'enabled' if epoch_use_compiled_step else 'disabled'}")
             if total_data_time > total_forward_time:
                 print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
+
+        if partial_batch_fallbacks > 0:
+            print(
+                "  Compile boundary fallback: "
+                f"{partial_batch_fallbacks} batch(es) ran eager due to non-canonical batch size"
+            )
 
         # ====== Validation ======
         avg_valid_loss = float("inf")

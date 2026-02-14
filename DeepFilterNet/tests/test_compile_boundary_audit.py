@@ -179,3 +179,8 @@ class TestShapeAssertionIntegration:
         assert assert_pos != -1, "Shape assertion not found in source"
         assert compiled_call_pos != -1, "compiled_loss_and_grad_step call not found"
         assert assert_pos < compiled_call_pos, "Shape assertion must appear before compiled step call"
+
+    def test_compiled_path_has_partial_batch_fallback(self):
+        source = _TRAIN_DYNAMIC_PATH.read_text()
+        assert "use_compiled_step_for_batch = epoch_use_compiled_step and current_batch_size == batch_size" in source
+        assert "falling back to eager for this batch to avoid retrace" in source
