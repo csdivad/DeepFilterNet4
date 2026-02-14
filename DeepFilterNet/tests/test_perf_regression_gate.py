@@ -12,13 +12,7 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
-from perf_gate import (  # noqa: E402
-    _config_key,
-    compare,
-    generate_report,
-    load_results,
-    main,
-)
+from perf_gate import _config_key, compare, generate_report, load_results, main  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

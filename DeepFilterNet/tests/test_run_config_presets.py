@@ -13,13 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
-from df_mlx.run_config import (
-    PRESET_NAMES,
-    RunConfig,
-    apply_run_config_dict,
-    load_preset_config,
-    load_run_config,
-)
+from df_mlx.run_config import PRESET_NAMES, RunConfig, apply_run_config_dict, load_preset_config, load_run_config
 
 PRESETS_DIR = Path(__file__).resolve().parent.parent.parent / "schemas" / "presets"
 

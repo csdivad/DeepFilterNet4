@@ -7,11 +7,7 @@ except ImportError:  # pragma: no cover
 
 import pytest
 
-from df_mlx.run_config import (
-    RunConfig,
-    apply_run_config_dict,
-    generate_run_config_example,
-)
+from df_mlx.run_config import RunConfig, apply_run_config_dict, generate_run_config_example
 
 # ---------------------------------------------------------------------------
 # Guardrail constants (defined here as the canonical reference; the experiment

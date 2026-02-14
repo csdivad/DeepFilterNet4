@@ -62,12 +62,7 @@ from df_mlx.benchmark_common import require_min as _require_min
 from df_mlx.benchmark_common import require_positive_float as _require_positive_float
 from df_mlx.benchmark_common import safe_percentile as _safe_percentile
 from df_mlx.config import get_default_config
-from df_mlx.dynamic_dataset import (
-    HAS_MLX_DATA,
-    DynamicDataset,
-    MLXDataStream,
-    PrefetchDataLoader,
-)
+from df_mlx.dynamic_dataset import HAS_MLX_DATA, DynamicDataset, MLXDataStream, PrefetchDataLoader
 from df_mlx.grad_utils import clip_grad_norm_tree
 from df_mlx.model import init_model
 from df_mlx.train import spectral_loss
