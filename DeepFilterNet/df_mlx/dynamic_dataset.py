@@ -1197,6 +1197,7 @@ class PrefetchDataLoader:
         prefetch_factor: int = 2,
         drop_last: bool = True,
         strict_failures: bool = True,
+        shuffle_buffer_size: int = 0,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
@@ -1204,6 +1205,7 @@ class PrefetchDataLoader:
         self.prefetch_factor = prefetch_factor
         self.drop_last = drop_last
         self.strict_failures = strict_failures
+        self.shuffle_buffer_size = shuffle_buffer_size
 
     def __iter__(self) -> Iterator[Dict[str, mx.array]]:
         """Iterate with background prefetching."""
@@ -1298,11 +1300,25 @@ class PrefetchDataLoader:
         worker_thread.start()
 
         try:
-            while True:
-                batch = prefetch_queue.get()
-                if batch is None:
-                    break
-                yield batch
+            if self.shuffle_buffer_size > 0:
+                buf_rng = random.Random(getattr(self.dataset.config, "seed", 0) + getattr(self.dataset, "_epoch", 0))
+                buffer: List[Dict[str, mx.array]] = []
+                while True:
+                    batch = prefetch_queue.get()
+                    if batch is None:
+                        break
+                    buffer.append(batch)
+                    if len(buffer) >= self.shuffle_buffer_size:
+                        idx = buf_rng.randrange(len(buffer))
+                        yield buffer.pop(idx)
+                buf_rng.shuffle(buffer)
+                yield from buffer
+            else:
+                while True:
+                    batch = prefetch_queue.get()
+                    if batch is None:
+                        break
+                    yield batch
 
             if worker_errors:
                 raise worker_errors[0]

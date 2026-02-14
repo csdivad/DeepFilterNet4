@@ -467,6 +467,11 @@ class DataloaderConfig:
         normalize=lambda v: _normalize_optional_int(v, none_sentinel=-1, min_value=1),
         none_sentinel=-1,
     )
+    shuffle_buffer_size: int = cfg_field(
+        0,
+        help="Shuffle buffer size (0 = strict ordering, >0 = throughput-optimized shuffle)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
 
 
 @dataclass

@@ -192,21 +192,58 @@ def istft(
     # Apply window
     frames = frames * win
 
-    # Overlap-add (loop is necessary as MLX lacks scatter_add)
+    # Overlap-add
     output_length = (num_frames - 1) * hop_length + n_fft
-    output = mx.zeros((batch_size, output_length))
+    nover = n_fft // hop_length
 
-    # Pre-compute window sum (same for all batches, compute once)
-    window_sum = mx.zeros((output_length,))
-    win_squared = win * win
-    for i in range(num_frames):
-        start = i * hop_length
-        window_sum = window_sum.at[start : start + n_fft].add(win_squared)
+    if n_fft % hop_length == 0 and nover > 0:
+        # Vectorized path: group frames into nover non-overlapping groups.
+        # Within each group consecutive frames are n_fft apart, so the
+        # windowed samples can be reshaped into a contiguous block —
+        # no scatter_add needed.  O(nover) ops instead of O(num_frames).
+        output = mx.zeros((batch_size, output_length))
+        window_sum = mx.zeros((1, output_length))
 
-    # Overlap-add frames
-    for i in range(num_frames):
-        start = i * hop_length
-        output = output.at[:, start : start + n_fft].add(frames[:, i, :])
+        win_sq_tile = win * win  # (n_fft,)
+
+        for g in range(nover):
+            group_frames = frames[:, g::nover, :]  # (batch, num_group_frames, n_fft)
+            num_group_frames = group_frames.shape[1]
+
+            if num_group_frames == 0:
+                continue
+
+            flat = group_frames.reshape(batch_size, num_group_frames * n_fft)
+
+            win_group = mx.broadcast_to(win_sq_tile[None, :], (num_group_frames, n_fft)).reshape(
+                1, num_group_frames * n_fft
+            )
+
+            start_offset = g * hop_length
+            flat_len = num_group_frames * n_fft
+            pad_right = output_length - start_offset - flat_len
+
+            if pad_right >= 0:
+                flat = mx.pad(flat, [(0, 0), (start_offset, pad_right)])
+                win_group = mx.pad(win_group, [(0, 0), (start_offset, pad_right)])
+            else:
+                flat = mx.pad(flat, [(0, 0), (start_offset, 0)])[:, :output_length]
+                win_group = mx.pad(win_group, [(0, 0), (start_offset, 0)])[:, :output_length]
+
+            output = output + flat
+            window_sum = window_sum + win_group
+    else:
+        # Fallback: original loop for non-integer overlap ratios
+        output = mx.zeros((batch_size, output_length))
+        window_sum = mx.zeros((output_length,))
+        win_squared = win * win
+        for i in range(num_frames):
+            start = i * hop_length
+            window_sum = window_sum.at[start : start + n_fft].add(win_squared)
+        for i in range(num_frames):
+            start = i * hop_length
+            output = output.at[:, start : start + n_fft].add(frames[:, i, :])
+        window_sum = window_sum[None, :]  # add batch dim for consistent normalization
 
     # Normalize by window sum
     window_sum = mx.maximum(window_sum, 1e-8)
