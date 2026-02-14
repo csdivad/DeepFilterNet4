@@ -670,6 +670,11 @@ class GanConfig:
         help="Update discriminator every N steps",
         normalize=lambda v: _normalize_int(v, min_value=1),
     )
+    experimental_compile: bool = cfg_field(
+        False,
+        help="Enable experimental GAN-phase compilation (R&D only, see docs/GAN_COMPILE_EXPERIMENT.md)",
+        normalize=_normalize_bool,
+    )
 
 
 @dataclass
