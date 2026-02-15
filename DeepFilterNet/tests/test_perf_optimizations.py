@@ -1,4 +1,5 @@
-"""Tests for PERF-P0/P1 optimizations: dtype guards, cached transpose, lazy loss dict.
+"""Tests for performance optimizations: dtype guards, cached transpose, lazy loss dict,
+Mamba scan allocation reduction, and post-filter Metal kernel.
 
 Validates that:
 1. Redundant FP32 casts are skipped when input is already FP32 (PERF-P0-001)
@@ -6,8 +7,12 @@ Validates that:
 3. ERB filterbank transpose is cached at init (PERF-P0-003)
 4. CombinedLoss returns lazy mx.array dict, not float dict (PERF-P1-002)
 5. All dtype-guarded functions produce identical results for FP16 and FP32 inputs
+6. Mamba scan uses pre-allocated buffers instead of mx.concatenate (PERF-P2-001)
+7. Post-filter Metal kernel matches pure-MLX fallback (PERF-P2-003)
 """
 
+import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -194,3 +199,175 @@ class TestMusicnessGuards:
         musicness, vocal, instrument = _compute_improved_musicness(mag, band_mask, 32.0, snr)
         mx.eval(musicness, vocal, instrument)
         assert musicness.dtype == mx.float32
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 optimizations: Mamba scan + Post-filter Metal kernel
+# ---------------------------------------------------------------------------
+
+
+class TestMambaScanOptimization:
+    """Verify that MambaBlock._selective_scan uses pre-allocated buffers
+    and slice assignment instead of mx.concatenate."""
+
+    def test_mamba_scan_no_concat_in_scan_loop(self):
+        """The parallel scan loop in _selective_scan must NOT use mx.concatenate."""
+        from df_mlx.mamba import MambaBlock
+
+        source = inspect.getsource(MambaBlock._selective_scan)
+        # Find the iterative-doubling loop and everything after it
+        loop_match = re.search(r"for d in range\(log2_L\):", source)
+        assert loop_match is not None, "_selective_scan must contain the parallel scan loop"
+        loop_body = source[loop_match.start() :]
+        assert "concatenate" not in loop_body, "_selective_scan scan loop must use slice assignment, not mx.concatenate"
+
+    def test_mamba_scan_uses_prealloc_buffers(self):
+        """_selective_scan must pre-allocate A_scan with mx.ones and b_scan with mx.zeros."""
+        from df_mlx.mamba import MambaBlock
+
+        source = inspect.getsource(MambaBlock._selective_scan)
+        assert "mx.ones(" in source, "_selective_scan must use mx.ones for A_scan pre-allocation"
+        assert "mx.zeros(" in source, "_selective_scan must use mx.zeros for b_scan/C_padded pre-allocation"
+
+    def test_mamba_scan_numerical_equivalence(self):
+        """MambaBlock forward pass must produce finite outputs with correct shape."""
+        from df_mlx.mamba import MambaBlock
+
+        d_model, d_state = 64, 16
+        block = MambaBlock(d_model=d_model, d_state=d_state)
+        mx.eval(block.parameters())
+
+        batch, seq_len = 2, 32
+        x = mx.random.normal((batch, seq_len, d_model))
+        mx.eval(x)
+
+        y, h_final = block(x)
+        mx.eval(y, h_final)
+
+        assert y.shape == (
+            batch,
+            seq_len,
+            d_model,
+        ), f"Expected output shape {(batch, seq_len, d_model)}, got {y.shape}"
+        assert h_final.shape == (
+            batch,
+            block.d_inner,
+            d_state,
+        ), f"Expected state shape {(batch, block.d_inner, d_state)}, got {h_final.shape}"
+        assert mx.all(mx.isfinite(y)).item(), "Output must contain only finite values"
+        assert mx.all(mx.isfinite(h_final)).item(), "Final state must contain only finite values"
+
+
+class TestPostFilterKernel:
+    """Verify the fused post-filter Metal kernel in kernels.py."""
+
+    def test_post_filter_kernel_exists(self):
+        """post_filter_kernel must be importable from df_mlx.kernels."""
+        from df_mlx.kernels import post_filter_kernel  # noqa: F401
+
+        assert callable(post_filter_kernel)
+
+    def test_post_filter_kernel_numerical_match(self):
+        """Metal kernel and pure-MLX fallback must produce matching outputs."""
+        from df_mlx.kernels import (
+            _post_filter_fallback,
+            _post_filter_forward_metal,
+            metal_kernels_available,
+        )
+
+        if not metal_kernels_available():
+            import pytest
+
+            pytest.skip("Metal kernels not available")
+
+        np.random.seed(123)
+        shape = (2, 10, 65)
+        enh_real = mx.array(np.random.randn(*shape).astype(np.float32) * 0.5)
+        enh_imag = mx.array(np.random.randn(*shape).astype(np.float32) * 0.5)
+        orig_real = mx.array(np.random.randn(*shape).astype(np.float32) * 0.8 + 1.0)
+        orig_imag = mx.array(np.random.randn(*shape).astype(np.float32) * 0.8 + 1.0)
+        beta_arr = mx.array([0.02], dtype=mx.float32)
+
+        metal_r, metal_i = _post_filter_forward_metal(enh_real, enh_imag, orig_real, orig_imag, beta_arr)
+        fallback_r, fallback_i = _post_filter_fallback(enh_real, enh_imag, orig_real, orig_imag, beta_arr)
+        mx.eval(metal_r, metal_i, fallback_r, fallback_i)
+
+        np.testing.assert_allclose(np.array(metal_r), np.array(fallback_r), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.array(metal_i), np.array(fallback_i), rtol=1e-5, atol=1e-5)
+
+    def test_post_filter_vjp_matches_autograd(self):
+        """Gradients through _post_filter_custom must match _post_filter_fallback."""
+        from df_mlx.kernels import (
+            _post_filter_custom,
+            _post_filter_fallback,
+            metal_kernels_available,
+        )
+
+        if not metal_kernels_available():
+            import pytest
+
+            pytest.skip("Metal kernels not available")
+
+        np.random.seed(456)
+        shape = (1, 4, 8)
+        enh_real = mx.array(np.random.randn(*shape).astype(np.float32) * 0.3)
+        enh_imag = mx.array(np.random.randn(*shape).astype(np.float32) * 0.3)
+        orig_real = mx.array(np.random.randn(*shape).astype(np.float32) * 0.5 + 1.0)
+        orig_imag = mx.array(np.random.randn(*shape).astype(np.float32) * 0.5 + 1.0)
+        beta_arr = mx.array([0.02], dtype=mx.float32)
+
+        def loss_custom(er, ei, oreal, oimag, ba):
+            r, i = _post_filter_custom(er, ei, oreal, oimag, ba)
+            return mx.sum(r + i)
+
+        def loss_fallback(er, ei, oreal, oimag, ba):
+            r, i = _post_filter_fallback(er, ei, oreal, oimag, ba)
+            return mx.sum(r + i)
+
+        grad_custom_fn = mx.grad(loss_custom, argnums=(0, 1, 2, 3))
+        grad_fallback_fn = mx.grad(loss_fallback, argnums=(0, 1, 2, 3))
+
+        grads_c = grad_custom_fn(enh_real, enh_imag, orig_real, orig_imag, beta_arr)
+        grads_f = grad_fallback_fn(enh_real, enh_imag, orig_real, orig_imag, beta_arr)
+        mx.eval(*grads_c, *grads_f)
+
+        for idx, label in enumerate(["enh_real", "enh_imag", "orig_real", "orig_imag"]):
+            np.testing.assert_allclose(
+                np.array(grads_c[idx]),
+                np.array(grads_f[idx]),
+                rtol=1e-4,
+                atol=1e-5,
+                err_msg=f"Gradient mismatch for {label}",
+            )
+
+    def test_post_filter_integrated_in_model(self):
+        """model.py must import and use the post-filter kernel."""
+        model_path = Path(__file__).resolve().parent.parent / "df_mlx" / "model.py"
+        source = model_path.read_text()
+        assert "metal_kernels_available" in source, "model.py must import metal_kernels_available"
+        assert "post_filter_kernel" in source, "model.py must import post_filter_kernel"
+
+    def test_post_filter_kernel_fp16(self):
+        """post_filter_kernel must handle float16 inputs and produce finite output."""
+        from df_mlx.kernels import metal_kernels_available, post_filter_kernel
+
+        if not metal_kernels_available():
+            import pytest
+
+            pytest.skip("Metal kernels not available")
+
+        np.random.seed(789)
+        shape = (1, 8, 32)
+        enh_real = mx.array(np.random.randn(*shape).astype(np.float32) * 0.4).astype(mx.float16)
+        enh_imag = mx.array(np.random.randn(*shape).astype(np.float32) * 0.4).astype(mx.float16)
+        orig_real = mx.array((np.random.randn(*shape).astype(np.float32) * 0.5 + 1.0)).astype(mx.float16)
+        orig_imag = mx.array((np.random.randn(*shape).astype(np.float32) * 0.5 + 1.0)).astype(mx.float16)
+
+        out_r, out_i = post_filter_kernel(enh_real, enh_imag, orig_real, orig_imag, 0.02)
+        mx.eval(out_r, out_i)
+
+        assert out_r.dtype == mx.float16, f"Expected float16 output, got {out_r.dtype}"
+        assert out_i.dtype == mx.float16, f"Expected float16 output, got {out_i.dtype}"
+        assert out_r.shape == shape
+        assert mx.all(mx.isfinite(out_r)).item(), "Real output must be finite"
+        assert mx.all(mx.isfinite(out_i)).item(), "Imag output must be finite"

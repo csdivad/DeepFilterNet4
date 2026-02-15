@@ -19,6 +19,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from .config import ModelParams4, get_default_config
+from .kernels import metal_kernels_available, post_filter_kernel
 from .mamba import GroupedLinear, SqueezedMamba
 from .modules import Conv2dNormAct, ConvTranspose2dNormAct, DfOp, Mask, SqueezedGRU_S, erb_fb
 
@@ -1050,6 +1051,9 @@ class DfNet4(nn.Module):
         of enhanced to original magnitude, using a sinusoidal transfer
         function that smoothly increases attenuation for low-gain regions.
 
+        Uses a fused Metal kernel when available for ~22 ops in a single
+        GPU dispatch; falls back to pure-MLX element-wise ops otherwise.
+
         Args:
             spec_enhanced: Enhanced spectrum as (real, imag)
             spec_original: Original noisy spectrum as (real, imag)
@@ -1063,6 +1067,10 @@ class DfNet4(nn.Module):
         enh_real, enh_imag = spec_enhanced
         orig_real, orig_imag = spec_original
         beta = self.post_filter_beta
+
+        if metal_kernels_available():
+            return post_filter_kernel(enh_real, enh_imag, orig_real, orig_imag, beta)
+
         eps = 1e-12
 
         # Compute magnitudes

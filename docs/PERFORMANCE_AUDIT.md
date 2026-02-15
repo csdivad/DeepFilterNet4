@@ -183,12 +183,22 @@ Existing Metal kernels already cover the 3 highest-cost per-frame operations:
 
 **Test coverage**: 10 dedicated tests in `tests/test_perf_optimizations.py` + 866 existing tests pass (6 pre-existing failures unrelated to perf changes).
 
+### Completed (Phase 2 — P2 Metal kernels & allocation reduction)
+
+| ID | Optimization | Files Changed | Impact |
+|----|-------------|---------------|--------|
+| PERF-P2-001 | Mamba scan: replace `mx.concatenate` with pre-allocated buffers + slice assignment | `mamba.py` | ~30 temporary tensor allocations eliminated per forward pass |
+| PERF-P2-003 | Fused post-filter Metal kernel (22 element-wise ops → 1 GPU dispatch) | `kernels.py`, `model.py` | 22 graph nodes → 1 Metal dispatch; differentiable VJP included |
+
+**Mamba scan details**: The iterative doubling parallel scan in `_selective_scan()` previously created 2 `mx.concatenate` calls per loop iteration (~14 iterations) plus 3 for padding = ~31 full-tensor temporary allocations of shape `(batch, padded_len, d_inner, d_state)`. Now uses `mx.ones`/`mx.zeros` for pre-allocation and direct slice assignment `A_scan[:, stride:] = new_A` in the loop.
+
+**Post-filter kernel details**: New `post_filter_kernel()` in `kernels.py` fuses the full post-filter computation (magnitudes, mask ratio, sinusoidal transfer, gain application) into a single Metal kernel with 1 thread per element. Includes `@mx.custom_function` + full VJP for training compatibility. Automatically used when `metal_kernels_available()` returns True, with pure-MLX fallback otherwise.
+
+**Test coverage**: 18 dedicated tests in `tests/test_perf_optimizations.py` + 874 existing tests pass.
+
 ### Remaining (Future Phases)
 
 | Priority | Optimization | Complexity |
 |----------|-------------|-----------|
-| P2 | Mamba parallel scan pre-allocated buffers | Medium — mainly affects uncompiled inference |
-| P2 | Compile `StreamingDfNet4.process_frame` | High — requires state management with `mx.compile` |
-| P2 | Fused Metal kernel for complex mask + concat | Medium |
-| P2 | Fused post-filter Metal kernel (7 ops → 1) | Medium |
+| P2 | Compile `StreamingDfNet4.process_frame` | High — requires refactoring StreamingState into compile-friendly container |
 | P3 | `mx.associative_scan` for Mamba (when available) | Low — depends on MLX roadmap |
