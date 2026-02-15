@@ -117,3 +117,90 @@ def df_op_kernel(
         output_dtypes=[coef_real.dtype, coef_real.dtype],
     )
     return outputs[0], outputs[1]
+
+
+# ---------------------------------------------------------------------------
+# iSTFT: fused overlap-add + window normalization
+# ---------------------------------------------------------------------------
+
+_ISTFT_OLA_KERNEL_SOURCE = """
+    uint elem = thread_position_in_grid.x;
+
+    int hop_length = config_arr[0];
+    int output_length = config_arr[1];
+    int num_frames = frames_shape[1];
+    int n_fft_k = frames_shape[2];
+
+    int n = elem % output_length;
+    int b = elem / output_length;
+
+    // Determine which frames contribute to output position n
+    int first_frame = max(0, (n - n_fft_k + hop_length) / hop_length);
+    int last_frame = min(num_frames - 1, n / hop_length);
+
+    T acc = 0;
+    for (int i = first_frame; i <= last_frame; i++) {
+        int offset = n - i * hop_length;
+        if (offset >= 0 && offset < n_fft_k) {
+            int frame_idx = b * num_frames * n_fft_k + i * n_fft_k + offset;
+            acc += frames[frame_idx];
+        }
+    }
+
+    // Normalize by cached window norm
+    T norm = window_norm[n];
+    out[elem] = (norm > T(1e-8)) ? acc / norm : acc;
+"""
+
+if _METAL_AVAILABLE:
+    _istft_ola_kernel = mx.fast.metal_kernel(
+        name="istft_overlap_add",
+        input_names=["frames", "window_norm", "config_arr"],
+        output_names=["out"],
+        source=_ISTFT_OLA_KERNEL_SOURCE,
+    )
+else:
+    _istft_ola_kernel = None
+
+
+def istft_overlap_add_kernel(
+    frames: mx.array,
+    window_norm: mx.array,
+    hop_length: int,
+    output_length: int,
+    batch_size: int,
+) -> mx.array:
+    """Fused Metal kernel for iSTFT overlap-add + window normalization.
+
+    Replaces the Python for-loop overlap-add and separate normalization step
+    with a single GPU kernel dispatch.
+
+    Args:
+        frames: Windowed IRFFT output, shape ``(batch, num_frames, n_fft)``.
+        window_norm: Precomputed window normalization, shape ``(output_length,)``.
+        hop_length: Hop size in samples.
+        output_length: Length of the output signal (before center-trim).
+        batch_size: Batch dimension size.
+
+    Returns:
+        Overlap-added and normalized output, shape ``(batch, output_length)``.
+
+    Raises:
+        RuntimeError: If ``mx.fast.metal_kernel`` is not available.
+    """
+    if _istft_ola_kernel is None:
+        raise RuntimeError("mx.fast.metal_kernel is not available")
+
+    config_arr = mx.array([hop_length, output_length], dtype=mx.int32)
+    out_shape = (batch_size, output_length)
+    total_elements = batch_size * output_length
+
+    outputs = _istft_ola_kernel(
+        inputs=[frames, window_norm, config_arr],
+        template=[("T", frames.dtype)],
+        grid=(total_elements, 1, 1),
+        threadgroup=(min(256, total_elements), 1, 1),
+        output_shapes=[out_shape],
+        output_dtypes=[frames.dtype],
+    )
+    return outputs[0]
