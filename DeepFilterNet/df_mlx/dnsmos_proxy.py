@@ -12,6 +12,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from df_mlx.kernels import mel_power_log_kernel, metal_kernels_available
+
 
 def hz_to_mel(hz: mx.array) -> mx.array:
     """Convert Hz to mel scale."""
@@ -84,6 +86,8 @@ class MelSpectrogram(nn.Module):
         n_mels: Number of mel filterbank channels
         f_min: Minimum frequency for mel filterbank
         f_max: Maximum frequency for mel filterbank
+        use_metal_kernel: Use fused Metal kernel for power+mel+log (default True).
+            Falls back to pure-MLX ops when ``mx.fast.metal_kernel`` is unavailable.
     """
 
     def __init__(
@@ -94,6 +98,7 @@ class MelSpectrogram(nn.Module):
         n_mels: int = 64,
         f_min: float = 0.0,
         f_max: Optional[float] = None,
+        use_metal_kernel: bool = True,
     ):
         super().__init__()
         self.sample_rate = sample_rate
@@ -102,6 +107,7 @@ class MelSpectrogram(nn.Module):
         self.n_mels = n_mels
         self.f_max = f_max or sample_rate / 2
         self.f_min = f_min
+        self._use_kernel = use_metal_kernel and metal_kernels_available()
 
         # Pre-compute mel filterbank
         self._mel_fb = create_mel_filterbank(sample_rate, n_fft, n_mels, f_min, self.f_max)
@@ -140,13 +146,16 @@ class MelSpectrogram(nn.Module):
 
         # FFT and power spectrogram
         spec_complex = mx.fft.rfft(frames, axis=-1)  # [B, T', n_freqs]
-        power = mx.abs(spec_complex) ** 2
 
-        # Apply mel filterbank in batch form: [B, T', n_freqs] @ [n_freqs, n_mels] -> [B, T', n_mels]
-        mel_spec = mx.matmul(power, mx.transpose(self._mel_fb))
+        if self._use_kernel:
+            spec_real = mx.real(spec_complex)
+            spec_imag = mx.imag(spec_complex)
+            mel_spec = mel_power_log_kernel(spec_real, spec_imag, self._mel_fb, batch_size, n_frames, self.n_mels)
+        else:
+            power = mx.abs(spec_complex) ** 2
+            mel_spec = mx.matmul(power, mx.transpose(self._mel_fb))
+            mel_spec = mx.log(mx.maximum(mel_spec, 1e-10))
 
-        # Log scale with floor to avoid log(0), transpose to [B, n_mels, T']
-        mel_spec = mx.log(mx.maximum(mel_spec, 1e-10))
         return mx.transpose(mel_spec, (0, 2, 1))
 
 

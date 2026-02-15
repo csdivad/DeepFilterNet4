@@ -204,3 +204,87 @@ def istft_overlap_add_kernel(
         output_dtypes=[frames.dtype],
     )
     return outputs[0]
+
+
+# ---------------------------------------------------------------------------
+# Mel spectrogram: fused power-spectrum + mel-projection + log
+# ---------------------------------------------------------------------------
+
+_MEL_POWER_LOG_KERNEL_SOURCE = """
+    uint elem = thread_position_in_grid.x;
+
+    int n_mels  = mel_fb_shape[0];
+    int n_freqs = mel_fb_shape[1];
+    int n_frames = spec_real_shape[1];
+
+    int m = elem % n_mels;
+    int t = (elem / n_mels) % n_frames;
+    int b = elem / (n_mels * n_frames);
+
+    T acc = 0;
+    for (int j = 0; j < n_freqs; j++) {
+        int spec_idx = b * n_frames * n_freqs + t * n_freqs + j;
+        T re = spec_real[spec_idx];
+        T im = spec_imag[spec_idx];
+        T power = re * re + im * im;
+
+        int fb_idx = m * n_freqs + j;
+        acc += mel_fb[fb_idx] * power;
+    }
+
+    mel_out[elem] = metal::log(metal::max(acc, T(1e-10)));
+"""
+
+if _METAL_AVAILABLE:
+    _mel_power_log_kernel = mx.fast.metal_kernel(
+        name="mel_power_log",
+        input_names=["spec_real", "spec_imag", "mel_fb"],
+        output_names=["mel_out"],
+        source=_MEL_POWER_LOG_KERNEL_SOURCE,
+    )
+else:
+    _mel_power_log_kernel = None
+
+
+def mel_power_log_kernel(
+    spec_real: mx.array,
+    spec_imag: mx.array,
+    mel_fb: mx.array,
+    batch_size: int,
+    n_frames: int,
+    n_mels: int,
+) -> mx.array:
+    """Fused Metal kernel for power-spectrum + mel-projection + log.
+
+    Replaces the three-step ``abs²`` → ``matmul(mel_fb)`` → ``log`` with a
+    single GPU dispatch where each thread computes one output mel bin.
+
+    Args:
+        spec_real: Real part of FFT output, shape ``(batch, n_frames, n_freqs)``.
+        spec_imag: Imaginary part of FFT output, shape ``(batch, n_frames, n_freqs)``.
+        mel_fb: Mel filterbank matrix, shape ``(n_mels, n_freqs)``.
+        batch_size: Batch dimension size.
+        n_frames: Number of time frames.
+        n_mels: Number of mel frequency bins.
+
+    Returns:
+        Log-mel spectrogram, shape ``(batch, n_frames, n_mels)``.
+
+    Raises:
+        RuntimeError: If ``mx.fast.metal_kernel`` is not available.
+    """
+    if _mel_power_log_kernel is None:
+        raise RuntimeError("mx.fast.metal_kernel is not available")
+
+    total_elements = batch_size * n_frames * n_mels
+    out_shape = (batch_size, n_frames, n_mels)
+
+    outputs = _mel_power_log_kernel(
+        inputs=[spec_real, spec_imag, mel_fb],
+        template=[("T", spec_real.dtype)],
+        grid=(total_elements, 1, 1),
+        threadgroup=(min(256, total_elements), 1, 1),
+        output_shapes=[out_shape],
+        output_dtypes=[spec_real.dtype],
+    )
+    return outputs[0]
