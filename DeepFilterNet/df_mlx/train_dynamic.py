@@ -5690,14 +5690,18 @@ def train(
                 snr_boost_mean = 0.0
                 vad_reg_loss_val = 0.0
 
-                if emit_detailed_metrics and (
+                # Compute model output for any metric block that needs it.
+                # This must be outside the emit_detailed_metrics guard because
+                # use_vad_loss / use_awesome_loss / use_pipeline_awesome_loss
+                # reference out[0]/out[1] regardless of sync mode.
+                needs_model_out = (
                     use_vad_loss
                     or use_awesome_loss
                     or use_pipeline_awesome_loss
                     or use_vad_train_reg
-                    or use_mrstft_loss
-                    or gan_active
-                ):
+                    or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+                )
+                if needs_model_out:
                     out = pred_spec_for_logging
                     if out is None:
                         out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
@@ -5708,6 +5712,8 @@ def train(
                     if debugger is not None:
                         debugger.check("model.out_real", out[0], debug_ctx)
                         debugger.check("model.out_imag", out[1], debug_ctx)
+
+                if emit_detailed_metrics and needs_model_out:
                     spec_loss = spectral_loss(out, (clean_real, clean_imag))
                     spec_loss_val = float(spec_loss)
                     train_spec_loss += spec_loss_val * eval_frequency
