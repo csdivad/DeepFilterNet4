@@ -4,6 +4,7 @@ import difflib
 import logging
 import subprocess
 from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -809,6 +810,10 @@ class DebugConfig:
         ),
     )
 
+    @property
+    def sync_mode_enum(self) -> SyncMode:
+        return SyncMode(self.sync_mode)
+
 
 SYNC_MODE_EVAL_FREQUENCY: dict[str, int] = {
     "fast": 50,
@@ -817,6 +822,34 @@ SYNC_MODE_EVAL_FREQUENCY: dict[str, int] = {
     "profile": 5,
 }
 """Recommended eval_frequency for each sync_mode."""
+
+
+class SyncMode(str, Enum):
+    """Training sync barrier budget levels.
+
+    Each level defines which diagnostics are active:
+    - FAST: minimal syncs, only loss + grad_norm + samples_per_sec
+    - NORMAL: per-component loss decomposition, mask/VAD stats
+    - DEBUG: per-step grad_norm + loss logging
+    - PROFILE: per-step data/fwd/total timing breakdown
+    """
+
+    FAST = "fast"
+    NORMAL = "normal"
+    DEBUG = "debug"
+    PROFILE = "profile"
+
+    @property
+    def emit_detailed_metrics(self) -> bool:
+        return self != SyncMode.FAST
+
+    @property
+    def emit_snr_buckets(self) -> bool:
+        return self != SyncMode.FAST
+
+    @property
+    def emit_mask_stats(self) -> bool:
+        return self != SyncMode.FAST
 
 
 @dataclass

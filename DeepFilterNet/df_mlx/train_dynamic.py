@@ -66,6 +66,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
 from df_mlx.run_config import (  # noqa: E402
     RunConfig,
+    SyncMode,
     generate_run_config_example,
     load_preset_config,
     load_run_config,
@@ -4222,41 +4223,43 @@ def train(
                 valid_p_out += _p_out_f
                 valid_gate_pct += 100.0 * _gate_f
 
-            snr_np = np.asarray(snr, dtype=np.float32).reshape(-1)
-            residual_np = np.asarray(residual_by_sample, dtype=np.float32).reshape(-1)
-            if use_vad_loss:
-                vad_delta_np = np.asarray(
-                    mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0), axis=1), dtype=np.float32
-                )
-            else:
-                vad_delta_np = np.zeros_like(snr_np, dtype=np.float32)
-            if use_awesome_loss or use_pipeline_awesome_loss:
-                if isinstance(musicness, mx.array):
-                    musicness_np = np.asarray(musicness, dtype=np.float32).reshape(-1)
+            if emit_detailed_metrics:
+                snr_np = np.asarray(snr, dtype=np.float32).reshape(-1)
+                residual_np = np.asarray(residual_by_sample, dtype=np.float32).reshape(-1)
+                if use_vad_loss:
+                    vad_delta_np = np.asarray(
+                        mx.mean(mx.maximum(p_ref - p_out - vad_margin, 0.0), axis=1),
+                        dtype=np.float32,
+                    )
+                else:
+                    vad_delta_np = np.zeros_like(snr_np, dtype=np.float32)
+                if use_awesome_loss or use_pipeline_awesome_loss:
+                    if isinstance(musicness, mx.array):
+                        musicness_np = np.asarray(musicness, dtype=np.float32).reshape(-1)
+                    else:
+                        musicness_np = np.zeros_like(snr_np, dtype=np.float32)
+                    if musicness_np.shape[0] != snr_np.shape[0]:
+                        musicness_np = np.full_like(snr_np, float(np.mean(musicness_np)), dtype=np.float32)
                 else:
                     musicness_np = np.zeros_like(snr_np, dtype=np.float32)
-                if musicness_np.shape[0] != snr_np.shape[0]:
-                    musicness_np = np.full_like(snr_np, float(np.mean(musicness_np)), dtype=np.float32)
-            else:
-                musicness_np = np.zeros_like(snr_np, dtype=np.float32)
 
-            for i, snr_val in enumerate(snr_np):
-                bucket = _snr_bucket_name(float(snr_val))
-                metric = bucket_metrics.setdefault(
-                    bucket,
-                    {
-                        "count": 0.0,
-                        "residual_sum": 0.0,
-                        "vad_delta_sum": 0.0,
-                        "musicness_sum": 0.0,
-                    },
-                )
-                metric["count"] += 1.0
-                metric["residual_sum"] += float(residual_np[i])
-                metric["vad_delta_sum"] += float(vad_delta_np[i])
-                metric["musicness_sum"] += float(musicness_np[i])
+                for i, snr_val in enumerate(snr_np):
+                    bucket = _snr_bucket_name(float(snr_val))
+                    metric = bucket_metrics.setdefault(
+                        bucket,
+                        {
+                            "count": 0.0,
+                            "residual_sum": 0.0,
+                            "vad_delta_sum": 0.0,
+                            "musicness_sum": 0.0,
+                        },
+                    )
+                    metric["count"] += 1.0
+                    metric["residual_sum"] += float(residual_np[i])
+                    metric["vad_delta_sum"] += float(vad_delta_np[i])
+                    metric["musicness_sum"] += float(musicness_np[i])
 
-            if use_awesome_loss:
+            if use_awesome_loss and emit_detailed_metrics:
                 _mask_m = mx.mean(mask)
                 _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
                 _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
@@ -4550,7 +4553,8 @@ def train(
 
     # Training loop
     # Sync cadence derived from sync_mode (see docs/SYNC_BARRIER_POLICY.md)
-    emit_detailed_metrics = sync_mode != "fast"
+    mode = SyncMode(sync_mode)
+    emit_detailed_metrics = mode.emit_detailed_metrics
     print(f"\nStarting training (epoch {start_epoch + 1} to {epochs})...")
     print(f"  Sync mode: {sync_mode} (eval_frequency={eval_frequency})")
     print(f"  Warmup steps: {warmup_steps:,}")
