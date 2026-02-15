@@ -67,6 +67,9 @@ disc_lr = 1e-5
 disc_weight_decay = 0.01
 disc_grad_clip = 1.0
 disc_update_freq = 2
+disc_max_samples = 48000    # crop waveforms to 1s for discriminator (saves ~4x memory)
+mpd_channels = 16           # halved from default 32 for OOM safety
+msd_channels = 64           # halved from default 128 for OOM safety
 
 [vad]
 loss_weight = 0.05

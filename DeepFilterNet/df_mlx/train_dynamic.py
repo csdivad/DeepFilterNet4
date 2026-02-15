@@ -1909,6 +1909,31 @@ def _gan_waveform_view(wav: mx.array, *, use_fp16: bool) -> mx.array:
     return wav
 
 
+def _disc_crop_waveform(wav: mx.array, max_samples: int, crop_start: int | None = None) -> tuple[mx.array, int]:
+    """Random-crop waveform along the time axis for discriminator input.
+
+    Waveform-domain discriminators (MPD/MSD) produce enormous activation tensors
+    proportional to input length.  Cropping to a shorter segment (e.g. 1 s at
+    48 kHz = 48 000 samples) cuts discriminator memory by the ratio
+    ``original_len / max_samples`` with negligible quality impact — the
+    discriminator only needs to assess local perceptual quality.
+
+    Args:
+        wav: Waveform tensor ``(batch, samples)``.
+        max_samples: Maximum number of samples to keep (0 = no crop).
+        crop_start: If given, reuse this start index (keeps fake/real aligned).
+
+    Returns:
+        (cropped_wav, crop_start) so the same offset can be reused for the
+        paired waveform.
+    """
+    if max_samples <= 0 or wav.shape[-1] <= max_samples:
+        return wav, 0
+    if crop_start is None:
+        crop_start = random.randint(0, wav.shape[-1] - max_samples)
+    return wav[:, crop_start : crop_start + max_samples], crop_start
+
+
 _CHECKPOINT_KINDS = {"step", "epoch_end", "best", "best_final", "final", "interrupted"}
 _COMPLETED_KINDS = {"epoch_end", "best", "best_final", "final"}
 _IN_PROGRESS_KINDS = {"step", "interrupted"}
@@ -2774,6 +2799,9 @@ def train(
     gan_disc_weight_decay: float = 0.0,
     gan_disc_grad_clip: float = 1.0,
     gan_disc_update_freq: int = 1,
+    gan_disc_max_samples: int = 48000,
+    gan_mpd_channels: int = 32,
+    gan_msd_channels: int = 128,
     experimental_compiled_gan: bool = False,
     vad_proxy_enabled: bool = True,
     vad_loss_weight: float = 0.05,
@@ -3109,11 +3137,16 @@ def train(
 
         mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
         if gan_disc_type == "mpd":
-            discriminator = MultiPeriodDiscriminator(periods=mpd_periods)
+            discriminator = MultiPeriodDiscriminator(periods=mpd_periods, channels=gan_mpd_channels)
         elif gan_disc_type == "msd":
-            discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales)
+            discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales, channels=gan_msd_channels)
         else:
-            discriminator = CombinedDiscriminator(mpd_periods=mpd_periods, msd_scales=gan_msd_scales)
+            discriminator = CombinedDiscriminator(
+                mpd_periods=mpd_periods,
+                mpd_channels=gan_mpd_channels,
+                msd_scales=gan_msd_scales,
+                msd_channels=gan_msd_channels,
+            )
 
         disc_optimizer = optim.AdamW(
             learning_rate=gan_disc_lr,
@@ -3196,6 +3229,11 @@ def train(
             "  Discriminator: "
             f"type={gan_disc_type}, mpd_periods={gan_mpd_periods or [2, 3, 5, 7, 11]}, "
             f"msd_scales={gan_msd_scales}, update_freq={gan_disc_update_freq}"
+        )
+        print(
+            "  Disc memory:  "
+            f"max_samples={gan_disc_max_samples or 'full'}, "
+            f"mpd_ch={gan_mpd_channels}, msd_ch={gan_msd_channels}"
         )
     vad_enabled = vad_loss_weight > 0 or vad_speech_loss_weight > 0
     print(
@@ -3606,6 +3644,8 @@ def train(
             gen_loss_fn, _ = gan_loss_fns
             gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
             gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+            gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
+            gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
             disc_fake, fake_feats = discriminator(gan_out_wav)
             disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
             gan_g_loss = gen_loss_fn(disc_fake)
@@ -3770,6 +3810,8 @@ def train(
                 gen_loss_fn, _ = gan_loss_fns
                 gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
                 gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+                gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
+                gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
                 disc_fake, fake_feats = discriminator(gan_out_wav)
                 disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
                 gan_g_loss = gen_loss_fn(disc_fake)
@@ -5014,6 +5056,18 @@ def train(
         fm_weight = gan_fm_weight * gan_scale
         gan_active = gan_enabled and gan_scale > 0.0
 
+        # GAN epochs MUST sync every step to prevent lazy-graph accumulation.
+        # With eval_frequency > 1 the discriminator forward/backward graphs
+        # pile up across batches, easily exceeding unified-memory limits.
+        epoch_eval_frequency = eval_frequency
+        if gan_active and eval_frequency > 1:
+            epoch_eval_frequency = 1
+            if epoch == gan_start_epoch:
+                print(
+                    f"  GAN active: overriding eval_frequency {eval_frequency} → 1 "
+                    "(mandatory per-step sync to prevent OOM from graph accumulation)"
+                )
+
         prev_train_mode = train_mode
         train_mode, epoch_use_compiled_step = resolve_epoch_train_mode(
             compiled_step_base_enabled=base_compiled_step_enabled,
@@ -5289,7 +5343,7 @@ def train(
                     check_dtype=use_fp16,
                     expected_dtype=mx.float16 if use_fp16 else mx.float32,
                 )
-                should_sync = (batch_idx + 1) % eval_frequency == 0
+                should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
 
                 # Select the appropriate compiled functions. When the
                 # experimental compiled-GAN flag is active AND GAN is active,
@@ -5457,7 +5511,7 @@ def train(
                             f"(loss_finite={loss_finite}, grads_finite={grads_finite})"
                         )
                 # Only sync periodically
-                should_sync = (batch_idx + 1) % eval_frequency == 0
+                should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
                 if should_sync:
                     mx.eval(loss)
 
@@ -5491,7 +5545,7 @@ def train(
 
                 # Only sync periodically for better throughput
                 if should_sync:
-                    mx.eval(model.parameters(), optimizer.state)
+                    mx.eval(loss, model.parameters(), optimizer.state)
 
             pred_spec_for_logging = None
             if model_out is not None:
@@ -5529,9 +5583,13 @@ def train(
                         clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                         pred_wav = mx.stop_gradient(pred_wav)
 
+                        # Crop to disc_max_samples (same offset for real/fake alignment)
+                        clean_wav_d, d_crop = _disc_crop_waveform(clean_wav, gan_disc_max_samples)
+                        pred_wav_d, _ = _disc_crop_waveform(pred_wav, gan_disc_max_samples, crop_start=d_crop)
+
                         def disc_loss_wrapper(disc):
-                            real_out, _ = disc(clean_wav)
-                            fake_out, _ = disc(pred_wav)
+                            real_out, _ = disc(clean_wav_d)
+                            fake_out, _ = disc(pred_wav_d)
                             total_loss, _, _ = disc_loss_fn(real_out, fake_out)
                             return total_loss
 
@@ -7265,6 +7323,10 @@ def main():
         gan_disc_weight_decay=run_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=run_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=run_cfg.gan.disc_update_freq,
+        gan_disc_max_samples=run_cfg.gan.disc_max_samples,
+        gan_mpd_channels=run_cfg.gan.mpd_channels,
+        gan_msd_channels=run_cfg.gan.msd_channels,
+        experimental_compiled_gan=run_cfg.gan.experimental_compile,
         vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
         vad_loss_weight=run_cfg.vad.loss_weight,
         vad_threshold=run_cfg.vad.threshold,

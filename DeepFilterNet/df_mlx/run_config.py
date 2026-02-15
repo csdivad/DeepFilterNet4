@@ -364,7 +364,9 @@ class TrainingConfig:
         min=0.0,
     )
     eval_frequency: int = cfg_field(
-        10, help="Sync/eval frequency in batches", normalize=lambda v: _normalize_int(v, min_value=1)
+        10,
+        help="Sync/eval frequency in batches",
+        normalize=lambda v: _normalize_int(v, min_value=1),
     )
     fp16: bool | None = cfg_field(
         None,
@@ -499,7 +501,9 @@ class CheckpointConfig:
         none_sentinel=-1,
     )
     checkpoint_batches: int = cfg_field(
-        0, help="Save data checkpoint every N batches (0 disables)", normalize=lambda v: _normalize_int(v, min_value=0)
+        0,
+        help="Save data checkpoint every N batches (0 disables)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
     )
     validate_every: int = cfg_field(
         1, help="Validate every N epochs", normalize=lambda v: _normalize_int(v, min_value=1)
@@ -623,7 +627,9 @@ class LossConfig:
 class GanConfig:
     enabled: bool = cfg_field(False, help="Enable GAN adversarial training", normalize=_normalize_bool)
     start_epoch: int = cfg_field(
-        0, help="Epoch to start GAN training (0-based)", normalize=lambda v: _normalize_int(v, min_value=0)
+        0,
+        help="Epoch to start GAN training (0-based)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
     )
     ramp_epochs: int = cfg_field(
         0,
@@ -676,6 +682,21 @@ class GanConfig:
         help="Update discriminator every N steps",
         normalize=lambda v: _normalize_int(v, min_value=1),
     )
+    disc_max_samples: int = cfg_field(
+        48000,
+        help="Max waveform samples fed to discriminator to limit memory",
+        normalize=lambda v: _normalize_int(v, min_value=0),
+    )
+    mpd_channels: int = cfg_field(
+        32,
+        help="Base channel count for MPD period discriminators",
+        normalize=lambda v: _normalize_int(v, min_value=8),
+    )
+    msd_channels: int = cfg_field(
+        128,
+        help="Base channel count for MSD scale discriminators",
+        normalize=lambda v: _normalize_int(v, min_value=16),
+    )
     experimental_compile: bool = cfg_field(
         False,
         help="Enable experimental GAN-phase compilation (R&D only, see docs/GAN_COMPILE_EXPERIMENT.md)",
@@ -693,7 +714,9 @@ class VADEvalConfig:
         notes="If mode='silero', install: pip install silero-vad onnxruntime torch.",
     )
     every: int = cfg_field(
-        1, help="Evaluate VAD metrics every N epochs", normalize=lambda v: _normalize_int(v, min_value=1)
+        1,
+        help="Evaluate VAD metrics every N epochs",
+        normalize=lambda v: _normalize_int(v, min_value=1),
     )
     batches: int = cfg_field(
         8, help="Number of batches for VAD eval", normalize=lambda v: _normalize_int(v, min_value=1)
@@ -764,10 +787,14 @@ class VADConfig:
         6.0, help="SNR gate softness (dB)", normalize=lambda v: _normalize_float(v, min_value=1e-3)
     )
     band_low_hz: float = cfg_field(
-        300.0, help="Speech band low cutoff (Hz)", normalize=lambda v: _normalize_float(v, min_value=1.0)
+        300.0,
+        help="Speech band low cutoff (Hz)",
+        normalize=lambda v: _normalize_float(v, min_value=1.0),
     )
     band_high_hz: float = cfg_field(
-        3400.0, help="Speech band high cutoff (Hz)", normalize=lambda v: _normalize_float(v, min_value=1.0)
+        3400.0,
+        help="Speech band high cutoff (Hz)",
+        normalize=lambda v: _normalize_float(v, min_value=1.0),
     )
     z_threshold: float = cfg_field(0.0, help="VAD z-score threshold", normalize=_normalize_float)
     z_slope: float = cfg_field(1.0, help="VAD z-score slope", normalize=lambda v: _normalize_float(v, min_value=1e-3))
@@ -1131,6 +1158,12 @@ def validate_run_config(cfg: RunConfig) -> None:
         raise ValueError("gan enabled but adv_weight and fm_weight are both 0")
     if cfg.gan.mpd_periods and any(p <= 0 for p in cfg.gan.mpd_periods):
         raise ValueError("gan.mpd_periods must be positive integers")
+    if cfg.gan.disc_max_samples < 0:
+        raise ValueError("gan.disc_max_samples must be >= 0")
+    if cfg.gan.mpd_channels < 8:
+        raise ValueError("gan.mpd_channels must be >= 8")
+    if cfg.gan.msd_channels < 16:
+        raise ValueError("gan.msd_channels must be >= 16")
 
 
 # ============================
