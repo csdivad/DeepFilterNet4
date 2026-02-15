@@ -2975,9 +2975,12 @@ def train(
             print("Warning: mrstft enabled but fft_sizes is empty; disabling MRSTFT loss.")
             use_mrstft_loss = False
         else:
+            from functools import partial
+
             from df_mlx.ops import istft
 
-            mrstft_istft = istft
+            # Metal kernels lack VJP — disable inside the gradient path.
+            mrstft_istft = partial(istft, use_metal_kernel=False)
             mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
             mrstft_loss_fn = MultiResolutionSTFTLoss(
                 fft_sizes=tuple(mrstft_cfg.fft_sizes),
@@ -3004,12 +3007,15 @@ def train(
     gan_loss_fns = None
 
     if gan_enabled:
+        from functools import partial
+
         from df_mlx.discriminator import CombinedDiscriminator, MultiPeriodDiscriminator, MultiScaleDiscriminator
         from df_mlx.loss import FeatureMatchingLoss, discriminator_loss, generator_loss
         from df_mlx.ops import istft
 
         if gan_istft is None:
-            gan_istft = istft
+            # Metal kernels lack VJP — disable inside the gradient path.
+            gan_istft = partial(istft, use_metal_kernel=False)
 
         mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
         if gan_disc_type == "mpd":

@@ -494,3 +494,55 @@ print(augment_capabilities())     # {'rust_extension': False, 'biquad_backend': 
 - [DeepFilterNet/df_mlx/dynamic_dataset.py](../DeepFilterNet/df_mlx/dynamic_dataset.py)
 - [DeepFilterNet/tests/test_guarded_fallback.py](../DeepFilterNet/tests/test_guarded_fallback.py)
 - `pyDF-augment/` (Rust extension crate)
+
+---
+
+### Metal Kernels: Inference-Only Dispatch
+
+- **Short Name:** metal-kernel-training-guard
+- **Status:** REQUIRED
+- **Scope:** All `df_mlx/` code that calls `mx.fast.metal_kernel`
+
+**Rule:** Custom Metal kernels (`mx.fast.metal_kernel`) must NEVER execute on the
+`nn.value_and_grad` computation graph.  They do not implement VJP (vector-Jacobian
+product), and any `CustomKernel` primitive on the backward pass raises
+`ValueError: [Primitive::vjp] Not implemented for CustomKernel.`
+
+**Implementation pattern for `nn.Module` subclasses:**
+
+```python
+if self.use_metal_kernel and not self.training:
+    # Metal kernel path — inference only
+    result = my_metal_kernel(...)
+else:
+    # Differentiable pure-MLX fallback
+    result = my_fallback(...)
+```
+
+**Implementation pattern for free functions (e.g. `istft`):**
+
+```python
+from functools import partial
+
+# When binding an istft reference for use inside loss_fn / value_and_grad:
+grad_safe_istft = partial(istft, use_metal_kernel=False)
+```
+
+**Rationale:**
+
+- MLX's `mx.fast.metal_kernel` creates opaque `CustomKernel` primitives with no
+  registered VJP.  This is an MLX framework limitation, not a bug in our kernels.
+- Training correctness requires differentiable fallbacks; Metal kernels provide
+  inference speedup only.
+- The `nn.Module.training` flag is set by `model.train()` / `model.eval()` and
+  propagates recursively to all child modules, so the guard is automatic.
+- All three kernels (DfOp gather+CMAC, iSTFT overlap-add, mel power+log) have
+  numerically equivalent pure-MLX fallbacks verified by tests.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/kernels.py](../DeepFilterNet/df_mlx/kernels.py) — Metal kernel source
+- [DeepFilterNet/df_mlx/modules.py](../DeepFilterNet/df_mlx/modules.py) — `DfOp` training guard
+- [DeepFilterNet/df_mlx/ops.py](../DeepFilterNet/df_mlx/ops.py) — `istft` `use_metal_kernel` flag
+- [DeepFilterNet/df_mlx/dnsmos_proxy.py](../DeepFilterNet/df_mlx/dnsmos_proxy.py) — `MelSpectrogram` training guard
+- [DeepFilterNet/tests/test_metal_kernel_training_guard.py](../DeepFilterNet/tests/test_metal_kernel_training_guard.py)

@@ -471,13 +471,15 @@ class DfOp(nn.Module):
 
     When ``use_metal_kernel=True`` (the default) and ``mx.fast.metal_kernel``
     is available, the gather + complex-MAC hotspot is dispatched as a single
-    fused Metal kernel.  Otherwise the pure-MLX fallback is used.
+    fused Metal kernel **at inference time only**.  During training
+    (``self.training == True``) the differentiable pure-MLX fallback is always
+    used because Metal kernels do not implement VJP.
 
     Args:
         nb_df: Number of DF frequency bins
         df_order: Filter order (number of taps)
         df_lookahead: Number of lookahead frames
-        use_metal_kernel: Attempt to use the fused Metal kernel path.
+        use_metal_kernel: Attempt to use the fused Metal kernel path at inference.
     """
 
     def __init__(
@@ -527,7 +529,8 @@ class DfOp(nn.Module):
         coef_r = coef[:, :, :, :, 0]
         coef_i = coef[:, :, :, :, 1]
 
-        if self.use_metal_kernel:
+        if self.use_metal_kernel and not self.training:
+            # Metal kernels do not implement VJP; use only at inference.
             df_out_real, df_out_imag = df_op_kernel(
                 spec_real_pad=df_real_pad,
                 spec_imag_pad=df_imag_pad,
