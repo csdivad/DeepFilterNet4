@@ -3017,9 +3017,9 @@ def train(
 
     # Numeric debug mode overrides (deterministic, short runs)
     if debug_numerics:
-        if epochs != 1:
-            print(f"  Debug numerics: overriding epochs {epochs} -> 1")
-            epochs = 1
+        # NOTE: do NOT override epochs here.  The max_train_batches cap
+        # already limits per-epoch work, and forcing epochs=1 breaks
+        # checkpoint resume when start_epoch > 0.
         if max_train_batches is None:
             max_train_batches = 50
         if max_valid_batches is None:
