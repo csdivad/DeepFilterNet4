@@ -141,6 +141,15 @@ _PIPELINE_ARTIFACT_SMOOTH_WEIGHT = 0.3  # Temporal smoothing for artifact contro
 _PIPELINE_MASK_SATURATION_PENALTY = 0.1  # Penalty for extreme mask values
 
 
+def _batch_to_float(*arrays: mx.array) -> tuple[float, ...]:
+    """Evaluate multiple MLX arrays in one sync, then extract Python floats.
+
+    Reduces N individual ``float(mx_array)`` sync barriers to a single ``mx.eval()``.
+    """
+    mx.eval(*arrays)
+    return tuple(float(a) for a in arrays)
+
+
 @dataclass
 class NumericDebugConfig:
     enabled: bool = False
@@ -4159,19 +4168,35 @@ def train(
             residual = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2)
             residual_by_sample = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2, axis=(1, 2))
 
-            loss_val = float(loss)
-            spec_loss_val = float(spec_loss)
-            mrstft_loss_val = float(mrstft_loss)
-            vad_loss_val = float(vad_loss)
-            speech_loss_val = float(speech_loss)
-            awesome_loss_val = float(awesome_loss)
-            awesome_speech_val = float(awesome_speech)
-            awesome_noise_val = float(awesome_noise)
-            awesome_smooth_val = float(awesome_smooth)
-            music_suppression_loss_val = float(music_suppression_loss)
-            mask_saturation_loss_val = float(mask_saturation_loss)
-            vad_reg_loss_val = float(vad_reg_loss)
-            residual_val = float(residual)
+            (
+                loss_val,
+                spec_loss_val,
+                mrstft_loss_val,
+                vad_loss_val,
+                speech_loss_val,
+                awesome_loss_val,
+                awesome_speech_val,
+                awesome_noise_val,
+                awesome_smooth_val,
+                music_suppression_loss_val,
+                mask_saturation_loss_val,
+                vad_reg_loss_val,
+                residual_val,
+            ) = _batch_to_float(
+                loss,
+                spec_loss,
+                mrstft_loss,
+                vad_loss,
+                speech_loss,
+                awesome_loss,
+                awesome_speech,
+                awesome_noise,
+                awesome_smooth,
+                music_suppression_loss,
+                mask_saturation_loss,
+                vad_reg_loss,
+                residual,
+            )
 
             valid_loss += loss_val
             valid_spec_loss += spec_loss_val
@@ -4189,9 +4214,13 @@ def train(
             num_valid_batches += 1
 
             if use_vad_loss:
-                valid_p_ref += float(mx.mean(p_ref))
-                valid_p_out += float(mx.mean(p_out))
-                valid_gate_pct += 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+                _p_ref_m = mx.mean(p_ref)
+                _p_out_m = mx.mean(p_out)
+                _gate_m = mx.mean(mx.where(gate > 0.0, 1.0, 0.0))
+                _p_ref_f, _p_out_f, _gate_f = _batch_to_float(_p_ref_m, _p_out_m, _gate_m)
+                valid_p_ref += _p_ref_f
+                valid_p_out += _p_out_f
+                valid_gate_pct += 100.0 * _gate_f
 
             snr_np = np.asarray(snr, dtype=np.float32).reshape(-1)
             residual_np = np.asarray(residual_by_sample, dtype=np.float32).reshape(-1)
@@ -4228,16 +4257,41 @@ def train(
                 metric["musicness_sum"] += float(musicness_np[i])
 
             if use_awesome_loss:
-                mask_mean = float(mx.mean(mask))
-                mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
-                mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
-                proxy_mean = float(mx.mean(proxy_frame))
-                speech_ratio_mean = float(mx.mean(speech_ratio))
-                music_gate_mean = float(mx.mean(music_gate))
-                musicness_mean = float(mx.mean(musicness))
-                mod_energy_mean = float(mx.mean(mod_energy))
-                energy_boost_mean = float(mx.mean(energy_boost))
-                snr_boost_mean = float(mx.mean(snr_boost))
+                _mask_m = mx.mean(mask)
+                _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+                _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+                _proxy_m = mx.mean(proxy_frame)
+                _sr_m = mx.mean(speech_ratio)
+                _mg_m = mx.mean(music_gate)
+                _mu_m = mx.mean(musicness)
+                _me_m = mx.mean(mod_energy)
+                _eb_m = mx.mean(energy_boost)
+                _sb_m = mx.mean(snr_boost)
+                (
+                    mask_mean,
+                    mask_high,
+                    mask_low,
+                    proxy_mean,
+                    speech_ratio_mean,
+                    music_gate_mean,
+                    musicness_mean,
+                    mod_energy_mean,
+                    energy_boost_mean,
+                    snr_boost_mean,
+                ) = _batch_to_float(
+                    _mask_m,
+                    _mask_hi,
+                    _mask_lo,
+                    _proxy_m,
+                    _sr_m,
+                    _mg_m,
+                    _mu_m,
+                    _me_m,
+                    _eb_m,
+                    _sb_m,
+                )
+                mask_high *= 100.0
+                mask_low *= 100.0
 
                 valid_mask_mean += mask_mean
                 valid_mask_high += mask_high
@@ -5239,11 +5293,17 @@ def train(
                             debug=debugger,
                             debug_ctx=debug_ctx,
                         )
-                    vad_loss_val = float(vad_loss)
-                    speech_loss_val = float(speech_loss)
-                    p_ref_mean = float(mx.mean(p_ref))
-                    p_out_mean = float(mx.mean(p_out))
-                    gate_pct = 100.0 * float(mx.mean(mx.where(gate > 0.0, 1.0, 0.0)))
+                    _p_ref_m = mx.mean(p_ref)
+                    _p_out_m = mx.mean(p_out)
+                    _gate_m = mx.mean(mx.where(gate > 0.0, 1.0, 0.0))
+                    (
+                        vad_loss_val,
+                        speech_loss_val,
+                        p_ref_mean,
+                        p_out_mean,
+                        _gate_f,
+                    ) = _batch_to_float(vad_loss, speech_loss, _p_ref_m, _p_out_m, _gate_m)
+                    gate_pct = 100.0 * _gate_f
 
                     train_vad_loss += vad_loss_val * eval_frequency
                     train_speech_loss += speech_loss_val * eval_frequency
@@ -5300,21 +5360,49 @@ def train(
                         debug=debugger,
                         debug_ctx=debug_ctx,
                     )
-                    awesome_loss_val = float(awesome_loss)
-                    awesome_speech_val = float(awesome_speech)
-                    awesome_noise_val = float(awesome_noise)
-                    awesome_smooth_val = float(awesome_smooth)
-
-                    mask_mean = float(mx.mean(mask))
-                    mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
-                    mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
-                    proxy_mean = float(mx.mean(proxy_frame))
-                    speech_ratio_mean = float(mx.mean(speech_ratio))
-                    music_gate_mean = float(mx.mean(music_gate))
-                    musicness_mean = float(mx.mean(musicness))
-                    mod_energy_mean = float(mx.mean(mod_energy))
-                    energy_boost_mean = float(mx.mean(energy_boost))
-                    snr_boost_mean = float(mx.mean(snr_boost))
+                    _mask_m = mx.mean(mask)
+                    _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+                    _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+                    _proxy_m = mx.mean(proxy_frame)
+                    _sr_m = mx.mean(speech_ratio)
+                    _mg_m = mx.mean(music_gate)
+                    _mu_m = mx.mean(musicness)
+                    _me_m = mx.mean(mod_energy)
+                    _eb_m = mx.mean(energy_boost)
+                    _sb_m = mx.mean(snr_boost)
+                    (
+                        awesome_loss_val,
+                        awesome_speech_val,
+                        awesome_noise_val,
+                        awesome_smooth_val,
+                        mask_mean,
+                        mask_high,
+                        mask_low,
+                        proxy_mean,
+                        speech_ratio_mean,
+                        music_gate_mean,
+                        musicness_mean,
+                        mod_energy_mean,
+                        energy_boost_mean,
+                        snr_boost_mean,
+                    ) = _batch_to_float(
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        _mask_m,
+                        _mask_hi,
+                        _mask_lo,
+                        _proxy_m,
+                        _sr_m,
+                        _mg_m,
+                        _mu_m,
+                        _me_m,
+                        _eb_m,
+                        _sb_m,
+                    )
+                    mask_high *= 100.0
+                    mask_low *= 100.0
 
                     train_awesome_loss += awesome_loss_val * eval_frequency
                     train_awesome_speech += awesome_speech_val * eval_frequency
@@ -5393,23 +5481,53 @@ def train(
                         debug=debugger,
                         debug_ctx=debug_ctx,
                     )
-                    awesome_loss_val = float(awesome_loss)
-                    awesome_speech_val = float(awesome_speech)
-                    awesome_noise_val = float(awesome_noise)
-                    awesome_smooth_val = float(awesome_smooth)
-                    music_supp_loss_val = float(music_supp_loss)
-                    mask_sat_loss_val = float(mask_sat_loss)
-
-                    mask_mean = float(mx.mean(mask))
-                    mask_high = 100.0 * float(mx.mean(mx.where(mask > 0.8, 1.0, 0.0)))
-                    mask_low = 100.0 * float(mx.mean(mx.where(mask < 0.2, 1.0, 0.0)))
-                    proxy_mean = float(mx.mean(proxy_frame))
-                    speech_ratio_mean = float(mx.mean(speech_ratio))
-                    music_gate_mean = float(mx.mean(music_gate))
-                    musicness_mean = float(mx.mean(musicness))
-                    mod_energy_mean = float(mx.mean(mod_energy))
-                    energy_boost_mean = float(mx.mean(energy_boost))
-                    snr_boost_mean = float(mx.mean(snr_boost))
+                    _mask_m = mx.mean(mask)
+                    _mask_hi = mx.mean(mx.where(mask > 0.8, 1.0, 0.0))
+                    _mask_lo = mx.mean(mx.where(mask < 0.2, 1.0, 0.0))
+                    _proxy_m = mx.mean(proxy_frame)
+                    _sr_m = mx.mean(speech_ratio)
+                    _mg_m = mx.mean(music_gate)
+                    _mu_m = mx.mean(musicness)
+                    _me_m = mx.mean(mod_energy)
+                    _eb_m = mx.mean(energy_boost)
+                    _sb_m = mx.mean(snr_boost)
+                    (
+                        awesome_loss_val,
+                        awesome_speech_val,
+                        awesome_noise_val,
+                        awesome_smooth_val,
+                        music_supp_loss_val,
+                        mask_sat_loss_val,
+                        mask_mean,
+                        mask_high,
+                        mask_low,
+                        proxy_mean,
+                        speech_ratio_mean,
+                        music_gate_mean,
+                        musicness_mean,
+                        mod_energy_mean,
+                        energy_boost_mean,
+                        snr_boost_mean,
+                    ) = _batch_to_float(
+                        awesome_loss,
+                        awesome_speech,
+                        awesome_noise,
+                        awesome_smooth,
+                        music_supp_loss,
+                        mask_sat_loss,
+                        _mask_m,
+                        _mask_hi,
+                        _mask_lo,
+                        _proxy_m,
+                        _sr_m,
+                        _mg_m,
+                        _mu_m,
+                        _me_m,
+                        _eb_m,
+                        _sb_m,
+                    )
+                    mask_high *= 100.0
+                    mask_low *= 100.0
 
                     train_awesome_loss += awesome_loss_val * eval_frequency
                     train_awesome_speech += awesome_speech_val * eval_frequency
