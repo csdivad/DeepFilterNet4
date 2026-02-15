@@ -391,6 +391,31 @@ experimental_compile = true
 
 ---
 
+### GAN Discriminator Update Cadence with Gradient Accumulation
+
+**Status:** REQUIRED
+
+**Scope:** `DeepFilterNet/df_mlx/train_dynamic.py` — GAN-active training loop
+
+**Rule:**
+
+- When gradient accumulation is enabled, discriminator updates must follow **optimizer-step cadence**, not micro-batch cadence.
+- `gan.disc_update_freq` is interpreted in optimizer steps (`global_step`), consistent with trainer counter semantics.
+- GAN discriminator waveform tensors should use model precision (FP16 when enabled), while MRSTFT may remain FP32 for numeric stability.
+
+**Rationale:**
+
+- Running discriminator updates per micro-batch under accumulation multiplies adversarial memory/compute pressure and can trigger OOM at GAN activation.
+- Aligning cadence to optimizer steps preserves intended update semantics and avoids surprise behavior from micro-batch internals.
+- Mixed precision on GAN discriminator paths reduces peak memory at GAN onset without changing MRSTFT stability policy.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py)
+- [DeepFilterNet/tests/test_gan_memory_path.py](../DeepFilterNet/tests/test_gan_memory_path.py)
+
+---
+
 ## 3. Known Exceptions
 
 _None documented yet._
@@ -401,3 +426,4 @@ _None documented yet._
 - **2026-02-13**: Added MLX training counter semantics convention (micro-batch vs optimizer-step units, checkpoint resume invariants).
 - **2026-02-13**: Added epoch-boundary compiled→eager training mode convention for delayed GAN activation.
 - **2026-02-14**: Added sync mode selection, compile boundary shape invariants, hardware profile presets, performance regression gate, and GAN-phase eager mode conventions.
+- **2026-02-15**: Added GAN discriminator optimizer-step cadence and GAN mixed-precision waveform-path conventions to prevent GAN-onset OOM under gradient accumulation.

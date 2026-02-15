@@ -1799,6 +1799,18 @@ def compute_mrstft_loss(
     return loss_fn(out_wav, clean_wav)
 
 
+def _gan_waveform_view(wav: mx.array, *, use_fp16: bool) -> mx.array:
+    """Return GAN discriminator waveform view in the desired precision.
+
+    GAN discriminator activations are a major memory contributor when adversarial
+    training activates. Keeping this path in model precision (FP16 when enabled)
+    reduces peak memory while MRSTFT can still run in FP32 for stability.
+    """
+    if use_fp16 and wav.dtype != mx.float16:
+        return wav.astype(mx.float16)
+    return wav
+
+
 _CHECKPOINT_KINDS = {"step", "epoch_end", "best", "best_final", "final", "interrupted"}
 _COMPLETED_KINDS = {"epoch_end", "best", "best_final", "final"}
 _IN_PROGRESS_KINDS = {"step", "interrupted"}
@@ -3473,7 +3485,7 @@ def train(
                 n_fft=config.fft_size,
                 hop_length=config.hop_size,
                 target_len=gan_target_len,
-                force_fp32=True,
+                force_fp32=use_mrstft_loss,
             )
 
         if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
@@ -3482,8 +3494,10 @@ def train(
 
         if gan_active and gan_loss_fns is not None and discriminator is not None and out_wav is not None:
             gen_loss_fn, _ = gan_loss_fns
-            disc_fake, fake_feats = discriminator(out_wav)
-            disc_real, real_feats = discriminator(clean_wav)
+            gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
+            gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+            disc_fake, fake_feats = discriminator(gan_out_wav)
+            disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
             gan_g_loss = gen_loss_fn(disc_fake)
             total_loss = total_loss + gan_weight * gan_g_loss
             if feature_match_loss is not None and gan_fm_weight > 0:
@@ -5008,7 +5022,7 @@ def train(
 
             gan_d_loss_val = 0.0
             if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
-                do_disc_update = (global_step % gan_disc_update_freq) == 0
+                do_disc_update = did_optimizer_update and ((global_step % gan_disc_update_freq) == 0)
                 if do_disc_update:
                     _, disc_loss_fn = gan_loss_fns
 
@@ -5029,8 +5043,10 @@ def train(
                             n_fft=config.fft_size,
                             hop_length=config.hop_size,
                             target_len=gan_target_len,
-                            force_fp32=True,
+                            force_fp32=use_mrstft_loss,
                         )
+                        pred_wav = _gan_waveform_view(pred_wav, use_fp16=bool(use_fp16))
+                        clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                         pred_wav = mx.stop_gradient(pred_wav)
 
                         def disc_loss_wrapper(disc):
@@ -5179,8 +5195,10 @@ def train(
                             n_fft=config.fft_size,
                             hop_length=config.hop_size,
                             target_len=gan_target_len,
-                            force_fp32=True,
+                            force_fp32=use_mrstft_loss,
                         )
+                        out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
+                        clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                         gen_loss_fn, _ = gan_loss_fns
                         disc_fake, fake_feats = discriminator(out_wav)
                         disc_real, real_feats = discriminator(clean_wav)
