@@ -536,8 +536,9 @@ class Augmentations:
         a: np.ndarray,
     ) -> np.ndarray:
         """Apply biquad filter to audio."""
-        result = scipy_signal.lfilter(b, a, audio)
-        return np.asarray(result, dtype=np.float32)
+        from df_mlx.augment_ext import biquad_filter as _biquad_bridge
+
+        return _biquad_bridge(audio, b, a)
 
     @staticmethod
     def high_pass(
