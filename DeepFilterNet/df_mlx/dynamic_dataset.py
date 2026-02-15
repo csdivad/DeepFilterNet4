@@ -1575,15 +1575,19 @@ class MLXDataStream:
         for try_idx in indices_to_try:
             sample = self.dataset.get_sample(try_idx)
             if sample is not None:
-                # mlx-data requires contiguous arrays with consistent dtypes
-                # numpy rfft returns complex128 -> real/imag are float64, must cast to float32
+                # compute_stft guarantees complex64, so .real/.imag are float32 views.
+                # np.require ensures C-contiguity without copying when already satisfied.
+                noisy_r = sample.noisy_spec.real
+                noisy_i = sample.noisy_spec.imag
+                clean_r = sample.clean_spec.real
+                clean_i = sample.clean_spec.imag
                 return {
-                    "noisy_real": np.ascontiguousarray(sample.noisy_spec.real, dtype=np.float32),
-                    "noisy_imag": np.ascontiguousarray(sample.noisy_spec.imag, dtype=np.float32),
-                    "clean_real": np.ascontiguousarray(sample.clean_spec.real, dtype=np.float32),
-                    "clean_imag": np.ascontiguousarray(sample.clean_spec.imag, dtype=np.float32),
-                    "feat_erb": np.ascontiguousarray(sample.feat_erb, dtype=np.float32),
-                    "feat_spec": np.ascontiguousarray(sample.feat_spec, dtype=np.float32),
+                    "noisy_real": np.require(noisy_r, dtype=np.float32, requirements="C"),
+                    "noisy_imag": np.require(noisy_i, dtype=np.float32, requirements="C"),
+                    "clean_real": np.require(clean_r, dtype=np.float32, requirements="C"),
+                    "clean_imag": np.require(clean_i, dtype=np.float32, requirements="C"),
+                    "feat_erb": np.require(sample.feat_erb, dtype=np.float32, requirements="C"),
+                    "feat_spec": np.require(sample.feat_spec, dtype=np.float32, requirements="C"),
                     "snr": np.array([sample.snr], dtype=np.float32),
                     "gain": np.array([sample.gain], dtype=np.float32),
                 }

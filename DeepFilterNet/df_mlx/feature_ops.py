@@ -31,7 +31,8 @@ def compute_stft(
     frames = np.lib.stride_tricks.as_strided(audio_padded, shape=shape, strides=strides, writeable=False)
 
     windowed = frames * window
-    return np.fft.rfft(windowed, n=fft_size, axis=-1)
+    spec = np.fft.rfft(windowed, n=fft_size, axis=-1)
+    return spec.astype(np.complex64) if spec.dtype != np.complex64 else spec
 
 
 def create_erb_filterbank(
