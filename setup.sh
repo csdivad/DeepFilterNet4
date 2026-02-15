@@ -50,6 +50,7 @@ BUILD_PYTHON=1
 BUILD_CARGO=1
 BUILD_PYDF=0
 BUILD_PYDF_DATA=0
+BUILD_PYDF_AUGMENT=0
 PYDF_DATA_FEATURES=""
 CARGO_FLAGS="${CARGO_FLAGS:---workspace --release --all-features}"
 USE_ALL=0
@@ -67,7 +68,7 @@ Python (default on):
   --python-bin PATH         Python interpreter to use (default: python3.10)
   --venv DIR                Virtualenv directory (default: .venv)
   --no-python               Skip Python environment setup
-  --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data
+  --all                     Convenience: enables extras dev,train,eval and builds pyDF + pyDF-data + pyDF-augment
 
 Cargo (default on):
   --cargo-flags "FLAGS"     Override cargo flags (default: --workspace --release --all-features)
@@ -79,6 +80,7 @@ Maturin bindings (optional):
   --with-pydf               Build/install pyDF via maturin develop --release -m pyDF/Cargo.toml
   --with-pydf-data          Build/install pyDF-data via maturin develop --release -m pyDF-data/Cargo.toml
   --pydf-data-hdf5-static   Build pyDF-data with --features hdf5-static (implies --with-pydf-data)
+  --with-pydf-augment       Build/install pyDF-augment via maturin develop --release -m pyDF-augment/Cargo.toml
 
 Diagnostic:
   --print-env               Print detected environment and exit (no build)
@@ -143,6 +145,10 @@ while [[ $# -gt 0 ]]; do
       PYDF_DATA_FEATURES="--features hdf5-static"
       shift 1
       ;;
+    --with-pydf-augment)
+      BUILD_PYDF_AUGMENT=1
+      shift 1
+      ;;
     --print-env)
       PRINT_ENV=1
       shift 1
@@ -168,6 +174,7 @@ if [[ $USE_ALL -eq 1 ]]; then
   USER_EXTRAS+=("dev" "train" "eval")
   BUILD_PYDF=1
   BUILD_PYDF_DATA=1
+  BUILD_PYDF_AUGMENT=1
 fi
 
 # ------------------------- print-env ------------------------- #
@@ -206,6 +213,7 @@ if [[ $PRINT_ENV -eq 1 ]]; then
   echo "  BUILD_CARGO:     $BUILD_CARGO"
   echo "  BUILD_PYDF:      $BUILD_PYDF"
   echo "  BUILD_PYDF_DATA: $BUILD_PYDF_DATA"
+  echo "  BUILD_PYDF_AUG:  $BUILD_PYDF_AUGMENT"
   exit 0
 fi
 
@@ -237,7 +245,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   if [[ $BUILD_CARGO -eq 1 ]]; then
     echo "[WOULD] cargo build $CARGO_FLAGS"
     if [[ $CARGO_INCLUDE_PYDF -eq 0 ]]; then
-      echo "        (excluding DeepFilterLib, DeepFilterDataLoader)"
+      echo "        (excluding DeepFilterLib, DeepFilterDataLoader, DeepFilterAugment)"
     fi
   else
     echo "[SKIP]  Cargo build (--no-cargo)"
@@ -249,6 +257,9 @@ if [[ $DRY_RUN -eq 1 ]]; then
   fi
   if [[ $BUILD_PYDF_DATA -eq 1 ]]; then
     echo "[WOULD] maturin develop --release ${PYDF_DATA_FEATURES:-} -m pyDF-data/Cargo.toml"
+  fi
+  if [[ $BUILD_PYDF_AUGMENT -eq 1 ]]; then
+    echo "[WOULD] maturin develop --release -m pyDF-augment/Cargo.toml"
   fi
 
   echo ""
@@ -373,7 +384,7 @@ if [[ $BUILD_CARGO -eq 1 ]]; then
   # Always exclude PyO3 extension modules from standalone cargo build.
   # They MUST be built via maturin which handles Python symbol resolution correctly.
   # The --cargo-include-pydf flag is deprecated and ignored for this reason.
-  build_flags+=(--exclude DeepFilterLib --exclude DeepFilterDataLoader)
+  build_flags+=(--exclude DeepFilterLib --exclude DeepFilterDataLoader --exclude DeepFilterAugment)
   if [[ $CARGO_INCLUDE_PYDF -eq 1 ]]; then
     echo "NOTE: --cargo-include-pydf is deprecated. PyO3 extensions are built via maturin only."
   fi
@@ -395,7 +406,7 @@ if [[ $BUILD_CARGO -eq 1 ]]; then
 fi
 
 # ------------------------- Maturin bindings ------------------------- #
-if [[ $BUILD_PYDF -eq 1 || $BUILD_PYDF_DATA -eq 1 ]]; then
+if [[ $BUILD_PYDF -eq 1 || $BUILD_PYDF_DATA -eq 1 || $BUILD_PYDF_AUGMENT -eq 1 ]]; then
   echo "==> Maturin builds"
   if ! command -v maturin >/dev/null 2>&1; then
     echo "maturin not found; installing into current environment"
@@ -441,6 +452,11 @@ if [[ $BUILD_PYDF_DATA -eq 1 ]]; then
     echo "  - Retrying pyDF-data (maturin develop ${pydf_data_retry_args[*]})"
     maturin develop "${pydf_data_retry_args[@]}"
   fi
+fi
+
+if [[ $BUILD_PYDF_AUGMENT -eq 1 ]]; then
+  echo "  - Building pyDF-augment (maturin develop --release -m pyDF-augment/Cargo.toml)"
+  maturin develop --release -m pyDF-augment/Cargo.toml
 fi
 
 echo "==> Done."

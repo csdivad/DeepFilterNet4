@@ -73,18 +73,29 @@ For general coding standards (formatting, linting, commit messages), see [CONTRI
 - `libDF/` contains pure Rust DSP and runtime code.
 - `pyDF/` wraps `libDF` as Python bindings via PyO3/Maturin.
 - `pyDF-data/` provides Rust-backed data loading for training.
+- `pyDF-augment/` provides Rust-accelerated augmentation ops (biquad, mix, combine).
 - Never put Python-specific logic in `libDF/`.
+
+**Build Rule:** All PyO3 `cdylib` crates (pyDF, pyDF-data, pyDF-augment) use
+`pyo3/extension-module` which defers CPython symbol resolution to load-time.
+They **must** be excluded from standalone `cargo build --workspace` and built
+only via `maturin develop`. The `setup.sh` script enforces this automatically
+with `--exclude` flags. When adding a new PyO3 crate, add its package name to
+the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 **Rationale:**
 
 - Keeps the Rust core portable (WebAssembly, C FFI, standalone CLI).
 - Python bindings are a separate concern that shouldn't pollute core algorithms.
+- `extension-module` prevents direct linking against libpython; the Python
+  interpreter provides those symbols when loading the `.so`/`.dylib` at runtime.
 
 **Related Files:**
 
 - [libDF/](../libDF/)
 - [pyDF/](../pyDF/)
 - [pyDF-data/](../pyDF-data/)
+- [pyDF-augment/](../pyDF-augment/)
 
 ---
 
