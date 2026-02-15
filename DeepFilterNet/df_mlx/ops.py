@@ -135,6 +135,48 @@ def stft(
         return mx.stack([real, imag], axis=-1)
 
 
+@lru_cache(maxsize=8)
+def _cached_window_norm(
+    window_type: str,
+    win_length: int,
+    n_fft: int,
+    hop_length: int,
+    num_frames: int,
+) -> mx.array:
+    """Precompute the window normalization array for iSTFT overlap-add.
+
+    The window-sum denominator is identical for all calls with the same
+    parameters, so caching avoids reconstructing it every forward pass.
+    """
+    win = get_window(window_type, win_length)
+    if win_length < n_fft:
+        pad_left = (n_fft - win_length) // 2
+        pad_right_w = n_fft - win_length - pad_left
+        win = mx.pad(win, [(pad_left, pad_right_w)])
+
+    win_sq = win * win
+    nover = n_fft // hop_length
+    output_length = (num_frames - 1) * hop_length + n_fft
+    window_sum = mx.zeros((1, output_length))
+
+    for g in range(nover):
+        num_group_frames = len(range(g, num_frames, nover))
+        if num_group_frames == 0:
+            continue
+        win_group = mx.broadcast_to(win_sq[None, :], (num_group_frames, n_fft)).reshape(1, num_group_frames * n_fft)
+        start_offset = g * hop_length
+        flat_len = num_group_frames * n_fft
+        pad_right = output_length - start_offset - flat_len
+        if pad_right >= 0:
+            win_group = mx.pad(win_group, [(0, 0), (start_offset, pad_right)])
+        else:
+            win_group = mx.pad(win_group, [(0, 0), (start_offset, 0)])[:, :output_length]
+        window_sum = window_sum + win_group
+
+    mx.eval(window_sum)  # Force evaluation for caching
+    return mx.maximum(window_sum, 1e-8)
+
+
 def istft(
     spec: Union[Tuple[mx.array, mx.array], mx.array],
     n_fft: int = 960,
@@ -202,9 +244,9 @@ def istft(
         # windowed samples can be reshaped into a contiguous block —
         # no scatter_add needed.  O(nover) ops instead of O(num_frames).
         output = mx.zeros((batch_size, output_length))
-        window_sum = mx.zeros((1, output_length))
 
-        win_sq_tile = win * win  # (n_fft,)
+        # Use cached window normalization — identical for same params
+        window_sum = _cached_window_norm(window, win_length, n_fft, hop_length, num_frames)
 
         for g in range(nover):
             group_frames = frames[:, g::nover, :]  # (batch, num_group_frames, n_fft)
@@ -215,23 +257,16 @@ def istft(
 
             flat = group_frames.reshape(batch_size, num_group_frames * n_fft)
 
-            win_group = mx.broadcast_to(win_sq_tile[None, :], (num_group_frames, n_fft)).reshape(
-                1, num_group_frames * n_fft
-            )
-
             start_offset = g * hop_length
             flat_len = num_group_frames * n_fft
             pad_right = output_length - start_offset - flat_len
 
             if pad_right >= 0:
                 flat = mx.pad(flat, [(0, 0), (start_offset, pad_right)])
-                win_group = mx.pad(win_group, [(0, 0), (start_offset, pad_right)])
             else:
                 flat = mx.pad(flat, [(0, 0), (start_offset, 0)])[:, :output_length]
-                win_group = mx.pad(win_group, [(0, 0), (start_offset, 0)])[:, :output_length]
 
             output = output + flat
-            window_sum = window_sum + win_group
     else:
         # Fallback: original loop for non-integer overlap ratios
         output = mx.zeros((batch_size, output_length))
