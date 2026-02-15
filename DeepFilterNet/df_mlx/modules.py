@@ -17,6 +17,7 @@ from typing import Optional, Tuple, Union, cast
 import mlx.core as mx
 import mlx.nn as nn
 
+from .ops import as_strided_frames
 from .ops import erb_fb as make_erb_fb
 
 # ============================================================================
@@ -514,10 +515,13 @@ class DfOp(nn.Module):
         df_real_pad = mx.pad(df_real, [(0, 0), (pad_past, pad_future), (0, 0)])
         df_imag_pad = mx.pad(df_imag, [(0, 0), (pad_past, pad_future), (0, 0)])
 
-        # Build all tap-aligned input windows at once:
-        # (batch, time, nb_df, df_order). This removes the O(time) Python loop.
-        in_real = mx.stack([df_real_pad[:, k : k + time, :] for k in range(self.df_order)], axis=-1)
-        in_imag = mx.stack([df_imag_pad[:, k : k + time, :] for k in range(self.df_order)], axis=-1)
+        # Build all tap-aligned input windows at once using vectorized striding.
+        # as_strided_frames(..., axis=1) returns shape (batch, time, df_order, nb_df),
+        # then transpose to (batch, time, nb_df, df_order) for coefficient alignment.
+        in_real = as_strided_frames(df_real_pad, frame_length=self.df_order, hop_length=1, axis=1)
+        in_imag = as_strided_frames(df_imag_pad, frame_length=self.df_order, hop_length=1, axis=1)
+        in_real = mx.transpose(in_real, (0, 1, 3, 2))
+        in_imag = mx.transpose(in_imag, (0, 1, 3, 2))
 
         # Filter coefficients: (batch, time, nb_df, df_order)
         coef_real = coef[:, :, :, :, 0]

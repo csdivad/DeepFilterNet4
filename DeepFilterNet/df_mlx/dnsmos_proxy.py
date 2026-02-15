@@ -125,39 +125,29 @@ class MelSpectrogram(nn.Module):
         batch_size = audio.shape[0]
         n_samples = audio.shape[1]
 
-        # STFT using strided view
         n_frames = (n_samples - self.n_fft) // self.hop_length + 1
+        if n_frames <= 0:
+            # Handle edge case of very short audio
+            return mx.zeros((batch_size, self.n_mels, 1), dtype=mx.float32)
 
-        mel_specs = []
-        for b in range(batch_size):
-            frames = []
-            for i in range(n_frames):
-                start = i * self.hop_length
-                frame = audio[b, start : start + self.n_fft] * self._window
-                frames.append(frame)
+        # Vectorized frame extraction for the entire batch.
+        frame_starts = mx.arange(n_frames) * self.hop_length
+        offsets = mx.arange(self.n_fft)
+        gather_indices = (frame_starts[:, None] + offsets[None, :]).reshape(-1)
 
-            if not frames:
-                # Handle edge case of very short audio
-                mel_specs.append(mx.zeros((self.n_mels, 1)))
-                continue
+        frames = mx.take(audio, gather_indices, axis=1).reshape(batch_size, n_frames, self.n_fft)
+        frames = frames * self._window
 
-            frames = mx.stack(frames, axis=0)  # [T', n_fft]
+        # FFT and power spectrogram
+        spec_complex = mx.fft.rfft(frames, axis=-1)  # [B, T', n_freqs]
+        power = mx.abs(spec_complex) ** 2
 
-            # FFT
-            spec_complex = mx.fft.rfft(frames)  # [T', n_freqs]
+        # Apply mel filterbank in batch form: [B, T', n_freqs] @ [n_freqs, n_mels] -> [B, T', n_mels]
+        mel_spec = mx.matmul(power, mx.transpose(self._mel_fb))
 
-            # Power spectrogram
-            power = mx.abs(spec_complex) ** 2  # [T', n_freqs]
-
-            # Apply mel filterbank: [n_mels, n_freqs] @ [T', n_freqs].T -> [n_mels, T']
-            mel_spec = mx.matmul(self._mel_fb, mx.transpose(power))
-
-            # Log scale with floor to avoid log(0)
-            mel_spec = mx.log(mx.maximum(mel_spec, 1e-10))
-
-            mel_specs.append(mel_spec)
-
-        return mx.stack(mel_specs, axis=0)  # [B, n_mels, T']
+        # Log scale with floor to avoid log(0), transpose to [B, n_mels, T']
+        mel_spec = mx.log(mx.maximum(mel_spec, 1e-10))
+        return mx.transpose(mel_spec, (0, 2, 1))
 
 
 class ConvBlock(nn.Module):
