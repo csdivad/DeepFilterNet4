@@ -147,8 +147,7 @@ class MelSpectrogram(nn.Module):
         # FFT and power spectrogram
         spec_complex = mx.fft.rfft(frames, axis=-1)  # [B, T', n_freqs]
 
-        if self._use_kernel and not self.training:
-            # Metal kernels do not implement VJP; use only at inference.
+        if self._use_kernel:
             spec_real = mx.real(spec_complex)
             spec_imag = mx.imag(spec_complex)
             mel_spec = mel_power_log_kernel(spec_real, spec_imag, self._mel_fb, batch_size, n_frames, self.n_mels)

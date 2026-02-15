@@ -403,24 +403,48 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--config"], "dataset.config", getattr(args, "config", None)),
         (["--train-config"], "training.train_config", getattr(args, "train_config", None)),
         (["--snr-range"], "dataset.snr_range", getattr(args, "snr_range", None)),
-        (["--snr-range-extreme"], "dataset.snr_range_extreme", getattr(args, "snr_range_extreme", None)),
-        (["--snr-range-very-low"], "dataset.snr_range_very_low", getattr(args, "snr_range_very_low", None)),
+        (
+            ["--snr-range-extreme"],
+            "dataset.snr_range_extreme",
+            getattr(args, "snr_range_extreme", None),
+        ),
+        (
+            ["--snr-range-very-low"],
+            "dataset.snr_range_very_low",
+            getattr(args, "snr_range_very_low", None),
+        ),
         (["--p-extreme-snr"], "dataset.p_extreme_snr", getattr(args, "p_extreme_snr", None)),
         (["--p-very-low-snr"], "dataset.p_very_low_snr", getattr(args, "p_very_low_snr", None)),
-        (["--p-interfer-speech"], "dataset.p_interfer_speech", getattr(args, "p_interfer_speech", None)),
+        (
+            ["--p-interfer-speech"],
+            "dataset.p_interfer_speech",
+            getattr(args, "p_interfer_speech", None),
+        ),
         (
             ["--curriculum-warmup-epochs"],
             "training.curriculum_warmup_epochs",
             getattr(args, "curriculum_warmup_epochs", None),
         ),
-        (["--speech-gain-range"], "dataset.speech_gain_range", getattr(args, "speech_gain_range", None)),
-        (["--noise-gain-range"], "dataset.noise_gain_range", getattr(args, "noise_gain_range", None)),
+        (
+            ["--speech-gain-range"],
+            "dataset.speech_gain_range",
+            getattr(args, "speech_gain_range", None),
+        ),
+        (
+            ["--noise-gain-range"],
+            "dataset.noise_gain_range",
+            getattr(args, "noise_gain_range", None),
+        ),
         (["--p-reverb"], "augmentation.p_reverb", getattr(args, "p_reverb", None)),
         (["--p-clipping"], "augmentation.p_clipping", getattr(args, "p_clipping", None)),
         (["--epochs"], "training.epochs", getattr(args, "epochs", None)),
         (["--batch-size"], "training.batch_size", getattr(args, "batch_size", None)),
         (["--learning-rate"], "training.learning_rate", getattr(args, "learning_rate", None)),
-        (["--learning-rate-min"], "training.learning_rate_min", getattr(args, "learning_rate_min", None)),
+        (
+            ["--learning-rate-min"],
+            "training.learning_rate_min",
+            getattr(args, "learning_rate_min", None),
+        ),
         (["--weight-decay"], "training.weight_decay", getattr(args, "weight_decay", None)),
         (["--warmup-epochs"], "training.warmup_epochs", getattr(args, "warmup_epochs", None)),
         (["--patience"], "training.patience", getattr(args, "patience", None)),
@@ -434,23 +458,55 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--seed"], "training.seed", getattr(args, "seed", None)),
         (["--num-workers"], "dataloader.num_workers", getattr(args, "num_workers", None)),
         (["--prefetch-size"], "dataloader.prefetch_size", getattr(args, "prefetch_size", None)),
-        (["--max-train-batches"], "dataloader.max_train_batches", getattr(args, "max_train_batches", None)),
-        (["--max-valid-batches"], "dataloader.max_valid_batches", getattr(args, "max_valid_batches", None)),
+        (
+            ["--max-train-batches"],
+            "dataloader.max_train_batches",
+            getattr(args, "max_train_batches", None),
+        ),
+        (
+            ["--max-valid-batches"],
+            "dataloader.max_valid_batches",
+            getattr(args, "max_valid_batches", None),
+        ),
         (["--checkpoint-dir"], "checkpoint.checkpoint_dir", getattr(args, "checkpoint_dir", None)),
         (["--save-strategy"], "checkpoint.save_strategy", getattr(args, "save_strategy", None)),
         (["--save-steps"], "checkpoint.save_steps", getattr(args, "save_steps", None)),
-        (["--save-total-limit"], "checkpoint.save_total_limit", getattr(args, "save_total_limit", None)),
-        (["--checkpoint-batches"], "checkpoint.checkpoint_batches", getattr(args, "checkpoint_batches", None)),
+        (
+            ["--save-total-limit"],
+            "checkpoint.save_total_limit",
+            getattr(args, "save_total_limit", None),
+        ),
+        (
+            ["--checkpoint-batches"],
+            "checkpoint.checkpoint_batches",
+            getattr(args, "checkpoint_batches", None),
+        ),
         (["--validate-every"], "checkpoint.validate_every", getattr(args, "validate_every", None)),
         (["--resume"], "checkpoint.resume", getattr(args, "resume", None)),
         (["--resume-data"], "checkpoint.resume_data", getattr(args, "resume_data", None)),
         (["--check-chkpts"], "checkpoint.check_chkpts", getattr(args, "check_chkpts", None)),
-        (["--backbone", "--backbone-type"], "model.backbone_type", getattr(args, "backbone_type", None)),
+        (
+            ["--backbone", "--backbone-type"],
+            "model.backbone_type",
+            getattr(args, "backbone_type", None),
+        ),
         (["--model-variant"], "model.variant", getattr(args, "model_variant", None)),
         (["--dynamic-loss"], "loss.dynamic_loss", getattr(args, "dynamic_loss", None)),
-        (["--awesome-loss-weight"], "loss.awesome.loss_weight", getattr(args, "awesome_loss_weight", None)),
-        (["--awesome-mask-sharpness"], "loss.awesome.mask_sharpness", getattr(args, "awesome_mask_sharpness", None)),
-        (["--awesome-warmup-steps"], "loss.awesome.warmup_steps", getattr(args, "awesome_warmup_steps", None)),
+        (
+            ["--awesome-loss-weight"],
+            "loss.awesome.loss_weight",
+            getattr(args, "awesome_loss_weight", None),
+        ),
+        (
+            ["--awesome-mask-sharpness"],
+            "loss.awesome.mask_sharpness",
+            getattr(args, "awesome_mask_sharpness", None),
+        ),
+        (
+            ["--awesome-warmup-steps"],
+            "loss.awesome.warmup_steps",
+            getattr(args, "awesome_warmup_steps", None),
+        ),
         (["--mrstft-factor"], "loss.mrstft.factor", getattr(args, "mrstft_factor", None)),
         (["--mrstft-gamma"], "loss.mrstft.gamma", getattr(args, "mrstft_gamma", None)),
         (["--mrstft-f-complex"], "loss.mrstft.f_complex", getattr(args, "mrstft_f_complex", None)),
@@ -465,13 +521,25 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--gan-mpd-periods"], "gan.mpd_periods", getattr(args, "gan_mpd_periods", None)),
         (["--gan-msd-scales"], "gan.msd_scales", getattr(args, "gan_msd_scales", None)),
         (["--gan-disc-lr"], "gan.disc_lr", getattr(args, "gan_disc_lr", None)),
-        (["--gan-disc-weight-decay"], "gan.disc_weight_decay", getattr(args, "gan_disc_weight_decay", None)),
+        (
+            ["--gan-disc-weight-decay"],
+            "gan.disc_weight_decay",
+            getattr(args, "gan_disc_weight_decay", None),
+        ),
         (["--gan-disc-grad-clip"], "gan.disc_grad_clip", getattr(args, "gan_disc_grad_clip", None)),
-        (["--gan-disc-update-freq"], "gan.disc_update_freq", getattr(args, "gan_disc_update_freq", None)),
+        (
+            ["--gan-disc-update-freq"],
+            "gan.disc_update_freq",
+            getattr(args, "gan_disc_update_freq", None),
+        ),
         (["--vad-loss-weight"], "vad.loss_weight", getattr(args, "vad_loss_weight", None)),
         (["--vad-threshold"], "vad.threshold", getattr(args, "vad_threshold", None)),
         (["--vad-margin"], "vad.margin", getattr(args, "vad_margin", None)),
-        (["--vad-speech-loss-weight"], "vad.speech_loss_weight", getattr(args, "vad_speech_loss_weight", None)),
+        (
+            ["--vad-speech-loss-weight"],
+            "vad.speech_loss_weight",
+            getattr(args, "vad_speech_loss_weight", None),
+        ),
         (["--vad-warmup-epochs"], "vad.warmup_epochs", getattr(args, "vad_warmup_epochs", None)),
         (["--vad-snr-gate"], "vad.snr_gate_db", getattr(args, "vad_snr_gate", None)),
         (["--vad-snr-gate-width"], "vad.snr_gate_width", getattr(args, "vad_snr_gate_width", None)),
@@ -482,11 +550,27 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         (["--vad-eval-mode"], "vad.eval.mode", getattr(args, "vad_eval_mode", None)),
         (["--vad-eval-every"], "vad.eval.every", getattr(args, "vad_eval_every", None)),
         (["--vad-eval-batches"], "vad.eval.batches", getattr(args, "vad_eval_batches", None)),
-        (["--vad-eval-max-seconds"], "vad.eval.max_seconds", getattr(args, "vad_eval_max_seconds", None)),
-        (["--vad-silero-model-path"], "vad.eval.silero_model_path", getattr(args, "vad_silero_model_path", None)),
-        (["--vad-silero-sample-rate"], "vad.eval.silero_sample_rate", getattr(args, "vad_silero_sample_rate", None)),
+        (
+            ["--vad-eval-max-seconds"],
+            "vad.eval.max_seconds",
+            getattr(args, "vad_eval_max_seconds", None),
+        ),
+        (
+            ["--vad-silero-model-path"],
+            "vad.eval.silero_model_path",
+            getattr(args, "vad_silero_model_path", None),
+        ),
+        (
+            ["--vad-silero-sample-rate"],
+            "vad.eval.silero_sample_rate",
+            getattr(args, "vad_silero_sample_rate", None),
+        ),
         (["--vad-train-prob"], "vad.train.prob", getattr(args, "vad_train_prob", None)),
-        (["--vad-train-every-steps"], "vad.train.every_steps", getattr(args, "vad_train_every_steps", None)),
+        (
+            ["--vad-train-every-steps"],
+            "vad.train.every_steps",
+            getattr(args, "vad_train_every_steps", None),
+        ),
         (["--eval-sisdr"], "metrics.eval_sisdr", getattr(args, "eval_sisdr", None)),
         (["-v", "--verbose"], "debug.verbose", getattr(args, "verbose", None)),
         (["--debug-numerics"], "debug.debug_numerics", getattr(args, "debug_numerics", None)),
@@ -495,7 +579,11 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
             "debug.debug_numerics_fail_fast",
             not getattr(args, "debug_numerics_no_fail_fast", False),
         ),
-        (["--debug-numerics-every"], "debug.debug_numerics_every", getattr(args, "debug_numerics_every", None)),
+        (
+            ["--debug-numerics-every"],
+            "debug.debug_numerics_every",
+            getattr(args, "debug_numerics_every", None),
+        ),
         (
             ["--debug-numerics-dump-dir"],
             "debug.debug_numerics_dump_dir",
@@ -2979,8 +3067,7 @@ def train(
 
             from df_mlx.ops import istft
 
-            # Metal kernels lack VJP — disable inside the gradient path.
-            mrstft_istft = partial(istft, use_metal_kernel=False)
+            mrstft_istft = partial(istft)
             mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
             mrstft_loss_fn = MultiResolutionSTFTLoss(
                 fft_sizes=tuple(mrstft_cfg.fft_sizes),
@@ -3009,13 +3096,16 @@ def train(
     if gan_enabled:
         from functools import partial
 
-        from df_mlx.discriminator import CombinedDiscriminator, MultiPeriodDiscriminator, MultiScaleDiscriminator
+        from df_mlx.discriminator import (
+            CombinedDiscriminator,
+            MultiPeriodDiscriminator,
+            MultiScaleDiscriminator,
+        )
         from df_mlx.loss import FeatureMatchingLoss, discriminator_loss, generator_loss
         from df_mlx.ops import istft
 
         if gan_istft is None:
-            # Metal kernels lack VJP — disable inside the gradient path.
-            gan_istft = partial(istft, use_metal_kernel=False)
+            gan_istft = partial(istft)
 
         mpd_periods = tuple(gan_mpd_periods) if gan_mpd_periods else (2, 3, 5, 7, 11)
         if gan_disc_type == "mpd":
@@ -3157,7 +3247,7 @@ def train(
         "mrstft_gamma": mrstft_cfg.gamma if mrstft_cfg is not None else 1.0,
         "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
         "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
-        "mrstft_hop_sizes": list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None,
+        "mrstft_hop_sizes": (list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None),
         "gan_enabled": gan_enabled,
         "gan_start_epoch": gan_start_epoch,
         "gan_ramp_epochs": gan_ramp_epochs,
@@ -5923,7 +6013,7 @@ def train(
                         awesome=(
                             f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
                         ),
-                        mask=f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00",
+                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
                         fwd=f"{fwd_time * 1000:.0f}ms",
@@ -5943,7 +6033,7 @@ def train(
                         awesome=(
                             f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
                         ),
-                        mask=f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00",
+                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
                         p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
                         p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",

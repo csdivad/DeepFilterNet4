@@ -497,52 +497,50 @@ print(augment_capabilities())     # {'rust_extension': False, 'biquad_backend': 
 
 ---
 
-### Metal Kernels: Inference-Only Dispatch
+### Metal Kernels: Differentiable via Custom VJP
 
-- **Short Name:** metal-kernel-training-guard
+- **Short Name:** metal-kernel-custom-vjp
 - **Status:** REQUIRED
 - **Scope:** All `df_mlx/` code that calls `mx.fast.metal_kernel`
 
-**Rule:** Custom Metal kernels (`mx.fast.metal_kernel`) must NEVER execute on the
-`nn.value_and_grad` computation graph.  They do not implement VJP (vector-Jacobian
-product), and any `CustomKernel` primitive on the backward pass raises
-`ValueError: [Primitive::vjp] Not implemented for CustomKernel.`
+**Rule:** Custom Metal kernels (`mx.fast.metal_kernel`) must be wrapped with
+`mx.custom_function` and a corresponding `.vjp` decorator so they are fully
+differentiable and can execute on the `nn.value_and_grad` computation graph
+during training.
 
-**Implementation pattern for `nn.Module` subclasses:**
-
-```python
-if self.use_metal_kernel and not self.training:
-    # Metal kernel path — inference only
-    result = my_metal_kernel(...)
-else:
-    # Differentiable pure-MLX fallback
-    result = my_fallback(...)
-```
-
-**Implementation pattern for free functions (e.g. `istft`):**
+**Implementation pattern:**
 
 ```python
-from functools import partial
+@mx.custom_function
+def _my_custom(input_a, input_b):
+    """Forward: dispatch the Metal kernel."""
+    return _my_metal_kernel_dispatch(input_a, input_b)
 
-# When binding an istft reference for use inside loss_fn / value_and_grad:
-grad_safe_istft = partial(istft, use_metal_kernel=False)
+@_my_custom.vjp
+def _my_vjp(primals, cotangents, _outputs):
+    """Backward: pure-MLX gradient computation."""
+    a, b = primals
+    d_out = cotangents
+    # ... compute d_a, d_b using standard MLX ops ...
+    return d_a, d_b
 ```
 
 **Rationale:**
 
 - MLX's `mx.fast.metal_kernel` creates opaque `CustomKernel` primitives with no
-  registered VJP.  This is an MLX framework limitation, not a bug in our kernels.
-- Training correctness requires differentiable fallbacks; Metal kernels provide
-  inference speedup only.
-- The `nn.Module.training` flag is set by `model.train()` / `model.eval()` and
-  propagates recursively to all child modules, so the guard is automatic.
+  automatic VJP.  Wrapping with `mx.custom_function` provides a custom backward
+  pass so the Metal kernel can be used in both training and inference.
+- Forward passes use the fused Metal kernel for speed; backward passes use
+  pure-MLX ops derived from the mathematical chain rule.
 - All three kernels (DfOp gather+CMAC, iSTFT overlap-add, mel power+log) have
-  numerically equivalent pure-MLX fallbacks verified by tests.
+  VJP implementations verified against pure-MLX fallback gradients via tests.
+- The `_dfop_fallback` / vectorized-overlap-add / power+mel+log pure-MLX paths
+  remain as fallbacks for platforms without Metal kernel support.
 
 **Related Files:**
 
-- [DeepFilterNet/df_mlx/kernels.py](../DeepFilterNet/df_mlx/kernels.py) — Metal kernel source
-- [DeepFilterNet/df_mlx/modules.py](../DeepFilterNet/df_mlx/modules.py) — `DfOp` training guard
-- [DeepFilterNet/df_mlx/ops.py](../DeepFilterNet/df_mlx/ops.py) — `istft` `use_metal_kernel` flag
-- [DeepFilterNet/df_mlx/dnsmos_proxy.py](../DeepFilterNet/df_mlx/dnsmos_proxy.py) — `MelSpectrogram` training guard
-- [DeepFilterNet/tests/test_metal_kernel_training_guard.py](../DeepFilterNet/tests/test_metal_kernel_training_guard.py)
+- [DeepFilterNet/df_mlx/kernels.py](../DeepFilterNet/df_mlx/kernels.py) — Metal kernel source + VJP implementations
+- [DeepFilterNet/df_mlx/modules.py](../DeepFilterNet/df_mlx/modules.py) — `DfOp` uses Metal kernel in all modes
+- [DeepFilterNet/df_mlx/ops.py](../DeepFilterNet/df_mlx/ops.py) — `istft` Metal kernel path (differentiable)
+- [DeepFilterNet/df_mlx/dnsmos_proxy.py](../DeepFilterNet/df_mlx/dnsmos_proxy.py) — `MelSpectrogram` uses Metal kernel in all modes
+- [DeepFilterNet/tests/test_metal_kernel_training_guard.py](../DeepFilterNet/tests/test_metal_kernel_training_guard.py) — VJP correctness tests

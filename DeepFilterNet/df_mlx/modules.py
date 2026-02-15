@@ -529,8 +529,7 @@ class DfOp(nn.Module):
         coef_r = coef[:, :, :, :, 0]
         coef_i = coef[:, :, :, :, 1]
 
-        if self.use_metal_kernel and not self.training:
-            # Metal kernels do not implement VJP; use only at inference.
+        if self.use_metal_kernel:
             df_out_real, df_out_imag = df_op_kernel(
                 spec_real_pad=df_real_pad,
                 spec_imag_pad=df_imag_pad,
