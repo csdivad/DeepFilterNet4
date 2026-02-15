@@ -46,6 +46,9 @@ import mlx.core as mx
 import numpy as np
 from scipy import signal as scipy_signal
 
+from .augment_ext import biquad_filter as _ext_biquad_filter
+from .augment_ext import combine_noises as _ext_combine_noises
+from .augment_ext import mix_audio as _ext_mix_audio
 from .feature_ops import compute_df_features, compute_erb_features, compute_stft, create_erb_filterbank
 from .file_lists import read_file_list as _read_file_list
 
@@ -536,9 +539,7 @@ class Augmentations:
         a: np.ndarray,
     ) -> np.ndarray:
         """Apply biquad filter to audio."""
-        from df_mlx.augment_ext import biquad_filter as _biquad_bridge
-
-        return _biquad_bridge(audio, b, a)
+        return _ext_biquad_filter(audio, b, a)
 
     @staticmethod
     def high_pass(
@@ -706,7 +707,7 @@ def mix_audio(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Mix clean speech with noise at specified SNR.
 
-    This matches the Rust mix_audio_signal function.
+    Routes through Rust extension when available for performance.
 
     Args:
         clean: Clean speech signal
@@ -717,38 +718,7 @@ def mix_audio(
     Returns:
         Tuple of (clean_out, noise_out, noisy_mixture)
     """
-    # Apply gain to speech
-    gain = 10 ** (gain_db / 20)
-    clean_out = clean * gain
-
-    # Match lengths
-    if len(noise) < len(clean_out):
-        repeats = int(np.ceil(len(clean_out) / len(noise)))
-        noise = np.tile(noise, repeats)
-    noise = noise[: len(clean_out)]
-
-    # Compute mixing factor for target SNR
-    clean_power = np.mean(clean_out**2) + 1e-10
-    noise_power = np.mean(noise**2) + 1e-10
-    target_noise_power = clean_power / (10 ** (snr_db / 10))
-    mix_factor = np.sqrt(target_noise_power / noise_power)
-
-    noise_scaled = noise * mix_factor
-    noisy = clean_out + noise_scaled
-
-    # Guard against clipping
-    max_val = max(
-        np.abs(clean_out).max(),
-        np.abs(noise_scaled).max(),
-        np.abs(noisy).max(),
-    )
-    if max_val > 1.0 - 1e-10:
-        scale = 1.0 / (max_val + 1e-10)
-        clean_out = clean_out * scale
-        noise_scaled = noise_scaled * scale
-        noisy = noisy * scale
-
-    return clean_out, noise_scaled, noisy
+    return _ext_mix_audio(clean, noise, snr_db, gain_db)
 
 
 def combine_noises(
@@ -758,6 +728,8 @@ def combine_noises(
 ) -> np.ndarray:
     """Combine multiple noise signals into one.
 
+    Routes through Rust extension when available for performance.
+
     Args:
         noises: List of noise signals
         target_len: Target output length
@@ -766,34 +738,7 @@ def combine_noises(
     Returns:
         Combined noise signal
     """
-    if not noises:
-        return np.zeros(target_len, dtype=np.float32)
-
-    if gains_db is None:
-        gains_db = [0.0] * len(noises)
-
-    combined = np.zeros(target_len, dtype=np.float32)
-
-    for noise, gain_db in zip(noises, gains_db):
-        gain = 10 ** (gain_db / 20)
-
-        # Random start position for this noise
-        if len(noise) < target_len:
-            # Repeat noise to fill
-            repeats = int(np.ceil(target_len / len(noise)))
-            noise = np.tile(noise, repeats)
-
-        # Random offset
-        max_offset = len(noise) - target_len
-        if max_offset > 0:
-            offset = random.randint(0, max_offset)
-            noise = noise[offset : offset + target_len]
-        else:
-            noise = noise[:target_len]
-
-        combined += noise * gain
-
-    return combined
+    return _ext_combine_noises(noises, target_len, gains_db)
 
 
 @dataclass

@@ -427,3 +427,59 @@ _None documented yet._
 - **2026-02-13**: Added epoch-boundary compiled→eager training mode convention for delayed GAN activation.
 - **2026-02-14**: Added sync mode selection, compile boundary shape invariants, hardware profile presets, performance regression gate, and GAN-phase eager mode conventions.
 - **2026-02-15**: Added GAN discriminator optimizer-step cadence and GAN mixed-precision waveform-path conventions to prevent GAN-onset OOM under gradient accumulation.
+- **2026-02-15**: Added Augmentation Extension Fallback Architecture convention documenting `augment_ext.py` bridge pattern and `pyDF-augment` Rust extension.
+
+---
+
+### Augmentation Extension Fallback Architecture
+
+**Status:** REQUIRED
+
+**Scope:** `DeepFilterNet/df_mlx/augment_ext.py`, `DeepFilterNet/df_mlx/dynamic_dataset.py`, `pyDF-augment/`
+
+**Rule:**
+
+- All augmentation operations (`biquad_filter`, `mix_audio`, `combine_noises`) MUST route through the bridge module `df_mlx.augment_ext`.
+- Callers must never check `_RUST_AVAILABLE` directly — the bridge handles Rust/Python dispatch internally.
+- When the Rust extension `libdfaugment` is installed, the bridge uses accelerated Rust implementations; otherwise it falls back transparently to pure-Python/SciPy.
+
+**Extension Location:** `pyDF-augment/` — a Maturin-based Rust crate exposing `libdfaugment`.
+
+**Building the Extension:**
+```bash
+cd pyDF-augment && maturin develop --release
+```
+
+**How Fallback Works:**
+- At import time, `augment_ext.py` attempts `from libdfaugment import ...`.
+- If the import succeeds, `_RUST_AVAILABLE = True` and Rust functions are used.
+- If the import fails, `_RUST_AVAILABLE = False` and Python fallbacks are used.
+- The dispatch is transparent to callers — API signatures are identical.
+
+**Accelerated Operations:**
+
+| Operation | Rust backend | Fallback backend |
+|-----------|-------------|-----------------|
+| `biquad_filter` | `libdfaugment.biquad_filter` | `scipy.signal.lfilter` |
+| `mix_audio` | `libdfaugment.mix_audio` | NumPy arithmetic |
+| `combine_noises` | `libdfaugment.combine_noises` | NumPy arithmetic |
+
+**Checking Active Backend:**
+```python
+from df_mlx.augment_ext import augment_capabilities, rust_augment_available
+print(rust_augment_available())   # True/False
+print(augment_capabilities())     # {'rust_extension': False, 'biquad_backend': 'scipy', ...}
+```
+
+**Rationale:**
+
+- Centralised dispatch avoids scattered `try/except ImportError` blocks across the codebase.
+- Pure-Python fallbacks guarantee the training pipeline always works, even without compiling the Rust extension.
+- A single bridge module makes it easy to add new accelerated operations.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/augment_ext.py](../DeepFilterNet/df_mlx/augment_ext.py)
+- [DeepFilterNet/df_mlx/dynamic_dataset.py](../DeepFilterNet/df_mlx/dynamic_dataset.py)
+- [DeepFilterNet/tests/test_guarded_fallback.py](../DeepFilterNet/tests/test_guarded_fallback.py)
+- `pyDF-augment/` (Rust extension crate)

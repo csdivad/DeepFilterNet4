@@ -6,10 +6,13 @@ extension when available, falling back to pure-Python / SciPy implementations.
 
 from __future__ import annotations
 
+import logging
 import random
 from typing import List, Optional, Tuple
 
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 _RUST_AVAILABLE = False
 try:
@@ -21,10 +24,25 @@ try:
 except ImportError:
     pass
 
+if _RUST_AVAILABLE:
+    _log.info("Rust augmentation extension (libdfaugment) loaded — using accelerated path")
+else:
+    _log.debug("libdfaugment not available — using Python/SciPy fallback for augmentations")
+
 
 def rust_augment_available() -> bool:
     """Return ``True`` if the Rust augmentation extension is loaded."""
     return _RUST_AVAILABLE
+
+
+def augment_capabilities() -> dict:
+    """Return a dict summarizing which augmentation backends are active."""
+    return {
+        "rust_extension": _RUST_AVAILABLE,
+        "biquad_backend": "rust" if _RUST_AVAILABLE else "scipy",
+        "mix_backend": "rust" if _RUST_AVAILABLE else "numpy",
+        "combine_backend": "rust" if _RUST_AVAILABLE else "numpy",
+    }
 
 
 def biquad_filter(
