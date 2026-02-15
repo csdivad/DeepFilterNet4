@@ -182,13 +182,21 @@ If FURTHER STUDY:
 
 ## 11. Implementation Notes
 
-- The actual compiled-GAN code paths are **NOT in scope** for this document.
-  This spec defines the experiment framework only.
-- Implementation should reuse the existing `compiled_step` and
+- **Variant B (gen-only compiled) is implemented** in `train_dynamic.py`.
+  The implementation creates a separate `loss_fn_gan` with GAN generator
+  paths always active (hardcoded True), avoiding the `mx.compile` trace-time
+  Python boolean problem where `gan_active` would be captured as False.
+- Implementation reuses the existing `compiled_step` and
   `compiled_loss_and_grad_step` patterns from pre-GAN training
-  (`COMPILE_BOUNDARY_AUDIT.md` §1).
-- The discriminator compiled path (Variant C) must handle the per-step
-  `mx.eval()` sync currently at L4983 — either by moving it outside the
-  compiled graph or by demonstrating it is unnecessary.
-- All experiment code should be gated behind `gan.experimental_compile` and
+  (`COMPILE_BOUNDARY_AUDIT.md` §1), with GAN-specific variants
+  (`compiled_gan_step`, `compiled_gan_loss_and_grad_step`).
+- The discriminator update remains fully eager with its existing per-step
+  `mx.eval()` sync, unchanged from production.
+- A one-time correctness verification runs on the first compiled-GAN step:
+  it compares the compiled loss against an eager forward pass and logs
+  PASS/FAIL with tolerances (rtol=1e-4, atol=1e-5).
+- The `resolve_epoch_train_mode()` function accepts
+  `experimental_compiled_gan` to relax the one-way COMPILED→EAGER invariant.
+- All experiment code is gated behind `gan.experimental_compile` and
   removable without affecting the production path.
+- Variants C and D are **NOT yet implemented** and would require further work.

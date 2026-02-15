@@ -1995,19 +1995,21 @@ def resolve_epoch_train_mode(
     gan_enabled: bool,
     gan_active: bool,
     previous_mode: Literal["COMPILED", "EAGER"] | None,
+    experimental_compiled_gan: bool = False,
 ) -> tuple[Literal["COMPILED", "EAGER"], bool]:
     """Resolve training mode for an epoch with one-way COMPILED->EAGER semantics.
 
     Rules:
     - If compiled mode is globally blocked (debug, nan-skip, grad accumulation), use EAGER.
-    - If GAN is active for this epoch, use EAGER.
-    - Once EAGER is entered, do not switch back to COMPILED in later epochs.
+    - If GAN is active for this epoch, use EAGER — unless experimental_compiled_gan is True.
+    - Once EAGER is entered, do not switch back to COMPILED in later epochs
+      (unless experimental_compiled_gan keeps compiled mode through GAN activation).
     """
-    if previous_mode == _TRAIN_MODE_EAGER:
+    if not experimental_compiled_gan and previous_mode == _TRAIN_MODE_EAGER:
         return _TRAIN_MODE_EAGER, False
     if not compiled_step_base_enabled:
         return _TRAIN_MODE_EAGER, False
-    if gan_enabled and gan_active:
+    if gan_enabled and gan_active and not experimental_compiled_gan:
         return _TRAIN_MODE_EAGER, False
     return _TRAIN_MODE_COMPILED, True
 
@@ -2684,6 +2686,7 @@ def train(
     gan_disc_weight_decay: float = 0.0,
     gan_disc_grad_clip: float = 1.0,
     gan_disc_update_freq: int = 1,
+    experimental_compiled_gan: bool = False,
     vad_proxy_enabled: bool = True,
     vad_loss_weight: float = 0.05,
     vad_threshold: float = 0.6,
@@ -3161,6 +3164,7 @@ def train(
         "gan_disc_weight_decay": gan_disc_weight_decay,
         "gan_disc_grad_clip": gan_disc_grad_clip,
         "gan_disc_update_freq": gan_disc_update_freq,
+        "experimental_compiled_gan": experimental_compiled_gan,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
         "vad_margin": vad_margin,
@@ -3609,6 +3613,168 @@ def train(
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
+    # -- Experimental compiled-GAN support ----------------------------------
+    # When experimental_compiled_gan is True, create a separate loss function
+    # with GAN paths always active (hardcoded True instead of the `gan_active`
+    # closure variable). mx.compile traces Python booleans at trace time, so
+    # `if gan_active` in the original loss_fn would be captured as False during
+    # pre-GAN tracing and never re-traced when it flips to True. A separate
+    # function ensures the compiled graph always includes generator adversarial
+    # loss paths.
+    loss_and_grad_gan = None
+    _compiled_gan_correctness_verified = False
+
+    if experimental_compiled_gan and gan_enabled:
+        print("  [EXPERIMENTAL] Compiled-GAN experiment enabled (gen-only, Variant B)")
+
+        def loss_fn_gan(
+            model,
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+        ):
+            """Loss function with GAN generator paths always active (compiled-GAN experiment)."""
+            noisy_spec = (noisy_real, noisy_imag)
+            target_spec = (clean_real, clean_imag)
+
+            out = model(noisy_spec, feat_erb, feat_spec)
+            spec_loss = spectral_loss(out, target_spec)
+            total_loss = spec_loss
+
+            out_wav = None
+            clean_wav = None
+            # GAN always active: always compute waveforms
+            if gan_istft is not None:
+                out_wav, clean_wav = specs_to_wavs(
+                    out,
+                    target_spec,
+                    istft_fn=gan_istft,
+                    n_fft=config.fft_size,
+                    hop_length=config.hop_size,
+                    target_len=gan_target_len,
+                    force_fp32=use_mrstft_loss,
+                )
+
+            if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
+                mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
+                total_loss = total_loss + mrstft_loss
+
+            # GAN generator loss — always active (hardcoded)
+            if gan_loss_fns is not None and discriminator is not None and out_wav is not None:
+                gen_loss_fn, _ = gan_loss_fns
+                gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
+                gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+                disc_fake, fake_feats = discriminator(gan_out_wav)
+                disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
+                gan_g_loss = gen_loss_fn(disc_fake)
+                total_loss = total_loss + gan_weight * gan_g_loss
+                if feature_match_loss is not None and gan_fm_weight > 0:
+                    fm_loss = feature_match_loss(real_feats, fake_feats)
+                    total_loss = total_loss + fm_weight * fm_loss
+
+            if use_awesome_loss:
+                awesome_loss, _, _, _, _, _, _, _, _, _, _, _ = _compute_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                )
+                total_loss = total_loss + awesome_weight * awesome_loss
+
+            if use_pipeline_awesome_loss:
+                pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_pipeline_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                )
+                total_loss = total_loss + awesome_weight * pipeline_loss
+
+            if use_vad_loss:
+                vad_loss, _, _, gate = _compute_vad_loss(
+                    clean_real,
+                    clean_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_threshold,
+                    vad_margin,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_z_threshold,
+                    vad_z_slope,
+                )
+                speech_loss = mx.array(0.0)
+                if vad_speech_loss_weight > 0:
+                    speech_loss = _compute_speech_band_logmag_loss(
+                        clean_real,
+                        clean_imag,
+                        out[0],
+                        out[1],
+                        vad_band_mask,
+                        vad_band_bins,
+                        gate,
+                    )
+                total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
+
+            if use_vad_train_reg:
+                vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
+                    clean_real,
+                    clean_imag,
+                    noisy_real,
+                    noisy_imag,
+                    out[0],
+                    out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    vad_threshold,
+                    vad_margin,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                )
+                total_loss = total_loss + vad_reg_weight * vad_reg_loss
+
+            return total_loss, out
+
+        loss_and_grad_gan = nn.value_and_grad(model, loss_fn_gan)
+
     def _diagnose_nonfinite(
         noisy_real: mx.array,
         noisy_imag: mx.array,
@@ -3873,6 +4039,93 @@ def train(
             fm_weight,
         )
         return loss, out, grads
+
+    # -- Compiled GAN training steps (experimental) -------------------------
+    # Mirror of compiled_step / compiled_loss_and_grad_step but using
+    # loss_and_grad_gan so the generator adversarial path is always traced.
+    compiled_gan_step = None
+    compiled_gan_loss_and_grad_step = None
+
+    if experimental_compiled_gan and loss_and_grad_gan is not None:
+        gan_state = [model.state, optimizer.state]
+        _lag_gan = loss_and_grad_gan  # capture non-None ref for Pyright
+
+        @partial(mx.compile, inputs=gan_state, outputs=gan_state)
+        def _compiled_gan_step(
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+            max_grad_norm_val,
+        ):
+            """Compiled gen step with GAN paths always active (experimental)."""
+            (loss, out), grads = _lag_gan(
+                model,
+                noisy_real,
+                noisy_imag,
+                feat_erb,
+                feat_spec,
+                clean_real,
+                clean_imag,
+                snr,
+                vad_weight,
+                speech_weight,
+                awesome_weight,
+                vad_reg_weight,
+                gan_weight,
+                fm_weight,
+            )
+            if max_grad_norm_val > 0:
+                grads, _ = clip_grad_norm(grads, max_grad_norm_val)
+            optimizer.update(model, grads)
+            return loss, out
+
+        @partial(mx.compile, inputs=[model.state], outputs=[model.state])
+        def _compiled_gan_loss_and_grad_step(
+            noisy_real,
+            noisy_imag,
+            feat_erb,
+            feat_spec,
+            clean_real,
+            clean_imag,
+            snr,
+            vad_weight,
+            speech_weight,
+            awesome_weight,
+            vad_reg_weight,
+            gan_weight,
+            fm_weight,
+        ):
+            """Compiled gen fwd+bwd with GAN paths always active (experimental)."""
+            (loss, out), grads = _lag_gan(
+                model,
+                noisy_real,
+                noisy_imag,
+                feat_erb,
+                feat_spec,
+                clean_real,
+                clean_imag,
+                snr,
+                vad_weight,
+                speech_weight,
+                awesome_weight,
+                vad_reg_weight,
+                gan_weight,
+                fm_weight,
+            )
+            return loss, out, grads
+
+        compiled_gan_step = _compiled_gan_step
+        compiled_gan_loss_and_grad_step = _compiled_gan_loss_and_grad_step
 
     def run_validation(label: str = "  Validating", *, do_vad_eval: bool = False) -> float:
         """Run validation on the fixed validation split and return average loss."""
@@ -4518,16 +4771,28 @@ def train(
 
     print(f"  Compiled-step base eligibility: {base_compiled_step_enabled}")
     if base_compiled_step_enabled:
-        if gan_enabled and gan_start_epoch <= 0:
+        if gan_enabled and gan_start_epoch <= 0 and not experimental_compiled_gan:
             print("  GAN starts at epoch 1: training will run eager from the first epoch")
-        elif gan_enabled:
+        elif gan_enabled and gan_start_epoch <= 0 and experimental_compiled_gan:
+            print("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
+        elif gan_enabled and not experimental_compiled_gan:
             print(
                 "  GAN delayed start: training will use compiled mode until GAN activation "
                 f"(gan_start_epoch={gan_start_epoch + 1})"
             )
+        elif gan_enabled and experimental_compiled_gan:
+            print(
+                "  [EXPERIMENTAL] GAN delayed start: compiled-GAN experiment will keep compiled "
+                f"mode through GAN activation (gan_start_epoch={gan_start_epoch + 1})"
+            )
     else:
         joined = ", ".join(compiled_disable_reasons) if compiled_disable_reasons else "unknown"
         print(f"  Compiled-step disabled by: {joined}")
+        if experimental_compiled_gan:
+            print(
+                "  [EXPERIMENTAL] WARNING: compiled-GAN experiment requested but compiled mode "
+                f"is globally disabled ({joined}). Experiment will not activate."
+            )
     if grad_accumulation_steps > 1:
         print(
             f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
@@ -4659,26 +4924,37 @@ def train(
             gan_enabled=gan_enabled,
             gan_active=gan_active,
             previous_mode=train_mode,
+            experimental_compiled_gan=experimental_compiled_gan,
         )
-        if prev_train_mode == _TRAIN_MODE_EAGER and train_mode != _TRAIN_MODE_EAGER:
-            raise RuntimeError(
-                "Invariant violation: training mode switched from EAGER back to COMPILED. "
-                "Mode switches must be one-way to preserve deterministic behavior after GAN activation."
-            )
-        if gan_active and epoch_use_compiled_step:
+        if not experimental_compiled_gan:
+            if prev_train_mode == _TRAIN_MODE_EAGER and train_mode != _TRAIN_MODE_EAGER:
+                raise RuntimeError(
+                    "Invariant violation: training mode switched from EAGER back to COMPILED. "
+                    "Mode switches must be one-way to preserve deterministic behavior after GAN activation."
+                )
+        if gan_active and epoch_use_compiled_step and not experimental_compiled_gan:
             raise RuntimeError(
                 "Invariant violation: GAN active epoch cannot run compiled step. "
                 f"epoch={epoch}, gan_start_epoch={gan_start_epoch}"
             )
 
+        # Determine whether we're using the GAN-specific compiled step for this epoch
+        use_compiled_gan_step = (
+            experimental_compiled_gan and gan_active and epoch_use_compiled_step and compiled_gan_step is not None
+        )
+
         if train_mode != prev_train_mode:
             if not base_compiled_step_enabled:
                 mode_reason = "compiled_blocked"
-            elif gan_enabled and gan_active:
+            elif gan_enabled and gan_active and not experimental_compiled_gan:
                 mode_reason = "gan_active"
+            elif gan_enabled and gan_active and experimental_compiled_gan:
+                mode_reason = "experimental_compiled_gan"
             else:
                 mode_reason = "gan_inactive"
             print(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
+            if use_compiled_gan_step:
+                print(f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) " f"epoch={epoch + 1}")
 
         if gan_enabled and verbose:
             print(
@@ -4918,9 +5194,19 @@ def train(
                     expected_dtype=mx.float16 if use_fp16 else mx.float32,
                 )
                 should_sync = (batch_idx + 1) % eval_frequency == 0
+
+                # Select the appropriate compiled functions. When the
+                # experimental compiled-GAN flag is active AND GAN is active,
+                # use the GAN-specific compiled functions whose computation
+                # graph always includes generator adversarial loss paths.
+                active_compiled_step = compiled_gan_step if use_compiled_gan_step else compiled_step
+                active_compiled_lag = (
+                    compiled_gan_loss_and_grad_step if use_compiled_gan_step else compiled_loss_and_grad_step
+                )
+
                 if grad_accumulation_steps > 1:
                     # Compiled fwd+bwd with eager accumulated optimizer updates.
-                    loss, model_out, grads = compiled_loss_and_grad_step(
+                    loss, model_out, grads = active_compiled_lag(
                         noisy_real,
                         noisy_imag,
                         feat_erb,
@@ -4960,7 +5246,7 @@ def train(
                 else:
                     # Fully compiled training step (fwd+bwd+update) for best throughput.
                     did_optimizer_update = True
-                    loss, model_out = compiled_step(
+                    loss, model_out = active_compiled_step(
                         noisy_real,
                         noisy_imag,
                         feat_erb,
@@ -4976,6 +5262,46 @@ def train(
                         fm_weight_mx,
                         max_grad_norm,
                     )
+
+                    # One-time correctness verification for compiled-GAN step
+                    if (
+                        use_compiled_gan_step
+                        and not _compiled_gan_correctness_verified
+                        and loss_and_grad_gan is not None
+                    ):
+                        _compiled_gan_correctness_verified = True
+                        # Run an eager forward pass for comparison
+                        (eager_loss, _), _ = loss_and_grad_gan(
+                            model,
+                            noisy_real,
+                            noisy_imag,
+                            feat_erb,
+                            feat_spec,
+                            clean_real,
+                            clean_imag,
+                            snr,
+                            vad_weight_mx,
+                            speech_weight_mx,
+                            awesome_weight_mx,
+                            vad_reg_weight_mx,
+                            gan_weight_mx,
+                            fm_weight_mx,
+                        )
+                        mx.eval(loss, eager_loss)
+                        compiled_val = float(loss)
+                        eager_val = float(eager_loss)
+                        if abs(compiled_val - eager_val) > 1e-5 + 1e-4 * abs(eager_val):
+                            tqdm.write(
+                                f"  [EXPERIMENTAL] WARNING: compiled-GAN correctness check FAILED. "
+                                f"compiled_loss={compiled_val:.6f}, eager_loss={eager_val:.6f}, "
+                                f"diff={abs(compiled_val - eager_val):.2e}"
+                            )
+                        else:
+                            tqdm.write(
+                                f"  [EXPERIMENTAL] Compiled-GAN correctness check PASSED. "
+                                f"compiled_loss={compiled_val:.6f}, eager_loss={eager_val:.6f}"
+                            )
+
                     # OPTIMIZATION: Only sync periodically to reduce GPU stalls
                     # This allows MLX to batch operations for better throughput
                     if should_sync:
@@ -6679,6 +7005,7 @@ def main():
         gan_disc_weight_decay=default_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=default_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=default_cfg.gan.disc_update_freq,
+        experimental_compiled_gan=default_cfg.gan.experimental_compile,
         vad_loss_weight=default_cfg.vad.loss_weight,
         vad_threshold=default_cfg.vad.threshold,
         vad_margin=default_cfg.vad.margin,
