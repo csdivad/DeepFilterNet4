@@ -31,11 +31,17 @@ def clip_grad_norm_tree(grads: Any, max_norm: float) -> Tuple[Any, mx.array]:
 
     total_norm_sq = sum(mx.sum(g**2) for g in flat_grads)
     total_norm = mx.sqrt(total_norm_sq)
-    clip_coef = mx.minimum(max_norm / (total_norm + 1e-6), mx.array(1.0))
+    # When total_norm is non-finite (inf/nan from exploding grads),
+    # zero all gradients rather than propagating nan through the model.
+    norm_finite = mx.isfinite(total_norm)
+    safe_norm = mx.where(norm_finite, total_norm, mx.array(1.0))
+    clip_coef = mx.minimum(max_norm / (safe_norm + 1e-6), mx.array(1.0))
 
     def apply_clip(x: Any) -> Any:
         if isinstance(x, mx.array):
-            return x * clip_coef
+            # Use where instead of multiply to avoid inf*0=nan
+            clipped = x * clip_coef
+            return mx.where(norm_finite, clipped, mx.zeros_like(x))
         if isinstance(x, dict):
             return {k: apply_clip(v) for k, v in x.items()}
         if isinstance(x, list):

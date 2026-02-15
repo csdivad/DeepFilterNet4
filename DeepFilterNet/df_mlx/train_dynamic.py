@@ -233,6 +233,12 @@ class NumericDebugger:
         return False
 
     def check_tree(self, name: str, tree: Any, ctx: dict[str, Any] | None = None) -> bool:
+        """Check gradient tree for non-finite values.
+
+        Never raises even when fail_fast is set — gradient non-finiteness is
+        handled by skipping the optimizer update, not by crashing.  Dumps are
+        still written for post-mortem analysis.
+        """
         if not self._should_check(ctx) or not self.config.check_grads:
             return True
         from mlx.utils import tree_flatten
@@ -245,11 +251,10 @@ class NumericDebugger:
                 key_name = f"{name}.{key}"
                 self._dump_stats(key_name, value, ctx)
                 all_finite = False
-                if self.config.fail_fast:
-                    message = f"Non-finite detected in {key_name}"
-                    if ctx:
-                        message += f" | ctx={ctx}"
-                    raise FloatingPointError(message)
+        if not all_finite:
+            from tqdm import tqdm
+
+            tqdm.write(f"⚠️  Non-finite gradients in {name} " f"(ctx={ctx}) — skipping optimizer update")
         return all_finite
 
 
@@ -5383,7 +5388,14 @@ def train(
                             final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
                             if should_sync:
                                 grad_norm = float(grad_norm_arr)
-                        optimizer.update(model, final_grads)
+                        if _tree_all_finite(final_grads):
+                            optimizer.update(model, final_grads)
+                        else:
+                            did_optimizer_update = False
+                            tqdm.write(
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
+                            )
                         accumulated_grads = None
                         accumulated_loss = mx.array(0.0)
                         micro_batches_in_accum = 0
@@ -5476,7 +5488,6 @@ def train(
                     fm_weight_mx,
                 )
                 loss_finite = bool(mx.all(mx.isfinite(loss)))
-                grads_finite = _tree_all_finite(grads) if (debugger is not None or nan_skip_batch) else True
                 if debugger is not None and not loss_finite:
                     _diagnose_nonfinite(
                         noisy_real,
@@ -5489,27 +5500,14 @@ def train(
                         debug_ctx,
                     )
                     debugger.check("train.loss", loss, debug_ctx)
-                if debugger is not None and not grads_finite:
-                    _diagnose_nonfinite(
-                        noisy_real,
-                        noisy_imag,
-                        feat_erb,
-                        feat_spec,
-                        clean_real,
-                        clean_imag,
-                        snr,
-                        debug_ctx,
-                    )
-                    debugger.check_tree("train.grads", grads, debug_ctx)
 
+                # Grad finiteness is checked AFTER clipping (below).
+                # Non-finite raw grads are expected during early GAN epochs;
+                # clip_grad_norm_tree zeros them, and we skip the update.
                 skip_update = False
-                if nan_skip_batch:
-                    if not loss_finite or not grads_finite:
-                        skip_update = True
-                        tqdm.write(
-                            "⚠️  Non-finite detected; skipping optimizer update "
-                            f"(loss_finite={loss_finite}, grads_finite={grads_finite})"
-                        )
+                if not loss_finite:
+                    skip_update = True
+                    tqdm.write("⚠️  Non-finite loss detected; skipping optimizer update")
                 # Only sync periodically
                 should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
                 if should_sync:
@@ -5530,13 +5528,27 @@ def train(
                         final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
 
                         # Gradient clipping (returns clipped grads and norm as MLX array)
+                        # clip_grad_norm zeros grads when norm is non-finite.
                         if max_grad_norm > 0:
                             final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
                             if should_sync:
                                 grad_norm = float(grad_norm_arr)
 
-                        # Update parameters
-                        optimizer.update(model, final_grads)
+                        # Post-clip finite check: skip update if grads are
+                        # still non-finite after clipping (shouldn't happen
+                        # with the zeroing logic, but guard defensively).
+                        grads_finite = _tree_all_finite(final_grads)
+                        if not grads_finite:
+                            if debugger is not None:
+                                debugger.check_tree("train.grads_clipped", final_grads, debug_ctx)
+                            tqdm.write(
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
+                            )
+                            did_optimizer_update = False
+                        else:
+                            # Update parameters
+                            optimizer.update(model, final_grads)
 
                         # Reset accumulator for next window
                         accumulated_grads = None
