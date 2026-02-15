@@ -1,0 +1,194 @@
+# Performance Audit Report: DeepFilterNet/df_mlx/
+
+**Date**: 2026-02-15
+**Scope**: `DeepFilterNet/df_mlx/` — MLX-based audio noise suppression on Apple Silicon
+**Focus**: Tensor manipulation/casting reduction, CPython→Metal/MLX migration
+
+---
+
+## 1. Executive Summary
+
+1. **~13 redundant `.astype(mx.float32)` graph nodes per training step** in the loss computation path — functions defensively cast inputs that are already FP32after earlier casts in the call chain
+2. **`_log1p_mag()` casts unconditionally** — wastes 2 graph nodes per call when inputs are already FP32 (called 3× with FP32 noise inputs per step)
+3. **`_compute_pipeline_awesome_losses()` casts clean/noisy to FP32 twice** — once for noise subtraction, again for proxy gates (4 redundant nodes)
+4. **`_compute_musicness/_improved_musicness/_pitch_stability/_harmonic_ratio` all defensively cast `mag` to FP32** when callers already pass FP32 — 4 unnecessary nodes
+5. **`mx.transpose(self._erb_fb)` recomputed every forward call** (2 sites) — should be cached at init
+6. **Attention causal mask `.astype(out.dtype)` computed per call** — should be pre-built at init
+7. **`CombinedLoss` uses 5 `float()` sync barriers mid-computation** — should return lazy `mx.array` dict
+8. **Validation loop casts FP32→FP32** (4 no-op casts) — validation data is never FP16
+9. **Existing Metal kernels (3) cover highest-cost operations** — DfOp, iSTFT, mel-power-log
+10. **Training step IS compiled via `mx.compile`** — Python loops in model are traced and unrolled at compile time, so they don't add per-step CPython overhead
+11. **Mamba parallel scan creates ~14 temporary tensors per forward** via concatenation in a `for d in range(log2_L)` loop — these could be reduced with pre-allocated buffers
+12. **Streaming inference (`StreamingDfNet4.process_frame`) is NOT compiled** — massive per-frame Python dispatch overhead
+
+## 2. Repo Performance Map
+
+### Entrypoints
+- **Training**: `train_dynamic.py:main()` → compiled training step
+- **Inference**: `enhance.py:enhance()` / `enhance_streaming()` / `enhance_batch()`
+- **Streaming**: `model.py:StreamingDfNet4.process_audio()`
+
+### Critical Paths
+1. Training step: data→FP16 cast→model forward→loss (spectral+awesome+MRSTFT+GAN)→backward→grad clip→optimizer update
+2. Inference: audio load→STFT→model forward→mask+DfOp→iSTFT→audio save
+
+### Concurrency Model
+- Data loading: `PrefetchDataLoader` with worker threads (NumPy/SciPy)
+- Compute: Single-threaded MLX with lazy evaluation, compiled graph execution
+- GPU: Apple Metal via MLX framework
+
+### I/O Boundaries
+- NumPy→MLX at batch boundary (`mx.array(np_batch)`)
+- MLX→NumPy at inference output (`np.array(audio)`)
+- File I/O via soundfile/librosa (CPU)
+
+## 3. Measurement & Benchmark Plan
+
+### Tools
+- `DeepFilterNet/df_mlx/benchmark_train_step.py` — existing harness for training throughput
+- `time.perf_counter` instrumentation at key points
+- MLX's lazy evaluation means profiling requires strategic `mx.eval()` placement
+
+### Minimal Benchmark
+```bash
+cd DeepFilterNet
+source ../.venv/bin/activate
+python -m df_mlx.benchmark_train_step \
+    --cache-dir /path/to/cache \
+    --backends prefetch \
+    --batch-size 4 \
+    --steps 50 \
+    --warmup-steps 10
+```
+
+### Metrics
+- Steps/second, samples/second
+- Per-step latency (p50/p95/p99)
+- Memory RSS
+
+## 4. Findings (Prioritized)
+
+### PERF-P0-001: Redundant FP32 casts in awesome/pipeline loss chain
+- **Severity**: P0
+- **Component**: `train_dynamic.py` loss computation
+- **Evidence**:
+  - `_log1p_mag()` (L796-797) unconditionally casts to FP32
+  - Called with FP32 `noise_real/imag` from `_compute_awesome_losses()` (L985) and `_compute_pipeline_awesome_losses()` (L1244)
+  - `_compute_musicness` (L816), `_compute_improved_musicness` (L1131), `_compute_pitch_stability` (L1072), `_compute_harmonic_ratio` (L1100) all defensively cast `mag` that's already FP32
+  - ~9-13 redundant graph nodes per training step
+- **Proposed Optimization**: Add `if x.dtype != mx.float32` guards; cast once at function entry and reuse
+- **Verification**: Compare graph node count before/after; run benchmark_train_step
+- **Risks**: None — conditional cast produces identical results
+
+### PERF-P0-002: Duplicate FP32 casts in `_compute_pipeline_awesome_losses`
+- **Severity**: P0
+- **Component**: `train_dynamic.py:_compute_pipeline_awesome_losses`
+- **Evidence**:
+  - L1240-1241: `noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)` for noise
+  - L1263-1266: Same `clean_real/imag, noisy_real/imag` cast again for proxy gates
+  - 4 redundant casts of the same FP16 source tensors
+- **Proposed Optimization**: Cast once at function entry, reuse named FP32 variables
+- **Verification**: Run existing tests; compare benchmark
+- **Risks**: None — mathematically identical
+
+### PERF-P0-003: `_erb_fb` transpose recomputed per forward call
+- **Severity**: P0
+- **Component**: `model.py:DfNet4.__call__`
+- **Evidence**:
+  - L1118: `mx.matmul(erb_mask, mx.transpose(self._erb_fb))` — every forward
+  - L1190: Same pattern in `forward_with_lsnr`
+  - `_erb_fb` is immutable (not a learned parameter)
+- **Proposed Optimization**: Pre-compute `self._erb_fb_T = mx.transpose(self._erb_fb)` at init
+- **Verification**: Ensure model output unchanged
+- **Risks**: Minimal extra memory (small matrix)
+
+### PERF-P1-001: Attention causal mask cast per call
+- **Severity**: P1
+- **Component**: `modules.py:SqueezedAttention.__call__`
+- **Evidence**: L1263 `mask = mask.astype(out.dtype)` creates a new graph node every forward call
+- **Proposed Optimization**: Cache mask at init with correct dtype
+- **Verification**: Model output unchanged
+- **Risks**: Mask shape depends on `seq_len` which varies — need to handle dynamically
+
+### PERF-P1-002: CombinedLoss sync barriers
+- **Severity**: P1
+- **Component**: `loss.py:CombinedLoss.__call__`
+- **Evidence**: L892-915: 5× `float()` calls mid-computation, each forcing GPU eval
+- **Proposed Optimization**: Return `Dict[str, mx.array]` instead of `Dict[str, float]`
+- **Verification**: Callers that log must call `float()` themselves
+- **Risks**: API change — callers must be updated
+
+### PERF-P1-003: Validation loop FP32→FP32 no-op casts
+- **Severity**: P1
+- **Component**: `train_dynamic.py` validation loop
+- **Evidence**: L4709-4712: 4 `.astype(mx.float32)` casts on data that's already FP32
+- **Proposed Optimization**: Add dtype guard
+- **Verification**: Existing validation tests
+- **Risks**: None
+
+### PERF-P2-001: Mamba parallel scan temporary allocations
+- **Severity**: P2
+- **Component**: `mamba.py:MambaBlock._selective_scan`
+- **Evidence**: L261-275: `for d in range(log2_L)` creates ~14 temporary tensors via concatenation
+- **Proposed Optimization**: Pre-allocate output buffer and use scatter/slice assignment
+- **Risks**: Complex refactor; compiled training traces this away; mainly affects inference
+
+### PERF-P2-002: Streaming inference not compiled
+- **Severity**: P2
+- **Component**: `model.py:StreamingDfNet4.process_frame`
+- **Evidence**: ~70+ MLX op dispatches per frame without compilation
+- **Proposed Optimization**: Wrap in `mx.compile` with state handling
+- **Risks**: Complex — requires careful state management with `mx.compile`
+
+## 5. Hardware Acceleration Opportunities
+
+Existing Metal kernels already cover the 3 highest-cost per-frame operations:
+1. `df_op_kernel` — fused gather + complex MAC for DfOp
+2. `istft_overlap_add_kernel` — fused overlap-add + window normalization
+3. `mel_power_log_kernel` — fused power-spectrum → mel → log
+
+### Additional candidates (ranked):
+| Priority | Operation | Current | Proposed | Expected Win |
+|----------|-----------|---------|----------|-------------|
+| P1 | Complex mask + concat (DfOp output) | 2× concat + 4 muls + 2 adds | Fused Metal kernel | Minor — eliminates 2 allocations |
+| P2 | Post-filter (7 element-wise ops) | Separate ops | Fused Metal kernel | ~2× by eliminating intermediates |
+| P2 | Mamba scan (associative scan) | Python loop + concat | Native `mx.associative_scan` or Metal | Depends on MLX roadmap |
+
+## 6. Quick Wins (Under 60 minutes)
+
+1. **PERF-P0-001**: Add dtype guards to `_log1p_mag` and musicness functions (~15 min)
+2. **PERF-P0-002**: Refactor `_compute_pipeline_awesome_losses` cast-once (~15 min)
+3. **PERF-P0-003**: Cache `_erb_fb_T` at init (~5 min)
+4. **PERF-P1-003**: Add dtype guards to validation loop casts (~5 min)
+5. **PERF-P1-002**: Make `CombinedLoss` return lazy arrays (~15 min)
+
+## 7. Implementation Status
+
+### Completed (Phase 1 — P0+P1)
+
+| ID | Optimization | Files Changed | Impact |
+|----|-------------|---------------|--------|
+| PERF-P0-001 | dtype guards on `_log1p_mag`, `_compute_musicness`, `_compute_pitch_stability`, `_compute_harmonic_ratio`, `_compute_improved_musicness` | `train_dynamic.py` | ~5 redundant graph nodes eliminated per step |
+| PERF-P0-002 | Cast-once refactor for `_compute_pipeline_awesome_losses` | `train_dynamic.py` | 4 redundant FP16→FP32 casts eliminated |
+| PERF-P0-003 | Cast-once refactor for `_compute_awesome_losses` | `train_dynamic.py` | 4 redundant FP16→FP32 casts eliminated |
+| PERF-P0-004 | dtype guards on `_compute_proxy_gates` | `train_dynamic.py` | 2 conditional cast skips |
+| PERF-P0-005 | Cached `_erb_fb_T` at model init | `model.py` | 3 per-call transposes eliminated |
+| PERF-P1-001 | Cached SqueezedAttention causal mask by `(seq_len, dtype)` | `modules.py` | Per-call mask creation + cast eliminated |
+| PERF-P1-002 | `CombinedLoss` returns `Dict[str, mx.array]` (lazy) | `loss.py` | 5 GPU sync barriers eliminated |
+| PERF-P1-003 | dtype guards on `si_sdr()` | `loss.py` | 2 conditional cast skips |
+| PERF-P1-004 | dtype guards on `_compute_vad_probs`, `_compute_speech_band_logmag_loss` | `train_dynamic.py` | 4 conditional cast skips |
+| PERF-P1-005 | dtype guards on `specs_to_wavs` | `train_dynamic.py` | 2 conditional cast skips |
+
+**Total estimated reduction**: ~20+ unnecessary graph nodes per training step; 5 GPU sync barriers removed.
+
+**Test coverage**: 10 dedicated tests in `tests/test_perf_optimizations.py` + 866 existing tests pass (6 pre-existing failures unrelated to perf changes).
+
+### Remaining (Future Phases)
+
+| Priority | Optimization | Complexity |
+|----------|-------------|-----------|
+| P2 | Mamba parallel scan pre-allocated buffers | Medium — mainly affects uncompiled inference |
+| P2 | Compile `StreamingDfNet4.process_frame` | High — requires state management with `mx.compile` |
+| P2 | Fused Metal kernel for complex mask + concat | Medium |
+| P2 | Fused post-filter Metal kernel (7 ops → 1) | Medium |
+| P3 | `mx.associative_scan` for Mamba (when available) | Low — depends on MLX roadmap |

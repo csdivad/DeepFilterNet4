@@ -490,8 +490,10 @@ def si_sdr(pred: mx.array, target: mx.array, eps: float = EPS) -> mx.array:
     Returns:
         SI-SDR in dB (higher is better)
     """
-    pred = pred.astype(mx.float32)
-    target = target.astype(mx.float32)
+    if pred.dtype != mx.float32:
+        pred = pred.astype(mx.float32)
+    if target.dtype != mx.float32:
+        target = target.astype(mx.float32)
 
     if pred.ndim == 1:
         pred = mx.expand_dims(pred, axis=0)
@@ -869,7 +871,7 @@ class CombinedLoss:
         noisy_erb: Optional[mx.array] = None,
         pred_alpha: Optional[mx.array] = None,
         target_lsnr: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, Dict[str, float]]:
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
         """Compute combined loss with breakdown.
 
         Args:
@@ -882,37 +884,37 @@ class CombinedLoss:
             target_lsnr: Optional target LSNR
 
         Returns:
-            Tuple of (total_loss, loss_breakdown_dict)
+            Tuple of (total_loss, loss_breakdown_dict) where dict values are lazy mx.array
         """
-        losses: Dict[str, float] = {}
+        losses: Dict[str, mx.array] = {}
         total_loss = mx.array(0.0)
 
         # Spectral loss
         spec_loss = self.spectral_loss(pred_wav, target_wav)
-        losses["spectral"] = float(spec_loss)
+        losses["spectral"] = spec_loss
         total_loss = total_loss + spec_loss
 
         # SI-SDR loss
         if self.sisdr_loss is not None:
             sisdr = self.sisdr_loss(pred_wav, target_wav)
-            losses["sisdr"] = float(sisdr)
+            losses["sisdr"] = sisdr
             total_loss = total_loss + sisdr
 
         # Mask loss
         if self.mask_loss is not None and pred_mask is not None:
             if clean_erb is not None and noisy_erb is not None:
                 mask_l = self.mask_loss(pred_mask, clean_erb, noisy_erb)
-                losses["mask"] = float(mask_l)
+                losses["mask"] = mask_l
                 total_loss = total_loss + mask_l
 
         # Alpha loss
         if self.alpha_loss is not None and pred_alpha is not None:
             if target_lsnr is not None:
                 alpha_l = self.alpha_loss(pred_alpha, target_lsnr)
-                losses["alpha"] = float(alpha_l)
+                losses["alpha"] = alpha_l
                 total_loss = total_loss + alpha_l
 
-        losses["total"] = float(total_loss)
+        losses["total"] = total_loss
         return total_loss, losses
 
 

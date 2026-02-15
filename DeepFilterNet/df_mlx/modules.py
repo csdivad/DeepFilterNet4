@@ -1257,10 +1257,16 @@ class SqueezedAttention(nn.Module):
         if self.linear_act is not None:
             out = self.linear_act(out)
 
-        # Create causal mask once
+        # Causal mask: cache by (seq_len, dtype) to avoid per-call recomputation
         seq_len = out.shape[1]
-        mask = nn.MultiHeadAttention.create_additive_causal_mask(seq_len)
-        mask = mask.astype(out.dtype)
+        cache_key = (seq_len, out.dtype)
+        if not hasattr(self, "_mask_cache") or getattr(self, "_mask_cache_key", None) != cache_key:
+            mask = nn.MultiHeadAttention.create_additive_causal_mask(seq_len)
+            mask = mask.astype(out.dtype)
+            self._mask_cache = mask
+            self._mask_cache_key = cache_key
+        else:
+            mask = self._mask_cache
 
         # Apply attention layers with pre-norm and residual
         for norm, attn, ffn_norm, ffn in zip(self.norms, self.attention_layers, self.ffn_norms, self.ffns):

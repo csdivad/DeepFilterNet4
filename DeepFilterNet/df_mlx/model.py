@@ -46,16 +46,40 @@ class Encoder4(nn.Module):
         # ERB pathway - processes ERB-scale features
         # Input: (batch, time, erb_bands, 1) -> permute to NHWC
         self.erb_conv0 = Conv2dNormAct(
-            1, conv_ch, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), norm="batch", activation="relu"
+            1,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.erb_conv1 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.erb_conv2 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 1), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 1),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.erb_conv3 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 1), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 1),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
 
         # Calculate ERB output dimension after convolutions
@@ -67,10 +91,22 @@ class Encoder4(nn.Module):
         # DF pathway - processes complex DF features
         # Input: (batch, time, df_bins, 2) for real/imag
         self.df_conv0 = Conv2dNormAct(
-            2, conv_ch, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), norm="batch", activation="relu"
+            2,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.df_conv1 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
 
         # Calculate DF output dimension
@@ -169,16 +205,40 @@ class ErbDecoder4(nn.Module):
 
         # Upsampling convolutions
         self.conv0 = ConvTranspose2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 1), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 1),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.conv1 = ConvTranspose2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 1), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 1),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.conv2 = ConvTranspose2dNormAct(
-            conv_ch, conv_ch, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            norm="batch",
+            activation="relu",
         )
         self.conv3 = ConvTranspose2dNormAct(
-            conv_ch, 1, kernel_size=(1, 3), stride=(1, 2), padding=(0, 1), norm=None, activation=None
+            conv_ch,
+            1,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            norm=None,
+            activation=None,
         )
 
         # Final projection to ERB bands
@@ -890,12 +950,13 @@ class DfNet4(nn.Module):
         # DF output mode
         self.df_output_mode = p.df_output_mode
 
-        # ERB filterbank (non-trainable)
+        # ERB filterbank (non-trainable) + pre-transposed for mask expansion
         self._erb_fb = erb_fb(
             sr=p.sr,
             fft_size=p.fft_size,
             nb_bands=p.nb_erb,
         )
+        self._erb_fb_T = mx.transpose(self._erb_fb)
 
         # Encoder
         self.encoder = Encoder4(p)
@@ -1114,8 +1175,8 @@ class DfNet4(nn.Module):
         # Decode ERB mask
         erb_mask = self.erb_decoder(emb)  # (batch, time, nb_erb)
 
-        # Expand ERB mask to full spectrum
-        mask = mx.matmul(erb_mask, mx.transpose(self._erb_fb))
+        # Expand ERB mask to full spectrum (using pre-transposed filterbank)
+        mask = mx.matmul(erb_mask, self._erb_fb_T)
 
         # Apply mask (for frequencies above nb_df)
         masked_real = spec_real * mask
@@ -1187,7 +1248,7 @@ class DfNet4(nn.Module):
 
         # Decode ERB mask
         erb_mask = self.erb_decoder(emb)
-        mask = mx.matmul(erb_mask, mx.transpose(self._erb_fb))
+        mask = mx.matmul(erb_mask, self._erb_fb_T)
         masked_real = spec_real * mask
         masked_imag = spec_imag * mask
 
@@ -1520,8 +1581,8 @@ class StreamingDfNet4(nn.Module):
         # Decode ERB mask
         erb_mask = model.erb_decoder(emb)
 
-        # Expand ERB mask to full spectrum
-        mask = mx.matmul(erb_mask, mx.transpose(model._erb_fb))
+        # Expand ERB mask to full spectrum (using pre-transposed filterbank)
+        mask = mx.matmul(erb_mask, model._erb_fb_T)
 
         # Apply mask
         masked_real = spec_real * mask
