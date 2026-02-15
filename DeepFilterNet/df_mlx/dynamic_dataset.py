@@ -807,6 +807,50 @@ class Sample:
     gain: float
 
 
+def _assemble_batch(samples: List[Sample]) -> Dict[str, mx.array]:
+    """Assemble a list of Samples into a batched dict of mx.arrays.
+
+    Pre-allocates numpy buffers based on the first sample's shape, then fills
+    them via indexed assignment — avoids 7 growing Python lists + np.stack copies
+    per batch.
+    """
+    n = len(samples)
+    if n == 0:
+        raise ValueError("Cannot assemble empty batch")
+
+    s0 = samples[0]
+    spec_shape = s0.noisy_spec.real.shape
+    erb_shape = s0.feat_erb.shape
+    spec_feat_shape = s0.feat_spec.shape
+
+    noisy_real = np.empty((n, *spec_shape), dtype=np.float32)
+    noisy_imag = np.empty((n, *spec_shape), dtype=np.float32)
+    clean_real = np.empty((n, *spec_shape), dtype=np.float32)
+    clean_imag = np.empty((n, *spec_shape), dtype=np.float32)
+    feat_erb = np.empty((n, *erb_shape), dtype=np.float32)
+    feat_spec = np.empty((n, *spec_feat_shape), dtype=np.float32)
+    snr_arr = np.empty(n, dtype=np.float32)
+
+    for i, s in enumerate(samples):
+        noisy_real[i] = s.noisy_spec.real
+        noisy_imag[i] = s.noisy_spec.imag
+        clean_real[i] = s.clean_spec.real
+        clean_imag[i] = s.clean_spec.imag
+        feat_erb[i] = s.feat_erb
+        feat_spec[i] = s.feat_spec
+        snr_arr[i] = s.snr
+
+    return {
+        "noisy_real": mx.array(noisy_real),
+        "noisy_imag": mx.array(noisy_imag),
+        "clean_real": mx.array(clean_real),
+        "clean_imag": mx.array(clean_imag),
+        "feat_erb": mx.array(feat_erb),
+        "feat_spec": mx.array(feat_spec),
+        "snr": mx.array(snr_arr),
+    }
+
+
 class DynamicDataset:
     """Dynamic dataset with on-the-fly audio mixing.
 
@@ -1134,52 +1178,17 @@ class DynamicDataset:
             - feat_spec: (B, T, D, 2) DF-band features
             - snr: (B,) SNR values
         """
-        batch_noisy_real = []
-        batch_noisy_imag = []
-        batch_clean_real = []
-        batch_clean_imag = []
-        batch_erb = []
-        batch_spec = []
-        batch_snr = []
+        batch_samples: List[Sample] = []
 
         for sample in self.iter_samples():
-            batch_noisy_real.append(sample.noisy_spec.real)
-            batch_noisy_imag.append(sample.noisy_spec.imag)
-            batch_clean_real.append(sample.clean_spec.real)
-            batch_clean_imag.append(sample.clean_spec.imag)
-            batch_erb.append(sample.feat_erb)
-            batch_spec.append(sample.feat_spec)
-            batch_snr.append(sample.snr)
+            batch_samples.append(sample)
 
-            if len(batch_noisy_real) >= batch_size:
-                yield {
-                    "noisy_real": mx.array(np.stack(batch_noisy_real)),
-                    "noisy_imag": mx.array(np.stack(batch_noisy_imag)),
-                    "clean_real": mx.array(np.stack(batch_clean_real)),
-                    "clean_imag": mx.array(np.stack(batch_clean_imag)),
-                    "feat_erb": mx.array(np.stack(batch_erb)),
-                    "feat_spec": mx.array(np.stack(batch_spec)),
-                    "snr": mx.array(np.array(batch_snr)),
-                }
-                batch_noisy_real = []
-                batch_noisy_imag = []
-                batch_clean_real = []
-                batch_clean_imag = []
-                batch_erb = []
-                batch_spec = []
-                batch_snr = []
+            if len(batch_samples) >= batch_size:
+                yield _assemble_batch(batch_samples)
+                batch_samples = []
 
-        # Handle last batch
-        if batch_noisy_real and not drop_last:
-            yield {
-                "noisy_real": mx.array(np.stack(batch_noisy_real)),
-                "noisy_imag": mx.array(np.stack(batch_noisy_imag)),
-                "clean_real": mx.array(np.stack(batch_clean_real)),
-                "clean_imag": mx.array(np.stack(batch_clean_imag)),
-                "feat_erb": mx.array(np.stack(batch_erb)),
-                "feat_spec": mx.array(np.stack(batch_spec)),
-                "snr": mx.array(np.array(batch_snr)),
-            }
+        if batch_samples and not drop_last:
+            yield _assemble_batch(batch_samples)
 
 
 class PrefetchDataLoader:
@@ -1216,15 +1225,7 @@ class PrefetchDataLoader:
         stats: Dict[str, int] = {"samples_succeeded": 0, "samples_failed": 0}
 
         def _to_batch(samples: List[Sample]) -> Dict[str, mx.array]:
-            return {
-                "noisy_real": mx.array(np.stack([s.noisy_spec.real for s in samples])),
-                "noisy_imag": mx.array(np.stack([s.noisy_spec.imag for s in samples])),
-                "clean_real": mx.array(np.stack([s.clean_spec.real for s in samples])),
-                "clean_imag": mx.array(np.stack([s.clean_spec.imag for s in samples])),
-                "feat_erb": mx.array(np.stack([s.feat_erb for s in samples])),
-                "feat_spec": mx.array(np.stack([s.feat_spec for s in samples])),
-                "snr": mx.array(np.array([s.snr for s in samples], dtype=np.float32)),
-            }
+            return _assemble_batch(samples)
 
         def _queue_put(item: Optional[Dict[str, mx.array]]) -> bool:
             while not stop_event.is_set():
