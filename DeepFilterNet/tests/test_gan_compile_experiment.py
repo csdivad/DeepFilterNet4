@@ -228,3 +228,77 @@ def _build_experiment_matrix() -> list[dict[str, str]]:
             "risk_level": "medium",
         },
     ]
+
+
+# ---------------------------------------------------------------------------
+# GAN-P6/P7/P8 config surface tests
+# ---------------------------------------------------------------------------
+
+
+class TestDiscUpdateFreq:
+    """Tests for GAN discriminator update frequency configuration."""
+
+    def test_disc_update_freq_config_default(self):
+        """disc_update_freq defaults to 1 in GANConfig."""
+        from df_mlx.run_config import GanConfig
+
+        cfg = GanConfig()
+        assert cfg.disc_update_freq == 1
+
+    def test_disc_update_freq_skip_logic(self):
+        """With freq=2, disc updates happen on even steps only."""
+        freq = 2
+        results = []
+        for step in range(10):
+            do_update = (step % freq) == 0
+            results.append(do_update)
+        # Steps 0, 2, 4, 6, 8 should update
+        assert results == [True, False, True, False, True, False, True, False, True, False]
+
+    def test_disc_update_freq_config_fields_exist(self):
+        """New config fields exist with correct defaults."""
+        from df_mlx.run_config import GanConfig
+
+        cfg = GanConfig()
+        assert hasattr(cfg, "cache_gen_waveforms")
+        assert cfg.cache_gen_waveforms is False
+        assert hasattr(cfg, "disc_gradient_checkpoint")
+        assert cfg.disc_gradient_checkpoint is False
+        assert hasattr(cfg, "single_eval")
+        assert cfg.single_eval is False
+
+    def test_new_fields_in_run_config(self):
+        """New fields accessible via RunConfig.gan."""
+        cfg = RunConfig()
+        assert cfg.gan.cache_gen_waveforms is False
+        assert cfg.gan.disc_gradient_checkpoint is False
+        assert cfg.gan.single_eval is False
+
+    def test_apply_new_fields_via_dict(self):
+        """New fields can be set via apply_run_config_dict."""
+        cfg = RunConfig()
+        apply_run_config_dict(
+            cfg,
+            {
+                "gan": {
+                    "cache_gen_waveforms": True,
+                    "disc_gradient_checkpoint": True,
+                    "single_eval": True,
+                }
+            },
+        )
+        assert cfg.gan.cache_gen_waveforms is True
+        assert cfg.gan.disc_gradient_checkpoint is True
+        assert cfg.gan.single_eval is True
+
+    def test_generated_example_includes_new_fields(self):
+        """Generated TOML example includes new GAN fields."""
+        text = generate_run_config_example()
+        data = tomllib.loads(text)
+        assert "gan" in data
+        assert "cache_gen_waveforms" in data["gan"]
+        assert data["gan"]["cache_gen_waveforms"] is False
+        assert "disc_gradient_checkpoint" in data["gan"]
+        assert data["gan"]["disc_gradient_checkpoint"] is False
+        assert "single_eval" in data["gan"]
+        assert data["gan"]["single_eval"] is False

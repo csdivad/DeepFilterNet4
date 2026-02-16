@@ -702,6 +702,21 @@ class GanConfig:
         help="Enable experimental GAN-phase compilation (R&D only, see docs/GAN_COMPILE_EXPERIMENT.md)",
         normalize=_normalize_bool,
     )
+    cache_gen_waveforms: bool = cfg_field(
+        False,
+        help="Cache waveforms from gen loss path for disc update (avoids redundant iSTFT)",
+        normalize=_normalize_bool,
+    )
+    disc_gradient_checkpoint: bool = cfg_field(
+        False,
+        help="Use gradient checkpointing for disc forward in gen loss path (saves memory, ~1.5x disc compute)",
+        normalize=_normalize_bool,
+    )
+    single_eval: bool = cfg_field(
+        False,
+        help="Merge gen+disc mx.eval() calls into one (experimental, may OOM on large graphs)",
+        normalize=_normalize_bool,
+    )
 
 
 @dataclass

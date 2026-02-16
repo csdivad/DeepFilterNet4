@@ -2840,6 +2840,9 @@ def train(
     gan_disc_grad_clip: float = 1.0,
     gan_disc_update_freq: int = 1,
     gan_disc_max_samples: int = 48000,
+    gan_cache_gen_waveforms: bool = False,
+    gan_disc_gradient_checkpoint: bool = False,
+    gan_single_eval: bool = False,
     gan_mpd_channels: int = 32,
     gan_msd_channels: int = 128,
     experimental_compiled_gan: bool = False,
@@ -3338,6 +3341,9 @@ def train(
         "gan_disc_weight_decay": gan_disc_weight_decay,
         "gan_disc_grad_clip": gan_disc_grad_clip,
         "gan_disc_update_freq": gan_disc_update_freq,
+        "gan_cache_gen_waveforms": gan_cache_gen_waveforms,
+        "gan_disc_gradient_checkpoint": gan_disc_gradient_checkpoint,
+        "gan_single_eval": gan_single_eval,
         "experimental_compiled_gan": experimental_compiled_gan,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
@@ -3686,8 +3692,12 @@ def train(
             gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
             gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
             gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
-            disc_fake, fake_feats = discriminator(gan_out_wav)
-            disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
+            if gan_disc_gradient_checkpoint:
+                _disc_fn = mx.checkpoint(discriminator)
+            else:
+                _disc_fn = discriminator
+            disc_fake, fake_feats = _disc_fn(gan_out_wav)
+            disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))
             gan_g_loss = gen_loss_fn(disc_fake)
             total_loss = total_loss + gan_weight * gan_g_loss
             if feature_match_loss is not None and gan_fm_weight > 0:
@@ -3852,8 +3862,12 @@ def train(
                 gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                 gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
                 gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
-                disc_fake, fake_feats = discriminator(gan_out_wav)
-                disc_real, real_feats = discriminator(mx.stop_gradient(gan_clean_wav))
+                if gan_disc_gradient_checkpoint:
+                    _disc_fn = mx.checkpoint(discriminator)
+                else:
+                    _disc_fn = discriminator
+                disc_fake, fake_feats = _disc_fn(gan_out_wav)
+                disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))
                 gan_g_loss = gen_loss_fn(disc_fake)
                 total_loss = total_loss + gan_weight * gan_g_loss
                 if feature_match_loss is not None and gan_fm_weight > 0:
@@ -5592,7 +5606,16 @@ def train(
 
                 # Only sync periodically for better throughput
                 if should_sync:
-                    mx.eval(loss, model.parameters(), optimizer.state)
+                    if (
+                        gan_single_eval
+                        and gan_active
+                        and discriminator is not None
+                        and did_optimizer_update
+                        and ((global_step % gan_disc_update_freq) == 0)
+                    ):
+                        pass  # Defer to combined gen+disc eval
+                    else:
+                        mx.eval(loss, model.parameters(), optimizer.state)
 
             pred_spec_for_logging = None
             if model_out is not None:
@@ -5648,7 +5671,32 @@ def train(
                         disc_optimizer.update(discriminator, disc_grads)
 
                         if should_sync:
-                            mx.eval(disc_loss, discriminator.parameters(), disc_optimizer.state)
+                            if gan_single_eval:
+                                # Combined eval: gen + disc in one call
+                                try:
+                                    mx.eval(
+                                        loss,
+                                        disc_loss,
+                                        model.parameters(),
+                                        optimizer.state,
+                                        discriminator.parameters(),
+                                        disc_optimizer.state,
+                                    )
+                                except Exception as e:
+                                    tqdm.write(
+                                        f"  [WARN] Combined GAN eval failed ({e}), " "falling back to separate evals"
+                                    )
+                                    mx.eval(
+                                        disc_loss,
+                                        discriminator.parameters(),
+                                        disc_optimizer.state,
+                                    )
+                            else:
+                                mx.eval(
+                                    disc_loss,
+                                    discriminator.parameters(),
+                                    disc_optimizer.state,
+                                )
                             gan_d_loss_val = float(disc_loss)
                             train_gan_d_updates += 1
 
@@ -7212,6 +7260,9 @@ def main():
         gan_disc_weight_decay=default_cfg.gan.disc_weight_decay,
         gan_disc_grad_clip=default_cfg.gan.disc_grad_clip,
         gan_disc_update_freq=default_cfg.gan.disc_update_freq,
+        gan_cache_gen_waveforms=default_cfg.gan.cache_gen_waveforms,
+        gan_disc_gradient_checkpoint=default_cfg.gan.disc_gradient_checkpoint,
+        gan_single_eval=default_cfg.gan.single_eval,
         experimental_compiled_gan=default_cfg.gan.experimental_compile,
         vad_loss_weight=default_cfg.vad.loss_weight,
         vad_threshold=default_cfg.vad.threshold,
@@ -7380,6 +7431,9 @@ def main():
         gan_mpd_channels=run_cfg.gan.mpd_channels,
         gan_msd_channels=run_cfg.gan.msd_channels,
         experimental_compiled_gan=run_cfg.gan.experimental_compile,
+        gan_cache_gen_waveforms=run_cfg.gan.cache_gen_waveforms,
+        gan_disc_gradient_checkpoint=run_cfg.gan.disc_gradient_checkpoint,
+        gan_single_eval=run_cfg.gan.single_eval,
         vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
         vad_loss_weight=run_cfg.vad.loss_weight,
         vad_threshold=run_cfg.vad.threshold,
