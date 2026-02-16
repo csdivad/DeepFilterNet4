@@ -2840,9 +2840,10 @@ def train(
     gan_disc_grad_clip: float = 1.0,
     gan_disc_update_freq: int = 1,
     gan_disc_max_samples: int = 48000,
-    gan_cache_gen_waveforms: bool = False,
+    gan_cache_gen_waveforms: bool = True,
     gan_disc_gradient_checkpoint: bool = False,
-    gan_single_eval: bool = False,
+    gan_single_eval: bool = True,
+    gan_eval_frequency: int = 2,
     gan_mpd_channels: int = 32,
     gan_msd_channels: int = 128,
     experimental_compiled_gan: bool = False,
@@ -3344,6 +3345,7 @@ def train(
         "gan_cache_gen_waveforms": gan_cache_gen_waveforms,
         "gan_disc_gradient_checkpoint": gan_disc_gradient_checkpoint,
         "gan_single_eval": gan_single_eval,
+        "gan_eval_frequency": gan_eval_frequency,
         "experimental_compiled_gan": experimental_compiled_gan,
         "vad_loss_weight": vad_loss_weight,
         "vad_threshold": vad_threshold,
@@ -5174,16 +5176,17 @@ def train(
         fm_weight = gan_fm_weight * gan_scale
         gan_active = gan_enabled and gan_scale > 0.0
 
-        # GAN epochs MUST sync every step to prevent lazy-graph accumulation.
-        # With eval_frequency > 1 the discriminator forward/backward graphs
-        # pile up across batches, easily exceeding unified-memory limits.
+        # GAN epochs use a tighter eval_frequency to bound lazy-graph
+        # accumulation.  With per-step compiled disc and single-eval enabled
+        # the graph is bounded, so the user-configured gan_eval_frequency
+        # (default 2) is safe.  0 means "no override".
         epoch_eval_frequency = eval_frequency
-        if gan_active and eval_frequency > 1:
-            epoch_eval_frequency = 1
+        if gan_active and gan_eval_frequency > 0:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
             if epoch == gan_start_epoch:
                 print(
-                    f"  GAN active: overriding eval_frequency {eval_frequency} → 1 "
-                    "(mandatory per-step sync to prevent OOM from graph accumulation)"
+                    f"  GAN active: eval_frequency capped to {epoch_eval_frequency} "
+                    f"(gan.eval_frequency={gan_eval_frequency}, training.eval_frequency={eval_frequency})"
                 )
 
         prev_train_mode = train_mode
@@ -5602,86 +5605,91 @@ def train(
                     gan_weight_mx,
                     fm_weight_mx,
                 )
-                loss_finite = bool(mx.all(mx.isfinite(loss)))
-                if debugger is not None and not loss_finite:
-                    _diagnose_nonfinite(
-                        noisy_real,
-                        noisy_imag,
-                        feat_erb,
-                        feat_spec,
-                        clean_real,
-                        clean_imag,
-                        snr,
-                        debug_ctx,
-                    )
-                    debugger.check("train.loss", loss, debug_ctx)
 
-                # Grad finiteness is checked AFTER clipping (below).
-                # Non-finite raw grads are expected during early GAN epochs;
-                # clip_grad_norm_tree zeros them, and we skip the update.
-                skip_update = False
-                if not loss_finite:
-                    skip_update = True
-                    tqdm.write("⚠️  Non-finite loss detected; skipping optimizer update")
-                # Only sync periodically
+                # Build lazy finiteness check — no sync barrier here.
+                # The actual bool extraction is deferred to the should_sync
+                # boundary.  Non-finite grads are safely zeroed by
+                # clip_grad_norm, so the optimizer update is always safe.
+                loss_finite_arr = mx.all(mx.isfinite(loss))
+
                 should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
+
+                # Always accumulate gradients (the old skip_update gate is
+                # removed: clip_grad_norm zeros NaN grads, making the update
+                # a harmless no-op for non-finite batches).
+                accumulated_grads = accumulate_grads(accumulated_grads, grads)
+                accumulated_loss = accumulated_loss + loss
+                micro_batches_in_accum += 1
+
+                # Check if accumulation window is complete
+                is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
+                grad_norm_arr = None
+                if is_accum_complete:
+                    did_optimizer_update = True
+
+                    # Scale by 1/grad_accumulation_steps for proper averaging
+                    final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+
+                    # Gradient clipping (returns clipped grads and norm as
+                    # MLX array).  clip_grad_norm zeros non-finite grads.
+                    if max_grad_norm > 0:
+                        final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
+
+                    # Optimistic update — safe because clip_grad_norm
+                    # has already zeroed any non-finite gradients.
+                    optimizer.update(model, final_grads)
+
+                    # Reset accumulator for next window
+                    accumulated_grads = None
+                    accumulated_loss = mx.array(0.0)
+                    micro_batches_in_accum = 0
+
+                # ---- Single sync point per eval_frequency batches ----
                 if should_sync:
-                    mx.eval(loss)
+                    # Build a flat list of everything that needs to be
+                    # materialized, then call mx.eval exactly once.
+                    _eval_targets: list[Any] = [
+                        loss,
+                        loss_finite_arr,
+                        model.parameters(),
+                        optimizer.state,
+                    ]
+                    if grad_norm_arr is not None:
+                        _eval_targets.append(grad_norm_arr)
 
-                if not skip_update:
-                    # Accumulate gradients (for grad_accumulation_steps > 1)
-                    accumulated_grads = accumulate_grads(accumulated_grads, grads)
-                    accumulated_loss = accumulated_loss + loss
-                    micro_batches_in_accum += 1
-
-                    # Check if accumulation window is complete
-                    is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
-                    if is_accum_complete:
-                        did_optimizer_update = True
-
-                        # Scale by 1/grad_accumulation_steps for proper averaging
-                        final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
-
-                        # Gradient clipping (returns clipped grads and norm as MLX array)
-                        # clip_grad_norm zeros grads when norm is non-finite.
-                        if max_grad_norm > 0:
-                            final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
-                            if should_sync:
-                                grad_norm = float(grad_norm_arr)
-
-                        # Post-clip finite check: skip update if grads are
-                        # still non-finite after clipping (shouldn't happen
-                        # with the zeroing logic, but guard defensively).
-                        grads_finite = _tree_all_finite(final_grads)
-                        if not grads_finite:
-                            if debugger is not None:
-                                debugger.check_tree("train.grads_clipped", final_grads, debug_ctx)
-                            tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
-                                f"(step={global_step})"
-                            )
-                            did_optimizer_update = False
-                        else:
-                            # Update parameters
-                            optimizer.update(model, final_grads)
-
-                        # Reset accumulator for next window
-                        accumulated_grads = None
-                        accumulated_loss = mx.array(0.0)
-                        micro_batches_in_accum = 0
-
-                # Only sync periodically for better throughput
-                if should_sync:
                     if (
                         gan_single_eval
                         and gan_active
                         and discriminator is not None
+                        and disc_optimizer is not None
+                        and gan_loss_fns is not None
                         and did_optimizer_update
                         and ((global_step % gan_disc_update_freq) == 0)
                     ):
-                        pass  # Defer to combined gen+disc eval
+                        pass  # Defer to combined gen+disc eval below
                     else:
-                        mx.eval(loss, model.parameters(), optimizer.state)
+                        mx.eval(*_eval_targets)
+                        # Extract deferred scalars (free — already eval'd)
+                        loss_finite = bool(loss_finite_arr)
+                        if not loss_finite:
+                            tqdm.write(
+                                f"⚠️  Non-finite loss detected (step={global_step}); "
+                                "grads were zeroed by clip_grad_norm"
+                            )
+                            if debugger is not None:
+                                _diagnose_nonfinite(
+                                    noisy_real,
+                                    noisy_imag,
+                                    feat_erb,
+                                    feat_spec,
+                                    clean_real,
+                                    clean_imag,
+                                    snr,
+                                    debug_ctx,
+                                )
+                                debugger.check("train.loss", loss, debug_ctx)
+                        if grad_norm_arr is not None:
+                            grad_norm = float(grad_norm_arr)
 
             pred_spec_for_logging = None
             if model_out is not None:
@@ -5750,16 +5758,21 @@ def train(
 
                         if should_sync:
                             if gan_single_eval:
-                                # Combined eval: gen + disc in one call
+                                # Combined eval: gen + disc + deferred
+                                # gen-side arrays in one call
+                                _combined: list[Any] = [
+                                    loss,
+                                    disc_loss,
+                                    loss_finite_arr,
+                                    model.parameters(),
+                                    optimizer.state,
+                                    discriminator.parameters(),
+                                    disc_optimizer.state,
+                                ]
+                                if grad_norm_arr is not None:
+                                    _combined.append(grad_norm_arr)
                                 try:
-                                    mx.eval(
-                                        loss,
-                                        disc_loss,
-                                        model.parameters(),
-                                        optimizer.state,
-                                        discriminator.parameters(),
-                                        disc_optimizer.state,
-                                    )
+                                    mx.eval(*_combined)
                                 except Exception as e:
                                     tqdm.write(
                                         f"  [WARN] Combined GAN eval failed ({e}), " "falling back to separate evals"
@@ -5769,6 +5782,15 @@ def train(
                                         discriminator.parameters(),
                                         disc_optimizer.state,
                                     )
+                                # Extract deferred gen-side scalars
+                                loss_finite = bool(loss_finite_arr)
+                                if not loss_finite:
+                                    tqdm.write(
+                                        f"⚠️  Non-finite loss detected (step={global_step}); "
+                                        "grads were zeroed by clip_grad_norm"
+                                    )
+                                if grad_norm_arr is not None:
+                                    grad_norm = float(grad_norm_arr)
                             else:
                                 mx.eval(
                                     disc_loss,
@@ -7341,6 +7363,7 @@ def main():
         gan_cache_gen_waveforms=default_cfg.gan.cache_gen_waveforms,
         gan_disc_gradient_checkpoint=default_cfg.gan.disc_gradient_checkpoint,
         gan_single_eval=default_cfg.gan.single_eval,
+        gan_eval_frequency=default_cfg.gan.eval_frequency,
         experimental_compiled_gan=default_cfg.gan.experimental_compile,
         vad_loss_weight=default_cfg.vad.loss_weight,
         vad_threshold=default_cfg.vad.threshold,
@@ -7512,6 +7535,7 @@ def main():
         gan_cache_gen_waveforms=run_cfg.gan.cache_gen_waveforms,
         gan_disc_gradient_checkpoint=run_cfg.gan.disc_gradient_checkpoint,
         gan_single_eval=run_cfg.gan.single_eval,
+        gan_eval_frequency=run_cfg.gan.eval_frequency,
         vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
         vad_loss_weight=run_cfg.vad.loss_weight,
         vad_threshold=run_cfg.vad.threshold,

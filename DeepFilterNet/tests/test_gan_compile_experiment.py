@@ -261,18 +261,21 @@ class TestDiscUpdateFreq:
 
         cfg = GanConfig()
         assert hasattr(cfg, "cache_gen_waveforms")
-        assert cfg.cache_gen_waveforms is False
+        assert cfg.cache_gen_waveforms is True
         assert hasattr(cfg, "disc_gradient_checkpoint")
         assert cfg.disc_gradient_checkpoint is False
         assert hasattr(cfg, "single_eval")
-        assert cfg.single_eval is False
+        assert cfg.single_eval is True
+        assert hasattr(cfg, "eval_frequency")
+        assert cfg.eval_frequency == 2
 
     def test_new_fields_in_run_config(self):
         """New fields accessible via RunConfig.gan."""
         cfg = RunConfig()
-        assert cfg.gan.cache_gen_waveforms is False
+        assert cfg.gan.cache_gen_waveforms is True
         assert cfg.gan.disc_gradient_checkpoint is False
-        assert cfg.gan.single_eval is False
+        assert cfg.gan.single_eval is True
+        assert cfg.gan.eval_frequency == 2
 
     def test_apply_new_fields_via_dict(self):
         """New fields can be set via apply_run_config_dict."""
@@ -297,11 +300,13 @@ class TestDiscUpdateFreq:
         data = tomllib.loads(text)
         assert "gan" in data
         assert "cache_gen_waveforms" in data["gan"]
-        assert data["gan"]["cache_gen_waveforms"] is False
+        assert data["gan"]["cache_gen_waveforms"] is True
         assert "disc_gradient_checkpoint" in data["gan"]
         assert data["gan"]["disc_gradient_checkpoint"] is False
         assert "single_eval" in data["gan"]
-        assert data["gan"]["single_eval"] is False
+        assert data["gan"]["single_eval"] is True
+        assert "eval_frequency" in data["gan"]
+        assert data["gan"]["eval_frequency"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -578,12 +583,12 @@ class TestWaveformCaching:
                 assert mx.allclose(clean_wav, mx.zeros((B, T)), atol=1e-6).item()
 
     def test_config_cache_gen_waveforms_default(self):
-        """cache_gen_waveforms defaults to False."""
+        """cache_gen_waveforms defaults to True."""
         cfg = RunConfig()
-        assert cfg.gan.cache_gen_waveforms is False
-
-    def test_config_cache_gen_waveforms_enable(self):
-        """cache_gen_waveforms can be enabled via apply_run_config_dict."""
-        cfg = RunConfig()
-        apply_run_config_dict(cfg, {"gan": {"cache_gen_waveforms": True}})
         assert cfg.gan.cache_gen_waveforms is True
+
+    def test_config_cache_gen_waveforms_disable(self):
+        """cache_gen_waveforms can be disabled via apply_run_config_dict."""
+        cfg = RunConfig()
+        apply_run_config_dict(cfg, {"gan": {"cache_gen_waveforms": False}})
+        assert cfg.gan.cache_gen_waveforms is False

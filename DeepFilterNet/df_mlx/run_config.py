@@ -703,7 +703,7 @@ class GanConfig:
         normalize=_normalize_bool,
     )
     cache_gen_waveforms: bool = cfg_field(
-        False,
+        True,
         help="Cache waveforms from gen loss path for disc update (avoids redundant iSTFT)",
         normalize=_normalize_bool,
     )
@@ -713,9 +713,15 @@ class GanConfig:
         normalize=_normalize_bool,
     )
     single_eval: bool = cfg_field(
-        False,
-        help="Merge gen+disc mx.eval() calls into one (experimental, may OOM on large graphs)",
+        True,
+        help="Merge gen+disc mx.eval() calls into one (reduces sync barriers)",
         normalize=_normalize_bool,
+    )
+    eval_frequency: int = cfg_field(
+        2,
+        help="GAN-epoch eval_frequency override (0 = use training.eval_frequency unchanged; "
+        "N > 0 caps eval_frequency to min(training.eval_frequency, N) during GAN epochs)",
+        normalize=lambda v: _normalize_int(v, min_value=0),
     )
 
 

@@ -138,12 +138,35 @@ class TestEpochEvalFrequencyOverride:
         assert use_compiled is False
 
     def test_eval_frequency_override_concept(self):
-        """When GAN is active, epoch_eval_frequency should be 1 regardless of config."""
+        """When GAN is active, epoch_eval_frequency = min(eval_freq, gan_eval_freq)."""
         eval_frequency = 10
-        gan_active = True
-        epoch_eval_frequency = 1 if gan_active else eval_frequency
-        assert epoch_eval_frequency == 1
+        gan_eval_frequency = 2  # default
 
+        # GAN active: clamped to min(eval_frequency, gan_eval_frequency)
+        gan_active = True
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
+        assert epoch_eval_frequency == 2
+
+        # GAN inactive: original eval_frequency
         gan_active = False
-        epoch_eval_frequency = 1 if gan_active else eval_frequency
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
         assert epoch_eval_frequency == 10
+
+        # Custom high gan_eval_frequency: no effect
+        gan_active = True
+        gan_eval_frequency = 20
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
+        assert epoch_eval_frequency == 10
+
+        # gan_eval_frequency=1: legacy behavior (every step)
+        gan_eval_frequency = 1
+        epoch_eval_frequency = eval_frequency
+        if gan_active:
+            epoch_eval_frequency = min(eval_frequency, gan_eval_frequency)
+        assert epoch_eval_frequency == 1
