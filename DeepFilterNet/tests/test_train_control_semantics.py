@@ -163,4 +163,4 @@ def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
     assert "def compiled_loss_and_grad_step(" in source
     assert "if grad_accumulation_steps > 1:" in source
-    assert "loss, model_out, grads = compiled_loss_and_grad_step(" in source
+    assert "loss, model_out, cached_out_wav, cached_clean_wav, grads = active_compiled_lag(" in source
