@@ -1407,6 +1407,11 @@ class StreamingState:
         # Frame counter
         self.frame_count = 0
 
+    def ensure_mamba_initialized(self, d_inner: int, d_state: int, num_layers: int) -> None:
+        """Initialize mamba_states to zeros if None (needed for mx.compile)."""
+        if self.mamba_states is None:
+            self.mamba_states = mx.zeros((num_layers, self.batch_size, d_inner, d_state))
+
 
 class StreamingDfNet4(nn.Module):
     """Streaming wrapper for frame-by-frame DeepFilterNet4 inference.
@@ -1459,6 +1464,9 @@ class StreamingDfNet4(nn.Module):
         from .ops import get_window
 
         self.window = get_window("sqrt_hann", self.n_fft)
+
+        # Compiled function cache (lazily created)
+        self._compiled_fn = None
 
     def init_state(self, batch_size: int = 1) -> StreamingState:
         """Initialize streaming state for a new audio stream.
@@ -1648,60 +1656,190 @@ class StreamingDfNet4(nn.Module):
 
         return new_state, x
 
+    def _create_compiled_fn(self):
+        """Create a compiled version of core frame processing.
+
+        Model weights are captured by closure and baked at trace time.
+        State arrays are passed as explicit arguments and returned as
+        updated values, avoiding the complexity of mx.compile inputs/outputs.
+        """
+        model = self.model
+        window = self.window
+        n_fft = self.n_fft
+        hop_length = self.hop_length
+        nb_df = self.p.nb_df
+
+        erb_fb = model._erb_fb
+        erb_fb_T = model._erb_fb_T
+        conv_lookahead = model.conv_lookahead
+        df_output_mode = model.df_output_mode
+        df_op = model.df_op
+        encoder = model.encoder
+        backbone = model.backbone
+        erb_decoder = model.erb_decoder
+        df_decoder = model.df_decoder
+
+        @mx.compile
+        def compiled_frame(audio_frame, input_buffer, output_buffer, window_sum, mamba_states):
+            # --- STFT ---
+            full_frame = mx.concatenate([input_buffer, audio_frame], axis=1)
+            windowed = full_frame * window
+            fft_out = mx.fft.rfft(windowed, axis=-1)
+            spec_real = mx.expand_dims(mx.real(fft_out), axis=1)
+            spec_imag = mx.expand_dims(mx.imag(fft_out), axis=1)
+
+            new_input_buffer = mx.concatenate([input_buffer[:, hop_length:], audio_frame], axis=1)
+
+            # --- Features ---
+            mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+            feat_erb = mx.matmul(mag, erb_fb)
+            feat_spec = mx.stack(
+                [spec_real[:, :, :nb_df], spec_imag[:, :, :nb_df]],
+                axis=-1,
+            )
+
+            # --- Model forward ---
+            f_erb = feat_erb
+            f_spec = feat_spec
+            if conv_lookahead > 0:
+                f_erb = model._pad_features(f_erb, conv_lookahead)
+                f_spec = model._pad_features(f_spec, conv_lookahead)
+
+            emb, lsnr = encoder(f_erb, f_spec)
+
+            # Backbone with state threading
+            x = emb
+            if backbone.input_proj is not None:
+                x = backbone.input_proj(x)
+
+            new_states = []
+            for i, layer in enumerate(backbone.layers):
+                layer_state = mamba_states[i]
+                x, new_layer_state = layer(x, layer_state)
+                new_states.append(new_layer_state)
+
+            if backbone.output_proj is not None:
+                x = backbone.output_proj(x)
+
+            new_mamba_states = mx.stack(new_states, axis=0)
+            emb_out = x
+
+            # ERB decoder
+            erb_mask = erb_decoder(emb_out)
+            mask = mx.matmul(erb_mask, erb_fb_T)
+            masked_real = spec_real * mask
+            masked_imag = spec_imag * mask
+
+            # DF decoder
+            df_out = df_decoder(emb_out)
+
+            if df_output_mode == "coefficients" and df_op is not None:
+                spec_out = df_op((masked_real, masked_imag), df_out)
+            else:
+                spec_out = model._apply_complex_gain((masked_real, masked_imag), df_out)
+
+            spec_out = model._apply_post_filter(spec_out, (spec_real, spec_imag))
+
+            # --- iSTFT ---
+            sr = mx.squeeze(spec_out[0], axis=1)
+            si = mx.squeeze(spec_out[1], axis=1)
+            complex_spec = sr + 1j * si
+            frame = mx.fft.irfft(complex_spec, n=n_fft, axis=-1)
+            frame = frame * window
+
+            output = output_buffer + frame
+            ready_samples = output[:, :hop_length]
+
+            new_output_buffer = mx.zeros_like(output_buffer)
+            new_output_buffer = new_output_buffer.at[:, : n_fft - hop_length].add(output[:, hop_length:])
+
+            win_sq = window * window
+            new_window_sum = mx.zeros_like(window_sum)
+            new_window_sum = new_window_sum.at[: n_fft - hop_length].add(window_sum[hop_length:])
+            new_window_sum = new_window_sum + win_sq
+
+            norm_factor = mx.maximum(new_window_sum[:hop_length], 1e-8)
+            ready_samples = ready_samples / norm_factor
+
+            return (
+                ready_samples,
+                new_input_buffer,
+                new_output_buffer,
+                new_window_sum,
+                new_mamba_states,
+            )
+
+        return compiled_frame
+
     def process_frame(
         self,
         audio_frame: mx.array,
         state: StreamingState,
+        *,
+        compiled: bool = True,
     ) -> Tuple[mx.array, StreamingState]:
         """Process a single audio frame.
 
         Args:
             audio_frame: Input audio (batch, hop_length) or (hop_length,)
             state: Current streaming state
+            compiled: If True, use mx.compile for faster dispatch
 
         Returns:
             Tuple of (enhanced_audio, updated_state)
         """
-        # Handle 1D input
         input_1d = audio_frame.ndim == 1
         if input_1d:
             audio_frame = mx.expand_dims(audio_frame, axis=0)
 
-        # Compute STFT for this frame
-        spec_real, spec_imag = self._stft_frame(audio_frame, state)
+        if compiled:
+            state.ensure_mamba_initialized(self.d_inner, self.d_state, self.num_backbone_layers)
 
-        # Update input buffer for next frame
-        state.input_buffer = mx.concatenate(
-            [state.input_buffer[:, self.hop_length :], audio_frame],
-            axis=1,
-        )
+            if self._compiled_fn is None:
+                self._compiled_fn = self._create_compiled_fn()
 
-        # Compute features
-        mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
-        feat_erb = mx.matmul(mag, self.model._erb_fb)  # (batch, 1, nb_erb)
-        feat_spec = mx.stack(
-            [spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]],
-            axis=-1,
-        )  # (batch, 1, nb_df, 2)
+            enhanced, new_ib, new_ob, new_ws, new_ms = self._compiled_fn(
+                audio_frame,
+                state.input_buffer,
+                state.output_buffer,
+                state.window_sum,
+                state.mamba_states,
+            )
+            state.input_buffer = new_ib
+            state.output_buffer = new_ob
+            state.window_sum = new_ws
+            state.mamba_states = new_ms
+        else:
+            # Eager path: original implementation
+            spec_real, spec_imag = self._stft_frame(audio_frame, state)
 
-        # Forward pass with state
-        spec_out, new_mamba_state = self._forward_with_state(
-            (spec_real, spec_imag),
-            feat_erb,
-            feat_spec,
-            state.mamba_states,
-        )
+            state.input_buffer = mx.concatenate(
+                [state.input_buffer[:, self.hop_length :], audio_frame],
+                axis=1,
+            )
 
-        # Update Mamba state
-        state.mamba_states = new_mamba_state
+            mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
+            feat_erb = mx.matmul(mag, self.model._erb_fb)
+            feat_spec = mx.stack(
+                [
+                    spec_real[:, :, : self.p.nb_df],
+                    spec_imag[:, :, : self.p.nb_df],
+                ],
+                axis=-1,
+            )
 
-        # iSTFT for this frame
-        enhanced = self._istft_frame(spec_out[0], spec_out[1], state)
+            spec_out, new_mamba_state = self._forward_with_state(
+                (spec_real, spec_imag),
+                feat_erb,
+                feat_spec,
+                state.mamba_states,
+            )
+            state.mamba_states = new_mamba_state
 
-        # Update frame count
+            enhanced = self._istft_frame(spec_out[0], spec_out[1], state)
+
         state.frame_count += 1
 
-        # Handle 1D output
         if input_1d:
             enhanced = mx.squeeze(enhanced, axis=0)
 
