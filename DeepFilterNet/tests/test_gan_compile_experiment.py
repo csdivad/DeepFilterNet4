@@ -302,3 +302,173 @@ class TestDiscUpdateFreq:
         assert data["gan"]["disc_gradient_checkpoint"] is False
         assert "single_eval" in data["gan"]
         assert data["gan"]["single_eval"] is False
+
+
+# ---------------------------------------------------------------------------
+# GAN-P2: Compiled discriminator update step
+# ---------------------------------------------------------------------------
+
+
+class TestCompiledDiscUpdate:
+    """Tests for compiled discriminator update step (GAN-P2)."""
+
+    def test_compiled_disc_update_config_gate(self):
+        """compiled_disc_update_step is None when experimental_compile is False."""
+        from df_mlx.run_config import GanConfig
+
+        cfg = GanConfig()
+        assert cfg.experimental_compile is False
+
+    def test_compiled_disc_update_concept(self):
+        """Verify that nn.value_and_grad works inside mx.compile."""
+        from functools import partial
+
+        import mlx.core as mx
+        import mlx.nn as nn
+        import mlx.optimizers as optim
+
+        model = nn.Linear(4, 2)
+        optimizer = optim.SGD(learning_rate=0.01)
+
+        state = [model.state, optimizer.state]
+
+        @partial(mx.compile, inputs=state, outputs=state)
+        def compiled_update(x, y):
+            def loss_fn(m):
+                pred = m(x)
+                return mx.mean((pred - y) ** 2)
+
+            loss, grads = nn.value_and_grad(model, loss_fn)(model)
+            optimizer.update(model, grads)
+            return loss
+
+        x = mx.random.normal((2, 4))
+        y = mx.random.normal((2, 2))
+
+        w_before = model.weight.tolist()
+
+        loss = compiled_update(x, y)
+        mx.eval(loss, model.parameters(), optimizer.state)
+
+        w_after = model.weight.tolist()
+        assert w_before != w_after, "Weights should change after compiled update"
+        assert float(loss) > 0, "Loss should be positive"
+
+    def test_compiled_disc_update_multiple_steps(self):
+        """Compiled update converges over several steps."""
+        from functools import partial
+
+        import mlx.core as mx
+        import mlx.nn as nn
+        import mlx.optimizers as optim
+
+        model = nn.Linear(4, 2)
+        optimizer = optim.SGD(learning_rate=0.01)
+        state = [model.state, optimizer.state]
+
+        @partial(mx.compile, inputs=state, outputs=state)
+        def compiled_update(x, y):
+            def loss_fn(m):
+                pred = m(x)
+                return mx.mean((pred - y) ** 2)
+
+            loss, grads = nn.value_and_grad(model, loss_fn)(model)
+            optimizer.update(model, grads)
+            return loss
+
+        x = mx.random.normal((8, 4))
+        y = mx.random.normal((8, 2))
+
+        losses = []
+        for _ in range(10):
+            loss = compiled_update(x, y)
+            mx.eval(loss, model.parameters(), optimizer.state)
+            losses.append(float(loss))
+
+        assert losses[-1] < losses[0], "Loss should decrease over steps"
+
+
+# ---------------------------------------------------------------------------
+# GAN-P1: Compiled discriminator inference for gen loss path
+# ---------------------------------------------------------------------------
+
+
+class TestCompiledDiscInference:
+    """Tests for compiled disc inference in gen loss path (GAN-P1)."""
+
+    def test_compiled_disc_infer_concept(self):
+        """Verify mx.compile works for inference-only forward pass."""
+        from functools import partial
+
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        disc = nn.Linear(4, 1)
+        disc_state = [disc.state]
+
+        @partial(mx.compile, inputs=disc_state, outputs=disc_state)
+        def compiled_infer(x):
+            return disc(x)
+
+        x = mx.random.normal((2, 4))
+
+        eager_out = disc(x)
+        compiled_out = compiled_infer(x)
+        mx.eval(eager_out, compiled_out)
+
+        assert mx.allclose(eager_out, compiled_out, atol=1e-5).item()
+
+    def test_compiled_disc_infer_multi_output(self):
+        """Compiled inference returning multiple tensors matches eager."""
+        from functools import partial
+
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        class TwoOutputDisc(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(4, 2)
+
+            def __call__(self, x):
+                out = self.linear(x)
+                scores = out[:, :1]
+                feats = out[:, 1:]
+                return scores, feats
+
+        disc = TwoOutputDisc()
+        disc_state = [disc.state]
+
+        @partial(mx.compile, inputs=disc_state, outputs=disc_state)
+        def compiled_infer(fake_wav, real_wav):
+            d_fake, f_fake = disc(fake_wav)
+            d_real, f_real = disc(mx.stop_gradient(real_wav))
+            return d_fake, f_fake, d_real, f_real
+
+        fake = mx.random.normal((2, 4))
+        real = mx.random.normal((2, 4))
+
+        e_fake_s, e_fake_f = disc(fake)
+        e_real_s, e_real_f = disc(mx.stop_gradient(real))
+        c_fake_s, c_fake_f, c_real_s, c_real_f = compiled_infer(fake, real)
+        mx.eval(e_fake_s, e_fake_f, e_real_s, e_real_f)
+        mx.eval(c_fake_s, c_fake_f, c_real_s, c_real_f)
+
+        assert mx.allclose(e_fake_s, c_fake_s, atol=1e-5).item()
+        assert mx.allclose(e_fake_f, c_fake_f, atol=1e-5).item()
+        assert mx.allclose(e_real_s, c_real_s, atol=1e-5).item()
+        assert mx.allclose(e_real_f, c_real_f, atol=1e-5).item()
+
+    def test_late_binding_holder_pattern(self):
+        """The mutable container pattern works for late-bound closures."""
+        holder: list = [None]
+
+        def use_holder(x):
+            if holder[0] is not None:
+                return holder[0](x)
+            return x * 2
+
+        assert use_holder(3) == 6
+
+        holder[0] = lambda x: x * 10
+        assert use_holder(3) == 30

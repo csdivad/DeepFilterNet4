@@ -3633,6 +3633,10 @@ def train(
 
     gan_active = False
 
+    # Mutable holder for late-bound compiled disc inference (GAN-P1).
+    # Populated after the compiled-GAN section; used inside loss_fn/loss_fn_gan.
+    _compiled_disc_infer_holder: list = [None]
+
     # Loss function - define as a pure function for compilation
     # Loss formula:
     #   L_total = L_spec
@@ -3692,12 +3696,17 @@ def train(
             gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
             gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
             gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
-            if gan_disc_gradient_checkpoint:
-                _disc_fn = mx.checkpoint(discriminator)
+            if _compiled_disc_infer_holder[0] is not None and not gan_disc_gradient_checkpoint:
+                disc_fake, fake_feats, disc_real, real_feats = _compiled_disc_infer_holder[0](
+                    gan_out_wav, gan_clean_wav
+                )
             else:
-                _disc_fn = discriminator
-            disc_fake, fake_feats = _disc_fn(gan_out_wav)
-            disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))
+                if gan_disc_gradient_checkpoint:
+                    _disc_fn = mx.checkpoint(discriminator)
+                else:
+                    _disc_fn = discriminator
+                disc_fake, fake_feats = _disc_fn(gan_out_wav)
+                disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))
             gan_g_loss = gen_loss_fn(disc_fake)
             total_loss = total_loss + gan_weight * gan_g_loss
             if feature_match_loss is not None and gan_fm_weight > 0:
@@ -3862,12 +3871,17 @@ def train(
                 gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                 gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
                 gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
-                if gan_disc_gradient_checkpoint:
-                    _disc_fn = mx.checkpoint(discriminator)
+                if _compiled_disc_infer_holder[0] is not None and not gan_disc_gradient_checkpoint:
+                    disc_fake, fake_feats, disc_real, real_feats = _compiled_disc_infer_holder[0](
+                        gan_out_wav, gan_clean_wav
+                    )
                 else:
-                    _disc_fn = discriminator
-                disc_fake, fake_feats = _disc_fn(gan_out_wav)
-                disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))
+                    if gan_disc_gradient_checkpoint:
+                        _disc_fn = mx.checkpoint(discriminator)
+                    else:
+                        _disc_fn = discriminator
+                    disc_fake, fake_feats = _disc_fn(gan_out_wav)
+                    disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))
                 gan_g_loss = gen_loss_fn(disc_fake)
                 total_loss = total_loss + gan_weight * gan_g_loss
                 if feature_match_loss is not None and gan_fm_weight > 0:
@@ -4318,6 +4332,54 @@ def train(
 
         compiled_gan_step = _compiled_gan_step
         compiled_gan_loss_and_grad_step = _compiled_gan_loss_and_grad_step
+
+    # -- Compiled discriminator update step (GAN-P2) -------------------------
+    compiled_disc_update_step = None
+
+    if experimental_compiled_gan and discriminator is not None and disc_optimizer is not None:
+        disc_update_state = [discriminator.state, disc_optimizer.state]
+        _, _disc_loss_fn_ref = gan_loss_fns  # capture discriminator_loss
+
+        @partial(mx.compile, inputs=disc_update_state, outputs=disc_update_state)
+        def _compiled_disc_update_step(
+            clean_wav_d,
+            pred_wav_d,
+            max_disc_grad_norm,
+        ):
+            """Compiled discriminator update: fwd+bwd+optimizer in one graph."""
+
+            def _disc_loss_inner(disc):
+                real_out, _ = disc(clean_wav_d, return_features=False)
+                fake_out, _ = disc(pred_wav_d, return_features=False)
+                total_loss, _, _ = _disc_loss_fn_ref(real_out, fake_out)
+                return total_loss
+
+            d_loss, d_grads = nn.value_and_grad(discriminator, _disc_loss_inner)(discriminator)
+            if max_disc_grad_norm > 0:
+                d_grads, _ = clip_grad_norm(d_grads, max_disc_grad_norm)
+            disc_optimizer.update(discriminator, d_grads)
+            return d_loss
+
+        compiled_disc_update_step = _compiled_disc_update_step
+
+    # -- Compiled discriminator inference for gen loss path (GAN-P1) ----------
+    compiled_disc_infer = None
+
+    if experimental_compiled_gan and discriminator is not None:
+        disc_infer_state = [discriminator.state]
+
+        @partial(mx.compile, inputs=disc_infer_state, outputs=disc_infer_state)
+        def _compiled_disc_infer(
+            fake_wav,
+            real_wav,
+        ):
+            """Compiled disc forward for gen loss path."""
+            disc_fake, fake_feats = discriminator(fake_wav)
+            disc_real, real_feats = discriminator(mx.stop_gradient(real_wav))
+            return disc_fake, fake_feats, disc_real, real_feats
+
+        compiled_disc_infer = _compiled_disc_infer
+        _compiled_disc_infer_holder[0] = compiled_disc_infer
 
     def run_validation(label: str = "  Validating", *, do_vad_eval: bool = False) -> float:
         """Run validation on the fixed validation split and return average loss."""
@@ -5657,18 +5719,26 @@ def train(
                         clean_wav_d, d_crop = _disc_crop_waveform(clean_wav, gan_disc_max_samples)
                         pred_wav_d, _ = _disc_crop_waveform(pred_wav, gan_disc_max_samples, crop_start=d_crop)
 
-                        def disc_loss_wrapper(disc):
-                            real_out, _ = disc(clean_wav_d, return_features=False)
-                            fake_out, _ = disc(pred_wav_d, return_features=False)
-                            total_loss, _, _ = disc_loss_fn(real_out, fake_out)
-                            return total_loss
+                        if compiled_disc_update_step is not None:
+                            disc_loss = compiled_disc_update_step(
+                                clean_wav_d,
+                                pred_wav_d,
+                                mx.array(float(gan_disc_grad_clip)),
+                            )
+                        else:
 
-                        disc_loss, disc_grads = nn.value_and_grad(discriminator, disc_loss_wrapper)(discriminator)
+                            def disc_loss_wrapper(disc):
+                                real_out, _ = disc(clean_wav_d, return_features=False)
+                                fake_out, _ = disc(pred_wav_d, return_features=False)
+                                total_loss, _, _ = disc_loss_fn(real_out, fake_out)
+                                return total_loss
 
-                        if gan_disc_grad_clip > 0:
-                            disc_grads, _ = clip_grad_norm(disc_grads, gan_disc_grad_clip)
+                            disc_loss, disc_grads = nn.value_and_grad(discriminator, disc_loss_wrapper)(discriminator)
 
-                        disc_optimizer.update(discriminator, disc_grads)
+                            if gan_disc_grad_clip > 0:
+                                disc_grads, _ = clip_grad_norm(disc_grads, gan_disc_grad_clip)
+
+                            disc_optimizer.update(discriminator, disc_grads)
 
                         if should_sync:
                             if gan_single_eval:
