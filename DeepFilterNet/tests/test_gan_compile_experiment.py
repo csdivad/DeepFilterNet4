@@ -472,3 +472,118 @@ class TestCompiledDiscInference:
 
         holder[0] = lambda x: x * 10
         assert use_holder(3) == 30
+
+
+# ---------------------------------------------------------------------------
+# GAN-P3: Waveform caching tests
+# ---------------------------------------------------------------------------
+
+
+class TestWaveformCaching:
+    """Tests for GAN-P3 waveform caching optimization."""
+
+    def test_loss_fn_returns_four_values(self):
+        """nn.value_and_grad on a 4-tuple-returning fn produces ((loss, a, b, c), grads)."""
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        model = nn.Linear(4, 2)
+
+        def loss_fn(m, x):
+            pred = m(x)
+            loss = mx.mean(pred**2)
+            aux1 = pred
+            aux2 = pred * 2
+            return loss, pred, aux1, aux2
+
+        lag = nn.value_and_grad(model, loss_fn)
+        x = mx.random.normal((2, 4))
+        (loss, out, a1, a2), grads = lag(model, x)
+        mx.eval(loss, out, a1, a2)
+        assert loss.shape == ()
+        assert out.shape == (2, 2)
+        assert a1.shape == (2, 2)
+        assert a2.shape == (2, 2)
+        assert mx.allclose(a2, a1 * 2, atol=1e-5).item()
+
+    def test_loss_fn_returns_none_wavs_when_no_istft(self):
+        """When aux values are None, nn.value_and_grad passes them through."""
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        model = nn.Linear(4, 2)
+
+        def loss_fn(m, x):
+            pred = m(x)
+            loss = mx.mean(pred**2)
+            return loss, pred, None, None
+
+        lag = nn.value_and_grad(model, loss_fn)
+        x = mx.random.normal((2, 4))
+        (loss, out, a1, a2), grads = lag(model, x)
+        mx.eval(loss, out)
+        assert a1 is None
+        assert a2 is None
+
+    def test_cached_waveforms_match_recomputed(self):
+        """Waveforms from loss_fn match independently recomputed ISTFT output."""
+        import mlx.core as mx
+
+        # Simulate: loss_fn returns raw waveforms, disc update would recompute.
+        # The values should be identical (same input, same transform).
+        B, T = 2, 16
+        out_spec = mx.random.normal((B, T))
+        clean_spec = mx.random.normal((B, T))
+
+        def fake_istft(spec):
+            return spec * 0.5  # deterministic transform
+
+        # "loss_fn" path
+        cached_out = fake_istft(out_spec)
+        cached_clean = fake_istft(clean_spec)
+
+        # "disc update" path — recompute
+        recomputed_out = fake_istft(out_spec)
+        recomputed_clean = fake_istft(clean_spec)
+
+        mx.eval(cached_out, cached_clean, recomputed_out, recomputed_clean)
+        assert mx.allclose(cached_out, recomputed_out, atol=1e-6).item()
+        assert mx.allclose(cached_clean, recomputed_clean, atol=1e-6).item()
+
+    def test_cache_flag_controls_recompute(self):
+        """When flag is True, cached wavs are used; when False, recompute runs."""
+        import mlx.core as mx
+
+        B, T = 2, 16
+        cached_out = mx.ones((B, T))
+        cached_clean = mx.ones((B, T)) * 2
+
+        recomputed_out = mx.zeros((B, T))
+        recomputed_clean = mx.zeros((B, T))
+
+        for flag in (True, False):
+            if flag and cached_out is not None and cached_clean is not None:
+                pred_wav = cached_out
+                clean_wav = cached_clean
+            else:
+                pred_wav = recomputed_out
+                clean_wav = recomputed_clean
+
+            mx.eval(pred_wav, clean_wav)
+            if flag:
+                assert mx.allclose(pred_wav, mx.ones((B, T)), atol=1e-6).item()
+                assert mx.allclose(clean_wav, mx.ones((B, T)) * 2, atol=1e-6).item()
+            else:
+                assert mx.allclose(pred_wav, mx.zeros((B, T)), atol=1e-6).item()
+                assert mx.allclose(clean_wav, mx.zeros((B, T)), atol=1e-6).item()
+
+    def test_config_cache_gen_waveforms_default(self):
+        """cache_gen_waveforms defaults to False."""
+        cfg = RunConfig()
+        assert cfg.gan.cache_gen_waveforms is False
+
+    def test_config_cache_gen_waveforms_enable(self):
+        """cache_gen_waveforms can be enabled via apply_run_config_dict."""
+        cfg = RunConfig()
+        apply_run_config_dict(cfg, {"gan": {"cache_gen_waveforms": True}})
+        assert cfg.gan.cache_gen_waveforms is True

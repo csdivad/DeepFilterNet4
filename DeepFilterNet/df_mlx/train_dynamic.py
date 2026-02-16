@@ -3804,7 +3804,9 @@ def train(
 
         # Return model output as auxiliary data so callers can reuse it for
         # logging/discriminator updates without triggering a second forward.
-        return total_loss, out
+        # out_wav/clean_wav are the raw ISTFT outputs (possibly fp32); callers
+        # apply _gan_waveform_view / stop_gradient / crop independently.
+        return total_loss, out, out_wav, clean_wav
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
@@ -3977,7 +3979,7 @@ def train(
                 )
                 total_loss = total_loss + vad_reg_weight * vad_reg_loss
 
-            return total_loss, out
+            return total_loss, out, out_wav, clean_wav
 
         loss_and_grad_gan = nn.value_and_grad(model, loss_fn_gan)
 
@@ -4187,7 +4189,7 @@ def train(
         This compiles the forward pass, backward pass, and optimizer update
         into a single optimized computation graph.
         """
-        (loss, out), grads = loss_and_grad(
+        (loss, out, cached_out_wav, cached_clean_wav), grads = loss_and_grad(
             model,
             noisy_real,
             noisy_imag,
@@ -4207,7 +4209,7 @@ def train(
         if max_grad_norm_val > 0:
             grads, _ = clip_grad_norm(grads, max_grad_norm_val)
         optimizer.update(model, grads)
-        return loss, out
+        return loss, out, cached_out_wav, cached_clean_wav
 
     # Compiled forward/backward step (no optimizer update).
     # Used when gradient accumulation is enabled so updates remain aligned to
@@ -4228,7 +4230,7 @@ def train(
         gan_weight,
         fm_weight,
     ):
-        (loss, out), grads = loss_and_grad(
+        (loss, out, cached_out_wav, cached_clean_wav), grads = loss_and_grad(
             model,
             noisy_real,
             noisy_imag,
@@ -4244,7 +4246,7 @@ def train(
             gan_weight,
             fm_weight,
         )
-        return loss, out, grads
+        return loss, out, cached_out_wav, cached_clean_wav, grads
 
     # -- Compiled GAN training steps (experimental) -------------------------
     # Mirror of compiled_step / compiled_loss_and_grad_step but using
@@ -4274,7 +4276,7 @@ def train(
             max_grad_norm_val,
         ):
             """Compiled gen step with GAN paths always active (experimental)."""
-            (loss, out), grads = _lag_gan(
+            (loss, out, cached_out_wav, cached_clean_wav), grads = _lag_gan(
                 model,
                 noisy_real,
                 noisy_imag,
@@ -4293,7 +4295,7 @@ def train(
             if max_grad_norm_val > 0:
                 grads, _ = clip_grad_norm(grads, max_grad_norm_val)
             optimizer.update(model, grads)
-            return loss, out
+            return loss, out, cached_out_wav, cached_clean_wav
 
         @partial(mx.compile, inputs=[model.state], outputs=[model.state])
         def _compiled_gan_loss_and_grad_step(
@@ -4312,7 +4314,7 @@ def train(
             fm_weight,
         ):
             """Compiled gen fwd+bwd with GAN paths always active (experimental)."""
-            (loss, out), grads = _lag_gan(
+            (loss, out, cached_out_wav, cached_clean_wav), grads = _lag_gan(
                 model,
                 noisy_real,
                 noisy_imag,
@@ -4328,7 +4330,7 @@ def train(
                 gan_weight,
                 fm_weight,
             )
-            return loss, out, grads
+            return loss, out, cached_out_wav, cached_clean_wav, grads
 
         compiled_gan_step = _compiled_gan_step
         compiled_gan_loss_and_grad_step = _compiled_gan_loss_and_grad_step
@@ -5437,6 +5439,8 @@ def train(
             fwd_start = time.perf_counter()
 
             model_out = None
+            cached_out_wav = None
+            cached_clean_wav = None
             use_compiled_step_for_batch = epoch_use_compiled_step and current_batch_size == batch_size
             if epoch_use_compiled_step:
                 if not use_compiled_step_for_batch:
@@ -5472,7 +5476,7 @@ def train(
 
                 if grad_accumulation_steps > 1:
                     # Compiled fwd+bwd with eager accumulated optimizer updates.
-                    loss, model_out, grads = active_compiled_lag(
+                    loss, model_out, cached_out_wav, cached_clean_wav, grads = active_compiled_lag(
                         noisy_real,
                         noisy_imag,
                         feat_erb,
@@ -5519,7 +5523,7 @@ def train(
                 else:
                     # Fully compiled training step (fwd+bwd+update) for best throughput.
                     did_optimizer_update = True
-                    loss, model_out = active_compiled_step(
+                    loss, model_out, cached_out_wav, cached_clean_wav = active_compiled_step(
                         noisy_real,
                         noisy_imag,
                         feat_erb,
@@ -5544,7 +5548,7 @@ def train(
                     ):
                         _compiled_gan_correctness_verified = True
                         # Run an eager forward pass for comparison
-                        (eager_loss, _), _ = loss_and_grad_gan(
+                        (eager_loss, _, _, _), _ = loss_and_grad_gan(
                             model,
                             noisy_real,
                             noisy_imag,
@@ -5582,7 +5586,7 @@ def train(
                 grad_norm = float("nan")  # Not tracked in compiled path
             else:
                 # Standard training step
-                (loss, model_out), grads = loss_and_grad(
+                (loss, model_out, cached_out_wav, cached_clean_wav), grads = loss_and_grad(
                     model,
                     noisy_real,
                     noisy_imag,
@@ -5702,15 +5706,19 @@ def train(
                         pred_spec = pred_spec_for_logging
                     pred_spec_for_logging = pred_spec
                     if gan_istft is not None:
-                        pred_wav, clean_wav = specs_to_wavs(
-                            pred_spec,
-                            (clean_real, clean_imag),
-                            istft_fn=gan_istft,
-                            n_fft=config.fft_size,
-                            hop_length=config.hop_size,
-                            target_len=gan_target_len,
-                            force_fp32=use_mrstft_loss,
-                        )
+                        if gan_cache_gen_waveforms and cached_out_wav is not None and cached_clean_wav is not None:
+                            pred_wav = cached_out_wav
+                            clean_wav = cached_clean_wav
+                        else:
+                            pred_wav, clean_wav = specs_to_wavs(
+                                pred_spec,
+                                (clean_real, clean_imag),
+                                istft_fn=gan_istft,
+                                n_fft=config.fft_size,
+                                hop_length=config.hop_size,
+                                target_len=gan_target_len,
+                                force_fp32=use_mrstft_loss,
+                            )
                         pred_wav = _gan_waveform_view(pred_wav, use_fp16=bool(use_fp16))
                         clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                         pred_wav = mx.stop_gradient(pred_wav)
