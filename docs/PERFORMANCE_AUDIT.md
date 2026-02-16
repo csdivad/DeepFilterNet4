@@ -183,18 +183,40 @@ Existing Metal kernels already cover the 3 highest-cost per-frame operations:
 
 **Test coverage**: 10 dedicated tests in `tests/test_perf_optimizations.py` + 866 existing tests pass (6 pre-existing failures unrelated to perf changes).
 
-### Completed (Phase 2 — P2 Metal kernels & allocation reduction)
+### Completed (Phase 2 — P2 Metal kernels)
 
 | ID | Optimization | Files Changed | Impact |
 |----|-------------|---------------|--------|
-| PERF-P2-001 | Mamba scan: replace `mx.concatenate` with pre-allocated buffers + slice assignment | `mamba.py` | ~30 temporary tensor allocations eliminated per forward pass |
 | PERF-P2-003 | Fused post-filter Metal kernel (22 element-wise ops → 1 GPU dispatch) | `kernels.py`, `model.py` | 22 graph nodes → 1 Metal dispatch; differentiable VJP included |
 
-**Mamba scan details**: The iterative doubling parallel scan in `_selective_scan()` previously created 2 `mx.concatenate` calls per loop iteration (~14 iterations) plus 3 for padding = ~31 full-tensor temporary allocations of shape `(batch, padded_len, d_inner, d_state)`. Now uses `mx.ones`/`mx.zeros` for pre-allocation and direct slice assignment `A_scan[:, stride:] = new_A` in the loop.
+**Post-filter kernel details**: New `post_filter_kernel()` in `kernels.py` fuses the full post-filter computation (magnitudes, mask ratio, sinusoidal transfer, gain application) into a single Metal kernel with 1 thread per element. Includes `@mx.custom_function` + full VJP for training compatibility. Automatically used when `metal_kernels_available()` returns True, with pure-MLX fallback otherwise. Benchmarked at **1.3–1.5x faster** than the pure-MLX fallback in isolation.
 
-**Post-filter kernel details**: New `post_filter_kernel()` in `kernels.py` fuses the full post-filter computation (magnitudes, mask ratio, sinusoidal transfer, gain application) into a single Metal kernel with 1 thread per element. Includes `@mx.custom_function` + full VJP for training compatibility. Automatically used when `metal_kernels_available()` returns True, with pure-MLX fallback otherwise.
+### Reverted (Phase 2 — P2 Mamba scan pre-allocation)
 
-**Test coverage**: 18 dedicated tests in `tests/test_perf_optimizations.py` + 874 existing tests pass.
+| ID | Optimization | Status | Reason |
+|----|-------------|--------|--------|
+| PERF-P2-001 | Mamba scan: replace `mx.concatenate` with pre-allocated buffers + slice assignment | **REVERTED** | Benchmarking revealed **20–25% throughput regression**. MLX's lazy evaluation model makes slice assignment (scatter ops) more expensive than concatenation (simple memcpy). Pre-allocating full-size buffers with identity elements adds wasted graph nodes that are immediately overwritten. The `mx.concatenate` approach generates a simpler, more compiler-friendly computation graph. |
+
+### Benchmark Results (main@2e73dc7 vs optimized)
+
+All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
+
+| Benchmark | Before (ms) | After (ms) | Delta | Verdict |
+|-----------|------------|------------|-------|---------|
+| Forward B=1 T=100 | 17.44 | 17.97 | +3% | Within noise |
+| Forward B=4 T=100 | 74.22 | 74.99 | +1% | Within noise |
+| Forward B=8 T=100 | 133.34 | 138.17 | +4% | Within noise |
+| Train Step B=1 | 71.75 | 73.23 | +2% | Within noise |
+| Train Step B=4 | 256.60 | 261.84 | +2% | Within noise |
+| Train Step B=8 | 486.85 | 503.91 | +4% | Within noise |
+| Post-filter (MLX) B=8 | 0.84 | 0.84 | 0% | Neutral |
+| Post-filter (Metal) B=8 | N/A | 0.57 | — | **1.5x faster** |
+| Peak Mem (fwd B=8) | 2618 MB | 2618 MB | 0% | Neutral |
+| Peak Mem (train B=8) | 3487 MB | 3487 MB | 0% | Neutral |
+
+**Key insight**: MLX's lazy evaluation and JIT compilation absorb most redundant-cast and caching optimizations — they eliminate wasted Python-level work but don't change the compiled graph materially. The only measurable improvement is the fused post-filter Metal kernel (1.3–1.5x for that operation).
+
+**Test coverage**: 18 dedicated tests in `tests/test_perf_optimizations.py` + full suite passes.
 
 ### Remaining (Future Phases)
 

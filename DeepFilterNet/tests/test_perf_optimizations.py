@@ -1,5 +1,5 @@
 """Tests for performance optimizations: dtype guards, cached transpose, lazy loss dict,
-Mamba scan allocation reduction, and post-filter Metal kernel.
+Mamba scan concat-based parallel prefix, and post-filter Metal kernel.
 
 Validates that:
 1. Redundant FP32 casts are skipped when input is already FP32 (PERF-P0-001)
@@ -7,7 +7,7 @@ Validates that:
 3. ERB filterbank transpose is cached at init (PERF-P0-003)
 4. CombinedLoss returns lazy mx.array dict, not float dict (PERF-P1-002)
 5. All dtype-guarded functions produce identical results for FP16 and FP32 inputs
-6. Mamba scan uses pre-allocated buffers instead of mx.concatenate (PERF-P2-001)
+6. Mamba scan uses concat-based parallel prefix (efficient in MLX's lazy eval model) (PERF-P2-001)
 7. Post-filter Metal kernel matches pure-MLX fallback (PERF-P2-003)
 """
 
@@ -207,27 +207,28 @@ class TestMusicnessGuards:
 
 
 class TestMambaScanOptimization:
-    """Verify that MambaBlock._selective_scan uses pre-allocated buffers
-    and slice assignment instead of mx.concatenate."""
+    """Verify that MambaBlock._selective_scan uses the concat-based parallel
+    prefix scan approach (more efficient in MLX's lazy evaluation model than
+    pre-allocated buffers with scatter writes)."""
 
-    def test_mamba_scan_no_concat_in_scan_loop(self):
-        """The parallel scan loop in _selective_scan must NOT use mx.concatenate."""
+    def test_mamba_scan_uses_concat_in_scan_loop(self):
+        """The parallel scan loop in _selective_scan should use mx.concatenate
+        for iterative doubling (generates optimal MLX computation graphs)."""
         from df_mlx.mamba import MambaBlock
 
         source = inspect.getsource(MambaBlock._selective_scan)
-        # Find the iterative-doubling loop and everything after it
         loop_match = re.search(r"for d in range\(log2_L\):", source)
         assert loop_match is not None, "_selective_scan must contain the parallel scan loop"
         loop_body = source[loop_match.start() :]
-        assert "concatenate" not in loop_body, "_selective_scan scan loop must use slice assignment, not mx.concatenate"
+        assert "concatenate" in loop_body, "_selective_scan scan loop must use mx.concatenate for iterative doubling"
 
-    def test_mamba_scan_uses_prealloc_buffers(self):
-        """_selective_scan must pre-allocate A_scan with mx.ones and b_scan with mx.zeros."""
+    def test_mamba_scan_uses_conditional_padding(self):
+        """_selective_scan should conditionally pad only when needed (pad_amount > 0)."""
         from df_mlx.mamba import MambaBlock
 
         source = inspect.getsource(MambaBlock._selective_scan)
-        assert "mx.ones(" in source, "_selective_scan must use mx.ones for A_scan pre-allocation"
-        assert "mx.zeros(" in source, "_selective_scan must use mx.zeros for b_scan/C_padded pre-allocation"
+        assert "pad_amount" in source, "_selective_scan must compute pad_amount"
+        assert "if pad_amount > 0" in source, "_selective_scan must conditionally pad only when needed"
 
     def test_mamba_scan_numerical_equivalence(self):
         """MambaBlock forward pass must produce finite outputs with correct shape."""

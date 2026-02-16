@@ -237,17 +237,25 @@ class MambaBlock(nn.Module):
         # Pad sequence length to next power of 2 for efficient parallel scan
         log2_L = math.ceil(math.log2(max(seq_len, 1)))
         padded_len = 2**log2_L
+        pad_amount = padded_len - seq_len
 
-        # Pre-allocate with identity elements (A=1 for multiply, b=0 for add)
-        A_scan = mx.ones((batch, padded_len, d_inner, d_state), dtype=deltaA.dtype)
-        A_scan[:, :seq_len, :, :] = deltaA
-
-        b_scan = mx.zeros((batch, padded_len, d_inner, d_state), dtype=deltaB_u.dtype)
-        b_scan[:, :seq_len, :, :] = deltaB_u
+        if pad_amount > 0:
+            # Pad with identity elements: A=1, b=0
+            pad_shape_A = (batch, pad_amount, d_inner, d_state)
+            pad_shape_b = (batch, pad_amount, d_inner, d_state)
+            deltaA = mx.concatenate([deltaA, mx.ones(pad_shape_A)], axis=1)
+            deltaB_u = mx.concatenate([deltaB_u, mx.zeros(pad_shape_b)], axis=1)
 
         # Also pad C for output computation later
-        C_padded = mx.zeros((batch, padded_len, d_state), dtype=C.dtype)
-        C_padded[:, :seq_len, :] = C
+        if pad_amount > 0:
+            C_padded = mx.concatenate([C, mx.zeros((batch, pad_amount, d_state))], axis=1)
+        else:
+            C_padded = C
+
+        # Up-sweep phase: compute all prefix products/sums
+        # After log2_L iterations, we have cumulative A and b at each position
+        A_scan = deltaA  # (batch, padded_len, d_inner, d_state)
+        b_scan = deltaB_u  # (batch, padded_len, d_inner, d_state)
 
         # Iterative doubling for parallel prefix scan
         for d in range(log2_L):
@@ -267,10 +275,10 @@ class MambaBlock(nn.Module):
             new_A = A_right * A_left
             new_b = A_right * b_left + b_right
 
-            # Update the right portion in-place (indices stride onwards)
-            # MLX slicing creates copies, so A_left/b_left are safe snapshots
-            A_scan[:, stride:, :, :] = new_A
-            b_scan[:, stride:, :, :] = new_b
+            # Update the right portion (indices stride onwards)
+            # Keep first 'stride' elements unchanged
+            A_scan = mx.concatenate([A_scan[:, :stride, :, :], new_A], axis=1)
+            b_scan = mx.concatenate([b_scan[:, :stride, :, :], new_b], axis=1)
 
         # Truncate back to original sequence length
         A_scan = A_scan[:, :seq_len, :, :]
