@@ -218,6 +218,43 @@ All measurements on Apple M4 Max (36GB), Python 3.10.19, MLX 0.30.6.
 
 **Test coverage**: 18 dedicated tests in `tests/test_perf_optimizations.py` + full suite passes.
 
+### Completed (Phase 3 — GAN Pipeline Optimizations)
+
+| ID | Optimization | Files Changed | Impact |
+|----|-------------|---------------|--------|
+| GAN-P4 | Vectorized loss accumulation: `FeatureMatchingLoss`, `discriminator_loss`, `generator_loss` — replaced sequential `loss += mx.mean(...)` accumulator pattern with `losses.append()` + `mx.mean(mx.stack(losses))` | `loss.py` | Reduces AD graph from linear addition chain (~48 nodes in FM loss) to single stack+mean node. Fewer intermediate graph nodes for backward pass to trace. |
+| GAN-P5 | Score-only discriminator forward: added `return_features: bool = True` parameter to all 5 discriminator `__call__` methods (`PeriodDiscriminator`, `ScaleDiscriminator`, `MultiPeriodDiscriminator`, `MultiScaleDiscriminator`, `CombinedDiscriminator`) | `discriminator.py` | When `return_features=False`, skips building Python lists of intermediate feature maps. Produces cleaner computation graph for disc update AD path. |
+| GAN-P3 | Score-only mode in disc update path: `disc_loss_wrapper` passes `return_features=False` since discriminator update only needs scores, not feature maps | `train_dynamic.py` | Eliminates ~48 Python list `.append()` calls and associated list bookkeeping per disc update step. |
+
+### GAN Pipeline Analysis
+
+**Architecture**: CombinedDiscriminator = MPD (5 PeriodDiscriminators, periods 2/3/5/7/11) + MSD (3 ScaleDiscriminators). Total: 8 sub-discriminators with 5-7 conv layers each = ~48 conv+activation kernel launches per forward pass.
+
+**Compute profile per GAN-active training step** (disc-update frequency = 1):
+
+| Phase | Disc Forwards | iSTFT Calls | Notes |
+|-------|--------------|-------------|-------|
+| Generator loss (inside `loss_fn`) | 2 (fake + real) | 2 (pred + clean via `specs_to_wavs`) | Real forward needed for feature matching loss |
+| Discriminator update | 2 (fake + real) | 2 (pred + clean via `specs_to_wavs`) | Now uses `return_features=False` |
+| **Total** | **4** | **4** | Cannot reduce below 4 disc forwards without algorithmic changes |
+
+**Why 4 discriminator forwards are necessary**: The generator loss path runs `disc(fake)` and `disc(real)` to compute adversarial + feature matching losses — both must be traced through the generator's AD graph. The discriminator update path runs `disc(fake)` and `disc(real)` with a *different* AD graph (tracing through disc parameters, not generator). These are fundamentally different computation graphs that cannot be shared.
+
+**Why `specs_to_wavs` is called twice**: The waveforms computed inside `loss_fn` (generator AD graph) are consumed by `nn.value_and_grad` and not easily extractable. The disc update path needs `mx.stop_gradient(pred_wav)` which must be created outside the gen AD graph. Caching would require restructuring the loss function return signature and `nn.value_and_grad` call chain — moderate effort with moderate risk.
+
+### GAN Optimization Candidates (Future)
+
+| Priority | Optimization | Impact | Risk | Effort | Notes |
+|----------|-------------|--------|------|--------|-------|
+| P1 | Compile disc forward pass with `mx.compile()` | **HIGH** | MEDIUM | MEDIUM | ~200-240 kernel launches → fused graph. Fixed input shapes after crop. Must verify composition with `nn.value_and_grad`. |
+| P2 | Compile entire disc update step (fwd+bwd) | **HIGH** | MEDIUM | LOW | Fuses ~120 kernel launches. Depends on P1 validation. |
+| P3-future | Cache waveforms from gen→disc path | MEDIUM | LOW | MEDIUM | Eliminate 2 redundant iSTFTs (requires `loss_fn` return signature change). |
+| P6 | `mx.checkpoint()` for disc forward in gen path | MEDIUM (memory) | LOW | LOW | Trade ~1.5x compute for ~3-4x memory reduction on disc activations. Enables larger batch sizes during GAN epochs. |
+| P7 | Single `mx.eval()` per GAN step | MEDIUM | **HIGH** | LOW | Combine gen+disc sync into one eval. Risk: combined lazy graph may OOM. Must be behind flag. |
+| P8 | Increase `gan_disc_update_freq` | **HIGH** | MEDIUM | TRIVIAL | Config-only change. `freq=2-4` saves 50-75% disc compute. Requires quality validation. |
+
+**MLX-specific insight**: Weight normalization (used by all disc conv layers in PyTorch version) is currently a no-op in MLX — `weight_norm_conv1d/conv2d` create plain `nn.Conv1d/Conv2d`. This means discriminator training may be less stable than the PyTorch reference. Implementing weight norm requires per-step reparameterization of `weight = g * (v / ||v||)`, which adds compute but may improve training convergence.
+
 ### Remaining (Future Phases)
 
 | Priority | Optimization | Complexity |
