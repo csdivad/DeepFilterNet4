@@ -153,18 +153,20 @@ class PeriodDiscriminator(nn.Module):
         # Final output layer
         self.output = weight_norm_conv2d(channels * 16, 1, (3, 1), 1, (1, 0))
 
-    def __call__(self, x: mx.array) -> Tuple[mx.array, List[mx.array]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[mx.array, List[mx.array] | None]:
         """Forward pass.
 
         Args:
             x: Audio waveform (batch, samples) or (batch, channels, samples)
+            return_features: Whether to collect intermediate feature maps.
+                Set to False during discriminator update to save memory.
 
         Returns:
             Tuple of (output, feature_maps) where:
                 - output: Discriminator scores
-                - feature_maps: List of intermediate features for feature matching
+                - feature_maps: List of intermediate features, or None
         """
-        feature_maps = []
+        feature_maps: list[mx.array] | None = [] if return_features else None
 
         # Handle input dimensions
         if x.ndim == 2:
@@ -190,11 +192,15 @@ class PeriodDiscriminator(nn.Module):
         for conv in self.convs:
             x = conv(x)
             x = nn.leaky_relu(x, negative_slope=0.1)
-            feature_maps.append(x)
+            if return_features:
+                assert feature_maps is not None
+                feature_maps.append(x)
 
         # Final output
         x = self.output(x)
-        feature_maps.append(x)
+        if return_features:
+            assert feature_maps is not None
+            feature_maps.append(x)
 
         # Flatten for output
         x = x.reshape(batch, -1)
@@ -236,16 +242,19 @@ class ScaleDiscriminator(nn.Module):
         # Final output
         self.output = weight_norm_conv1d(channels * 8, 1, 3, 1, padding=1)
 
-    def __call__(self, x: mx.array) -> Tuple[mx.array, List[mx.array]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[mx.array, List[mx.array] | None]:
         """Forward pass.
 
         Args:
             x: Audio waveform (batch, samples) or (batch, samples, channels)
+            return_features: Whether to collect intermediate feature maps.
+                Set to False during discriminator update to save memory.
 
         Returns:
-            Tuple of (output, feature_maps)
+            Tuple of (output, feature_maps) where feature_maps is None
+                when return_features is False.
         """
-        feature_maps = []
+        feature_maps: list[mx.array] | None = [] if return_features else None
 
         # MLX Conv1d expects (N, L, C)
         if x.ndim == 2:
@@ -261,11 +270,15 @@ class ScaleDiscriminator(nn.Module):
         for conv in self.convs:
             x = conv(x)
             x = nn.leaky_relu(x, negative_slope=0.1)
-            feature_maps.append(x)
+            if return_features:
+                assert feature_maps is not None
+                feature_maps.append(x)
 
         # Final output
         x = self.output(x)
-        feature_maps.append(x)
+        if return_features:
+            assert feature_maps is not None
+            feature_maps.append(x)
 
         # Flatten for output
         x = x.reshape(batch, -1)
@@ -298,24 +311,27 @@ class MultiPeriodDiscriminator(nn.Module):
         self.periods = periods
         self.discriminators = [PeriodDiscriminator(period=p, channels=channels) for p in periods]
 
-    def __call__(self, x: mx.array) -> Tuple[List[mx.array], List[List[mx.array]]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through all period discriminators.
 
         Args:
             x: Audio waveform (batch, samples)
+            return_features: Whether to collect intermediate feature maps.
 
         Returns:
             Tuple of:
                 - outputs: List of discriminator outputs
-                - feature_maps: List of feature map lists (one per discriminator)
+                - feature_maps: List of feature map lists, or None
         """
         outputs = []
-        all_features = []
+        all_features: list[list[mx.array]] | None = [] if return_features else None
 
         for disc in self.discriminators:
-            out, features = disc(x)
+            out, features = disc(x, return_features=return_features)
             outputs.append(out)
-            all_features.append(features)
+            if return_features:
+                assert all_features is not None
+                all_features.append(features)
 
         return outputs, all_features
 
@@ -365,26 +381,29 @@ class MultiScaleDiscriminator(nn.Module):
         x = x.reshape(batch, samples // factor, factor)
         return mx.mean(x, axis=-1)
 
-    def __call__(self, x: mx.array) -> Tuple[List[mx.array], List[List[mx.array]]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through all scale discriminators.
 
         Args:
             x: Audio waveform (batch, samples)
+            return_features: Whether to collect intermediate feature maps.
 
         Returns:
             Tuple of:
                 - outputs: List of discriminator outputs
-                - feature_maps: List of feature map lists
+                - feature_maps: List of feature map lists, or None
         """
         outputs = []
-        all_features = []
+        all_features: list[list[mx.array]] | None = [] if return_features else None
 
         for i, disc in enumerate(self.discriminators):
             # Downsample input for this scale
             x_scaled = self._pool(x, self.pool_factor**i)
-            out, features = disc(x_scaled)
+            out, features = disc(x_scaled, return_features=return_features)
             outputs.append(out)
-            all_features.append(features)
+            if return_features:
+                assert all_features is not None
+                all_features.append(features)
 
         return outputs, all_features
 
@@ -420,22 +439,27 @@ class CombinedDiscriminator(nn.Module):
             channels=msd_channels,
         )
 
-    def __call__(self, x: mx.array) -> Tuple[List[mx.array], List[List[mx.array]]]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through both MPD and MSD.
 
         Args:
             x: Audio waveform (batch, samples)
+            return_features: Whether to collect intermediate feature maps.
 
         Returns:
             Tuple of:
                 - outputs: Combined list of all discriminator outputs
-                - feature_maps: Combined list of all feature map lists
+                - feature_maps: Combined list of all feature map lists, or None
         """
-        mpd_outs, mpd_features = self.mpd(x)
-        msd_outs, msd_features = self.msd(x)
+        mpd_outs, mpd_features = self.mpd(x, return_features=return_features)
+        msd_outs, msd_features = self.msd(x, return_features=return_features)
 
         outputs = mpd_outs + msd_outs
-        features = mpd_features + msd_features
+        if return_features:
+            assert mpd_features is not None and msd_features is not None
+            features = mpd_features + msd_features
+        else:
+            features = None
 
         return outputs, features
 

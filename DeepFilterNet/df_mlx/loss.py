@@ -754,15 +754,14 @@ class FeatureMatchingLoss:
         Returns:
             Feature matching loss (scalar)
         """
-        loss = mx.array(0.0)
-        n_features = 0
-
+        losses = []
         for real_disc, fake_disc in zip(real_fmaps, fake_fmaps):
             for real_feat, fake_feat in zip(real_disc, fake_disc):
-                loss = loss + mx.mean(mx.abs(real_feat - fake_feat))
-                n_features += 1
+                losses.append(mx.mean(mx.abs(real_feat - fake_feat)))
 
-        return loss / max(n_features, 1) * self.factor
+        if not losses:
+            return mx.array(0.0)
+        return mx.mean(mx.stack(losses)) * self.factor
 
 
 # ============================================================================
@@ -785,17 +784,11 @@ def discriminator_loss(
     Returns:
         Tuple of (total_loss, real_loss, fake_loss)
     """
-    real_loss = mx.array(0.0)
-    fake_loss = mx.array(0.0)
+    real_losses = [mx.mean(mx.maximum(1 - r, 0)) for r in real_outputs]
+    fake_losses = [mx.mean(mx.maximum(1 + f, 0)) for f in fake_outputs]
 
-    for real_out, fake_out in zip(real_outputs, fake_outputs):
-        # Hinge loss
-        real_loss = real_loss + mx.mean(mx.maximum(1 - real_out, 0))
-        fake_loss = fake_loss + mx.mean(mx.maximum(1 + fake_out, 0))
-
-    n_disc = len(real_outputs)
-    real_loss = real_loss / n_disc
-    fake_loss = fake_loss / n_disc
+    real_loss = mx.mean(mx.stack(real_losses))
+    fake_loss = mx.mean(mx.stack(fake_losses))
     total_loss = real_loss + fake_loss
 
     return total_loss, real_loss, fake_loss
@@ -813,13 +806,8 @@ def generator_loss(fake_outputs: list[mx.array]) -> mx.array:
     Returns:
         Generator loss (scalar)
     """
-    loss = mx.array(0.0)
-
-    for fake_out in fake_outputs:
-        # Generator wants fake_out to be high (close to 1)
-        loss = loss + mx.mean(-fake_out)
-
-    return loss / len(fake_outputs)
+    losses = [mx.mean(-f) for f in fake_outputs]
+    return mx.mean(mx.stack(losses))
 
 
 # ============================================================================

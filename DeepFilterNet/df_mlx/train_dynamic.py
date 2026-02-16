@@ -5635,8 +5635,8 @@ def train(
                         pred_wav_d, _ = _disc_crop_waveform(pred_wav, gan_disc_max_samples, crop_start=d_crop)
 
                         def disc_loss_wrapper(disc):
-                            real_out, _ = disc(clean_wav_d)
-                            fake_out, _ = disc(pred_wav_d)
+                            real_out, _ = disc(clean_wav_d, return_features=False)
+                            fake_out, _ = disc(pred_wav_d, return_features=False)
                             total_loss, _, _ = disc_loss_fn(real_out, fake_out)
                             return total_loss
 
