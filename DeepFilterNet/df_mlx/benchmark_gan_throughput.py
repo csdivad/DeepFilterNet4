@@ -420,11 +420,11 @@ class SweepConfig:
 
 def _quick_config() -> SweepConfig:
     return SweepConfig(
-        batch_sizes=[12],
+        batch_sizes=[24],
         grad_accum_steps=[2],
-        eval_frequencies=[4, 8],
+        eval_frequencies=[6],
         disc_update_freqs=[2],
-        disc_max_samples_list=[48000],
+        disc_max_samples_list=[24000],
         disc_gradient_checkpoints=[True],
         gen_gradient_checkpoints=[True],
         cache_gen_waveforms_list=[True],
@@ -629,6 +629,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated eval_frequency override.",
     )
+    p.add_argument(
+        "--disc-max-samples",
+        type=str,
+        default=None,
+        help="Comma-separated disc_max_samples override.",
+    )
+    p.add_argument(
+        "--disc-update-freqs",
+        type=str,
+        default=None,
+        help="Comma-separated disc_update_freq override.",
+    )
+    p.add_argument(
+        "--grad-accum",
+        type=str,
+        default=None,
+        help="Comma-separated grad_accumulation_steps override.",
+    )
     return p
 
 
@@ -652,6 +670,12 @@ def main() -> None:
         sweep.batch_sizes = _parse_int_list(args.batch_sizes)
     if args.eval_freqs:
         sweep.eval_frequencies = _parse_int_list(args.eval_freqs)
+    if args.disc_max_samples:
+        sweep.disc_max_samples_list = _parse_int_list(args.disc_max_samples)
+    if args.disc_update_freqs:
+        sweep.disc_update_freqs = _parse_int_list(args.disc_update_freqs)
+    if args.grad_accum:
+        sweep.grad_accum_steps = _parse_int_list(args.grad_accum)
 
     cases = _enumerate_cases(sweep)
     total = len(cases)

@@ -1,19 +1,24 @@
-# Benchmark-optimized GAN training profile for Apple Silicon (M4 Max 36GB)
+# Benchmark-optimized GAN training profile for Apple Silicon (M3 Pro / M4 Max 36GB)
 #
 # Derived from run_pipeline_awesome_gan_silero_single_oom_safe.toml via
 # systematic throughput sweeps (benchmark_gan_throughput.py).
 #
-# Key optimizations vs. the OOM-safe baseline:
-#   - batch_size 12 → 16  (+8% throughput, fits in 14 GB peak)
-#   - eval_frequency 4 → 6  (fewer sync barriers, +10% throughput)
-#   - prefetch_size 12 → 16  (better data pipeline overlap)
-#   - checkpoint_batches 200 → 300  (less frequent I/O)
+# Key optimizations (cumulative relative to OOM-safe baseline):
+#   - gen_gradient_checkpoint=true    → 2.0x throughput, 3.2x less memory (10.5→3.3 GB peak)
+#   - batch_size 12 → 24             → larger batches fill GPU better
+#   - disc_max_samples 48000 → 24000 → 22% faster disc (0.5s still enough for MPD/MSD)
+#   - eval_frequency 4 → 6           → fewer sync barriers, +10% throughput
+#   - prefetch_size 12 → 16          → better data pipeline overlap
+#   - checkpoint_batches 200 → 300   → less frequent I/O
 #
-# Benchmark results (synthetic GAN steps, M4 Max 36GB):
-#   BS=16 GA=2 EF=6 DUF=2 DGC=Y CGW=Y → 8.0 samp/s, 14.2 GB peak
-#   BS=16 GA=2 EF=10 DUF=2 DGC=Y CGW=Y → 8.1 samp/s, 14.0 GB peak  (EF=10 slightly faster
-#       but delays NaN detection — EF=6 is the safe optimum)
-#   vs baseline BS=12 GA=2 EF=4 → 7.0 samp/s, 11.8 GB peak (+14% throughput)
+# Benchmark results (synthetic GAN steps, M3 Pro 36GB, gen+disc ckpt):
+#   BS=24 GA=2 EF=6 DUF=2 DMS=24k GGC=Y DGC=Y → 107.8 samp/s, 3.91 GB peak  ← BEST
+#   BS=24 GA=2 EF=6 DUF=2 DMS=32k GGC=Y DGC=Y →  99.8 samp/s, 3.91 GB peak  (conservative)
+#   BS=24 GA=2 EF=6 DUF=2 DMS=48k GGC=Y DGC=Y →  88.3 samp/s, 3.91 GB peak  (original)
+#   BS=32 GA=2 EF=6 DUF=2 DMS=24k GGC=Y DGC=Y → 106.4 samp/s, 4.75 GB peak  (marginal gain)
+#
+# Evolution:  48.5 samp/s (baseline) → 89 samp/s (gen ckpt) → 107.8 samp/s (full sweep)
+#             = 2.2x total improvement
 #
 # Usage:
 #   python -m df_mlx.train_dynamic \
@@ -24,12 +29,12 @@ cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
 
 [training]
 epochs = 100
-batch_size = 16              # up from 12: +8% throughput, 14 GB peak (safe on 36 GB)
+batch_size = 24              # up from 12→16→24: best throughput at 107.8 samp/s, 3.91 GB peak
 learning_rate = 1e-6
 weight_decay = 0.0
 warmup_epochs = 5
 patience = 10
-grad_accumulation_steps = 2  # effective batch = 32. GA=4 OOMs (33 GB). GA=1 is 15% slower.
+grad_accumulation_steps = 2  # effective batch = 48. GA=2 amortizes disc cost well.
 max_grad_norm = 0.8
 # eval_frequency left at default (10) so sync_mode="fast" overrides to 50 pre-GAN.
 # During GAN epochs, gan.eval_frequency caps it (see [gan] section).
@@ -82,15 +87,16 @@ msd_scales = 3
 disc_lr = 1e-5
 disc_weight_decay = 0.01
 disc_grad_clip = 1.0
-disc_update_freq = 2         # benchmarked: DUF=2 optimal (DUF=1 slower, DUF=3 marginal)
-disc_max_samples = 48000     # crop to 1s for discriminator — benchmarked: 48k > 24k
+disc_update_freq = 2         # benchmarked: DUF=2 optimal (DUF=3 marginal gain at DMS=24k)
+disc_max_samples = 24000     # crop to 0.5s for discriminator — benchmarked: 22% faster than 48k
+                             # DMS=32k is conservative fallback (99.8 vs 107.8 samp/s).
 mpd_channels = 16            # halved from default 32 for OOM safety
 msd_channels = 64            # halved from default 128 for OOM safety
 # --- Sync barrier optimizations (all benchmarked) ---
 cache_gen_waveforms = true   # saves ~10 GB peak memory + 5% throughput
 disc_gradient_checkpoint = true  # CRITICAL: without it, peak memory jumps to 34 GB
-gen_gradient_checkpoint = true   # saves ~7 GB gen intermediates (701→~1 GB), ~20% slower gen compute
-eval_frequency = 6           # benchmarked sweet spot: EF=6 gives 8.0 samp/s
+gen_gradient_checkpoint = true   # CRITICAL: saves ~7 GB gen intermediates, 2x throughput
+eval_frequency = 6           # benchmarked sweet spot: EF=6 gives best samp/s
                              # EF=10 is ~1% faster but delays NaN detection 5→10 batches.
                              # EF=2 loses ~6% throughput from extra sync barriers.
                              # Safe range: 4-10. Use 4 if graph accumulation causes OOM.
