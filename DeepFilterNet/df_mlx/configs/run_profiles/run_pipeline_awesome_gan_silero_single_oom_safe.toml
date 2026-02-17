@@ -75,7 +75,7 @@ mpd_channels = 16           # halved from default 32 for OOM safety
 msd_channels = 64           # halved from default 128 for OOM safety
 # --- Sync barrier optimizations ---
 cache_gen_waveforms = true   # reuse gen-path waveforms for disc (avoids redundant iSTFT)
-single_eval = true           # merge gen+disc mx.eval() into one call (1 barrier vs 2)
+disc_gradient_checkpoint = true  # trade ~1.5x disc compute for lower peak memory
 eval_frequency = 4           # eval every 4th GAN step (caps training.eval_frequency during GAN)
                              # Higher = fewer syncs = faster, but delays OOM/NaN detection.
                              # Safe range: 2-8. Use 2 if you see OOM from graph accumulation.

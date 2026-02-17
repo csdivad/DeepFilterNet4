@@ -712,11 +712,6 @@ class GanConfig:
         help="Use gradient checkpointing for disc forward in gen loss path (saves memory, ~1.5x disc compute)",
         normalize=_normalize_bool,
     )
-    single_eval: bool = cfg_field(
-        True,
-        help="Merge gen+disc mx.eval() calls into one (reduces sync barriers)",
-        normalize=_normalize_bool,
-    )
     eval_frequency: int = cfg_field(
         2,
         help="GAN-epoch eval_frequency override (0 = use training.eval_frequency unchanged; "

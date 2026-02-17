@@ -264,8 +264,6 @@ class TestDiscUpdateFreq:
         assert cfg.cache_gen_waveforms is True
         assert hasattr(cfg, "disc_gradient_checkpoint")
         assert cfg.disc_gradient_checkpoint is False
-        assert hasattr(cfg, "single_eval")
-        assert cfg.single_eval is True
         assert hasattr(cfg, "eval_frequency")
         assert cfg.eval_frequency == 2
 
@@ -274,7 +272,6 @@ class TestDiscUpdateFreq:
         cfg = RunConfig()
         assert cfg.gan.cache_gen_waveforms is True
         assert cfg.gan.disc_gradient_checkpoint is False
-        assert cfg.gan.single_eval is True
         assert cfg.gan.eval_frequency == 2
 
     def test_apply_new_fields_via_dict(self):
@@ -286,13 +283,11 @@ class TestDiscUpdateFreq:
                 "gan": {
                     "cache_gen_waveforms": True,
                     "disc_gradient_checkpoint": True,
-                    "single_eval": True,
                 }
             },
         )
         assert cfg.gan.cache_gen_waveforms is True
         assert cfg.gan.disc_gradient_checkpoint is True
-        assert cfg.gan.single_eval is True
 
     def test_generated_example_includes_new_fields(self):
         """Generated TOML example includes new GAN fields."""
@@ -303,8 +298,6 @@ class TestDiscUpdateFreq:
         assert data["gan"]["cache_gen_waveforms"] is True
         assert "disc_gradient_checkpoint" in data["gan"]
         assert data["gan"]["disc_gradient_checkpoint"] is False
-        assert "single_eval" in data["gan"]
-        assert data["gan"]["single_eval"] is True
         assert "eval_frequency" in data["gan"]
         assert data["gan"]["eval_frequency"] == 2
 
