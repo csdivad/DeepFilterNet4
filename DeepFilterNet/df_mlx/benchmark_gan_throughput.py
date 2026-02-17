@@ -75,6 +75,7 @@ class ThroughputResult:
     disc_update_freq: int
     disc_max_samples: int
     disc_gradient_checkpoint: bool
+    gen_gradient_checkpoint: bool
     cache_gen_waveforms: bool
     mpd_channels: int
     msd_channels: int
@@ -210,6 +211,7 @@ def _run_benchmark_case(
     disc_update_freq: int,
     disc_max_samples: int,
     disc_gradient_checkpoint: bool,
+    gen_gradient_checkpoint: bool,
     cache_gen_waveforms: bool,
     warmup: int,
     measured_steps: int,
@@ -218,10 +220,16 @@ def _run_benchmark_case(
     max_grad_norm = 1.0
     disc_grad_clip = 1.0
 
-    gen_loss_and_grad = nn.value_and_grad(
-        model,
-        lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(m((nr, ni), fe, fs), (cr, ci)),
-    )
+    if gen_gradient_checkpoint:
+        gen_loss_and_grad = nn.value_and_grad(
+            model,
+            lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(mx.checkpoint(m)((nr, ni), fe, fs), (cr, ci)),
+        )
+    else:
+        gen_loss_and_grad = nn.value_and_grad(
+            model,
+            lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(m((nr, ni), fe, fs), (cr, ci)),
+        )
 
     total_microbatches = warmup + measured_steps
     latencies: List[float] = []
@@ -375,6 +383,7 @@ def _run_benchmark_case(
         disc_update_freq=disc_update_freq,
         disc_max_samples=disc_max_samples,
         disc_gradient_checkpoint=disc_gradient_checkpoint,
+        gen_gradient_checkpoint=gen_gradient_checkpoint,
         cache_gen_waveforms=cache_gen_waveforms,
         mpd_channels=-1,  # filled by caller
         msd_channels=-1,
@@ -403,6 +412,7 @@ class SweepConfig:
     disc_update_freqs: List[int]
     disc_max_samples_list: List[int]
     disc_gradient_checkpoints: List[bool]
+    gen_gradient_checkpoints: List[bool]
     cache_gen_waveforms_list: List[bool]
     mpd_channels_list: List[int]
     msd_channels_list: List[int]
@@ -416,6 +426,7 @@ def _quick_config() -> SweepConfig:
         disc_update_freqs=[2],
         disc_max_samples_list=[48000],
         disc_gradient_checkpoints=[True],
+        gen_gradient_checkpoints=[True],
         cache_gen_waveforms_list=[True],
         mpd_channels_list=[16],
         msd_channels_list=[64],
@@ -430,6 +441,7 @@ def _full_config() -> SweepConfig:
         disc_update_freqs=[1, 2, 3],
         disc_max_samples_list=[24000, 48000, 96000],
         disc_gradient_checkpoints=[True, False],
+        gen_gradient_checkpoints=[True, False],
         cache_gen_waveforms_list=[True, False],
         mpd_channels_list=[16, 32],
         msd_channels_list=[64, 128],
@@ -448,6 +460,7 @@ def _enumerate_cases(
         duf,
         dms,
         dgc,
+        ggc,
         cgw,
         mpd,
         msd,
@@ -458,6 +471,7 @@ def _enumerate_cases(
         cfg.disc_update_freqs,
         cfg.disc_max_samples_list,
         cfg.disc_gradient_checkpoints,
+        cfg.gen_gradient_checkpoints,
         cfg.cache_gen_waveforms_list,
         cfg.mpd_channels_list,
         cfg.msd_channels_list,
@@ -472,6 +486,7 @@ def _enumerate_cases(
                 "disc_update_freq": duf,
                 "disc_max_samples": dms,
                 "disc_gradient_checkpoint": dgc,
+                "gen_gradient_checkpoint": ggc,
                 "cache_gen_waveforms": cgw,
                 "mpd_channels": mpd,
                 "msd_channels": msd,
@@ -504,6 +519,7 @@ def _print_results_table(
         f"{'DUF':>3} "
         f"{'DMS':>6} "
         f"{'DGC':>4} "
+        f"{'GGC':>4} "
         f"{'CGW':>4} "
         f"{'MPD':>4} "
         f"{'MSD':>4} "
@@ -523,6 +539,7 @@ def _print_results_table(
     for i, r in enumerate(sorted_results):
         marker = " ***" if i < top_n else ""
         dgc_str = "Y" if r.disc_gradient_checkpoint else "N"
+        ggc_str = "Y" if r.gen_gradient_checkpoint else "N"
         cgw_str = "Y" if r.cache_gen_waveforms else "N"
         dms_k = r.disc_max_samples // 1000
         print(
@@ -533,6 +550,7 @@ def _print_results_table(
             f"{r.disc_update_freq:>3} "
             f"{dms_k:>5}k "
             f"{dgc_str:>4} "
+            f"{ggc_str:>4} "
             f"{cgw_str:>4} "
             f"{r.mpd_channels:>4} "
             f"{r.msd_channels:>4} "
@@ -548,7 +566,7 @@ def _print_results_table(
     print(
         "Legend: BS=batch_size, GA=grad_accum, EF=eval_freq, "
         "DUF=disc_update_freq, DMS=disc_max_samples, "
-        "DGC=disc_gradient_checkpoint, CGW=cache_gen_wavs, "
+        "DGC=disc_gradient_checkpoint, GGC=gen_gradient_checkpoint, CGW=cache_gen_wavs, "
         "MPD=mpd_ch, MSD=msd_ch"
     )
     print("*** = top-3 configs by effective samples/sec")
@@ -700,6 +718,7 @@ def main() -> None:
             f"duf={case['disc_update_freq']} "
             f"dms={case['disc_max_samples']} "
             f"dgc={case['disc_gradient_checkpoint']} "
+            f"ggc={case['gen_gradient_checkpoint']} "
             f"cgw={case['cache_gen_waveforms']} "
             f"mpd={case['mpd_channels']} "
             f"msd={case['msd_channels']}"
@@ -718,6 +737,7 @@ def main() -> None:
                 disc_update_freq=case["disc_update_freq"],
                 disc_max_samples=case["disc_max_samples"],
                 disc_gradient_checkpoint=case["disc_gradient_checkpoint"],
+                gen_gradient_checkpoint=case["gen_gradient_checkpoint"],
                 cache_gen_waveforms=case["cache_gen_waveforms"],
                 warmup=args.warmup,
                 measured_steps=args.steps,
