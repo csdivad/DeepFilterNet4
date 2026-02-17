@@ -295,6 +295,7 @@ def _profile_step_isolated(
     max_grad_norm: float,
     disc_grad_clip: float,
     disc_gradient_checkpoint: bool,
+    gen_gradient_checkpoint: bool,
     grad_accumulation_steps: int,
 ) -> StepProfile:
     """Profile each phase with its own eval barrier."""
@@ -309,7 +310,9 @@ def _profile_step_isolated(
     # ---- Phase 1: gen forward + backward ----
     gen_loss_and_grad = nn.value_and_grad(
         model,
-        lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(m((nr, ni), fe, fs), (cr, ci)),
+        lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(
+            (mx.checkpoint(m) if gen_gradient_checkpoint else m)((nr, ni), fe, fs), (cr, ci)
+        ),
     )
 
     def _gen_fwd_bwd() -> Tuple[mx.array, ...]:
@@ -500,6 +503,7 @@ def _profile_step_e2e(
     max_grad_norm: float,
     disc_grad_clip: float,
     disc_gradient_checkpoint: bool,
+    gen_gradient_checkpoint: bool,
     grad_accumulation_steps: int,
 ) -> StepProfile:
     """Profile all phases lazily, then one big mx.eval at the end."""
@@ -511,7 +515,9 @@ def _profile_step_e2e(
 
     gen_loss_and_grad = nn.value_and_grad(
         model,
-        lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(m((nr, ni), fe, fs), (cr, ci)),
+        lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(
+            (mx.checkpoint(m) if gen_gradient_checkpoint else m)((nr, ni), fe, fs), (cr, ci)
+        ),
     )
 
     # --- Gen forward+backward (lazy) ---
@@ -760,6 +766,7 @@ def _run_profile(
     max_grad_norm: float,
     disc_grad_clip: float,
     disc_gradient_checkpoint: bool,
+    gen_gradient_checkpoint: bool,
     grad_accumulation_steps: int,
 ) -> ProfileRunResult:
     """Run warmup + measured steps, return aggregated results."""
@@ -781,6 +788,7 @@ def _run_profile(
             max_grad_norm=max_grad_norm,
             disc_grad_clip=disc_grad_clip,
             disc_gradient_checkpoint=disc_gradient_checkpoint,
+            gen_gradient_checkpoint=gen_gradient_checkpoint,
             grad_accumulation_steps=grad_accumulation_steps,
         )
 
@@ -1185,6 +1193,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable disc gradient checkpointing",
     )
     p.add_argument(
+        "--gen-gradient-checkpoint",
+        action="store_true",
+        default=False,
+        help="Enable gen gradient checkpointing (saves ~7 GB, ~20%% slower gen)",
+    )
+    p.add_argument(
+        "--no-gen-gradient-checkpoint",
+        action="store_false",
+        dest="gen_gradient_checkpoint",
+        help="Disable gen gradient checkpointing",
+    )
+    p.add_argument(
         "--mpd-channels",
         type=int,
         default=16,
@@ -1259,6 +1279,7 @@ def main() -> None:
         "batch_size": args.batch_size,
         "disc_max_samples": args.disc_max_samples,
         "disc_gradient_checkpoint": args.disc_gradient_checkpoint,
+        "gen_gradient_checkpoint": args.gen_gradient_checkpoint,
         "mpd_channels": args.mpd_channels,
         "msd_channels": args.msd_channels,
         "grad_accumulation_steps": args.grad_accumulation_steps,
@@ -1271,6 +1292,7 @@ def main() -> None:
         f"disc_max_samples={args.disc_max_samples}, "
         f"mpd={args.mpd_channels}, msd={args.msd_channels}, "
         f"disc_ckpt={args.disc_gradient_checkpoint}, "
+        f"gen_ckpt={args.gen_gradient_checkpoint}, "
         f"ga={args.grad_accumulation_steps}"
     )
     print(f"Warmup: {args.warmup}  Steps: {args.steps}  Mode: {args.mode}")
@@ -1287,6 +1309,7 @@ def main() -> None:
         "max_grad_norm": args.max_grad_norm,
         "disc_grad_clip": args.disc_grad_clip,
         "disc_gradient_checkpoint": args.disc_gradient_checkpoint,
+        "gen_gradient_checkpoint": args.gen_gradient_checkpoint,
         "grad_accumulation_steps": args.grad_accumulation_steps,
     }
 

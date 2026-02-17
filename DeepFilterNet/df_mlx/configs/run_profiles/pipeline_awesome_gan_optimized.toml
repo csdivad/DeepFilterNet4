@@ -89,6 +89,7 @@ msd_channels = 64            # halved from default 128 for OOM safety
 # --- Sync barrier optimizations (all benchmarked) ---
 cache_gen_waveforms = true   # saves ~10 GB peak memory + 5% throughput
 disc_gradient_checkpoint = true  # CRITICAL: without it, peak memory jumps to 34 GB
+gen_gradient_checkpoint = true   # saves ~7 GB gen intermediates (701→~1 GB), ~20% slower gen compute
 eval_frequency = 6           # benchmarked sweet spot: EF=6 gives 8.0 samp/s
                              # EF=10 is ~1% faster but delays NaN detection 5→10 batches.
                              # EF=2 loses ~6% throughput from extra sync barriers.

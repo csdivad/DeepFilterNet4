@@ -2842,6 +2842,7 @@ def train(
     gan_disc_max_samples: int = 48000,
     gan_cache_gen_waveforms: bool = True,
     gan_disc_gradient_checkpoint: bool = False,
+    gan_gen_gradient_checkpoint: bool = False,
     gan_eval_frequency: int = 2,
     gan_mpd_channels: int = 32,
     gan_msd_channels: int = 128,
@@ -3343,6 +3344,7 @@ def train(
         "gan_disc_update_freq": gan_disc_update_freq,
         "gan_cache_gen_waveforms": gan_cache_gen_waveforms,
         "gan_disc_gradient_checkpoint": gan_disc_gradient_checkpoint,
+        "gan_gen_gradient_checkpoint": gan_gen_gradient_checkpoint,
         "gan_eval_frequency": gan_eval_frequency,
         "experimental_compiled_gan": experimental_compiled_gan,
         "vad_loss_weight": vad_loss_weight,
@@ -3669,7 +3671,11 @@ def train(
         noisy_spec = (noisy_real, noisy_imag)
         target_spec = (clean_real, clean_imag)
 
-        out = model(noisy_spec, feat_erb, feat_spec)
+        if gan_gen_gradient_checkpoint and gan_active:
+            _gen_fn = mx.checkpoint(model)
+        else:
+            _gen_fn = model
+        out = _gen_fn(noisy_spec, feat_erb, feat_spec)
         spec_loss = spectral_loss(out, target_spec)
         total_loss = spec_loss
 
@@ -3845,7 +3851,11 @@ def train(
             noisy_spec = (noisy_real, noisy_imag)
             target_spec = (clean_real, clean_imag)
 
-            out = model(noisy_spec, feat_erb, feat_spec)
+            if gan_gen_gradient_checkpoint:
+                _gen_fn = mx.checkpoint(model)
+            else:
+                _gen_fn = model
+            out = _gen_fn(noisy_spec, feat_erb, feat_spec)
             spec_loss = spectral_loss(out, target_spec)
             total_loss = spec_loss
 
@@ -5669,6 +5679,9 @@ def train(
                         _eval_targets.append(grad_norm_arr)
 
                     mx.eval(*_eval_targets)
+                    # Release cached allocations before disc forward to
+                    # reduce peak memory overlap between gen and disc.
+                    mx.clear_cache()
                     # Extract deferred scalars (free — already eval'd)
                     loss_finite = bool(loss_finite_arr)
                     if not loss_finite:
@@ -7332,6 +7345,7 @@ def main():
         gan_disc_update_freq=default_cfg.gan.disc_update_freq,
         gan_cache_gen_waveforms=default_cfg.gan.cache_gen_waveforms,
         gan_disc_gradient_checkpoint=default_cfg.gan.disc_gradient_checkpoint,
+        gan_gen_gradient_checkpoint=default_cfg.gan.gen_gradient_checkpoint,
         gan_eval_frequency=default_cfg.gan.eval_frequency,
         experimental_compiled_gan=default_cfg.gan.experimental_compile,
         vad_loss_weight=default_cfg.vad.loss_weight,
@@ -7503,6 +7517,7 @@ def main():
         experimental_compiled_gan=run_cfg.gan.experimental_compile,
         gan_cache_gen_waveforms=run_cfg.gan.cache_gen_waveforms,
         gan_disc_gradient_checkpoint=run_cfg.gan.disc_gradient_checkpoint,
+        gan_gen_gradient_checkpoint=run_cfg.gan.gen_gradient_checkpoint,
         gan_eval_frequency=run_cfg.gan.eval_frequency,
         vad_proxy_enabled=run_cfg.loss.awesome.proxy_enabled,
         vad_loss_weight=run_cfg.vad.loss_weight,

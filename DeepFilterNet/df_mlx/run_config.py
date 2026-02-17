@@ -712,6 +712,11 @@ class GanConfig:
         help="Use gradient checkpointing for disc forward in gen loss path (saves memory, ~1.5x disc compute)",
         normalize=_normalize_bool,
     )
+    gen_gradient_checkpoint: bool = cfg_field(
+        False,
+        help="Use gradient checkpointing for generator model (saves ~7 GB memory, ~20%% slower gen compute)",
+        normalize=_normalize_bool,
+    )
     eval_frequency: int = cfg_field(
         2,
         help="GAN-epoch eval_frequency override (0 = use training.eval_frequency unchanged; "
