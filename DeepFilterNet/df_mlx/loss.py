@@ -177,14 +177,17 @@ class SpectralLoss:
             # Complex loss
             if self.factor_complex is not None and self.factor_complex > 0:
                 if self.gamma != 1.0:
-                    # Apply compression to complex components
-                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
-                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
+                    # Compressed complex: mag_c * (real/mag, imag/mag)
+                    # Avoids arctan2 whose gradient explodes as O(1/eps)
+                    # for near-silent bins. Direct division has stable
+                    # gradients of O(1/sqrt(eps)) since mag >= sqrt(eps).
+                    pred_phase = pred_mag_c / pred_mag
+                    target_phase = target_mag_c / target_mag
 
-                    pred_real_c = pred_mag_c * mx.cos(pred_angle)
-                    pred_imag_c = pred_mag_c * mx.sin(pred_angle)
-                    target_real_c = target_mag_c * mx.cos(target_angle)
-                    target_imag_c = target_mag_c * mx.sin(target_angle)
+                    pred_real_c = pred_phase * pred_real
+                    pred_imag_c = pred_phase * pred_imag
+                    target_real_c = target_phase * target_real
+                    target_imag_c = target_phase * target_imag
                 else:
                     pred_real_c = pred_real
                     pred_imag_c = pred_imag
@@ -566,20 +569,25 @@ class SegmentalSiSdrLoss:
 
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
         """Compute segmental SI-SDR loss using vectorized segmentation."""
+        if pred.dtype != mx.float32:
+            pred = pred.astype(mx.float32)
+        if target.dtype != mx.float32:
+            target = target.astype(mx.float32)
+
         if pred.ndim == 1:
             pred = mx.expand_dims(pred, axis=0)
         if target.ndim == 1:
             target = mx.expand_dims(target, axis=0)
 
         batch, samples = pred.shape
+
+        # Fall back to global SI-SDR when signal is shorter than one segment
+        if samples < self.segment_size:
+            return -si_sdr(pred, target) * self.factor
+
         n_segments = max(1, (samples - self.segment_size) // self.hop_size + 1)
 
-        # Ensure we have valid segments
-        if n_segments == 0:
-            return mx.array(0.0)
-
         # Vectorized segmentation using mx.take
-        # Create indices for all segments at once
         segment_starts = mx.arange(n_segments) * self.hop_size  # [n_segments]
         offsets = mx.arange(self.segment_size)  # [segment_size]
         indices = segment_starts[:, None] + offsets[None, :]  # [n_segments, segment_size]
@@ -597,6 +605,10 @@ class SegmentalSiSdrLoss:
         seg_pred = seg_pred_flat.reshape(batch, n_segments, self.segment_size)
         seg_target = seg_target_flat.reshape(batch, n_segments, self.segment_size)
 
+        # Per-segment mean removal (required for true SI-SDR)
+        seg_pred = seg_pred - mx.mean(seg_pred, axis=-1, keepdims=True)
+        seg_target = seg_target - mx.mean(seg_target, axis=-1, keepdims=True)
+
         # Compute SI-SDR for all segments at once
         # s_target projection: <s_hat, s_target> / ||s_target||^2 * s_target
         dot = mx.sum(seg_pred * seg_target, axis=-1, keepdims=True)  # [batch, n_segments, 1]
@@ -607,9 +619,10 @@ class SegmentalSiSdrLoss:
         noise = seg_pred - s_target_proj
 
         # SI-SDR per segment: [batch, n_segments]
-        signal_pow = mx.sum(s_target_proj**2, axis=-1)
+        # eps in both numerator and denominator for consistent silence handling
+        signal_pow = mx.sum(s_target_proj**2, axis=-1) + EPS
         noise_pow = mx.sum(noise**2, axis=-1) + EPS
-        sisdr = 10 * mx.log10(signal_pow / noise_pow + EPS)
+        sisdr = 10 * mx.log10(signal_pow / noise_pow)
 
         # Mean over segments and batch
         return -mx.mean(sisdr) * self.factor
@@ -629,6 +642,11 @@ class SdrLoss:
 
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
         """Compute negative SDR loss."""
+        if pred.dtype != mx.float32:
+            pred = pred.astype(mx.float32)
+        if target.dtype != mx.float32:
+            target = target.astype(mx.float32)
+
         if pred.ndim == 1:
             pred = mx.expand_dims(pred, axis=0)
         if target.ndim == 1:

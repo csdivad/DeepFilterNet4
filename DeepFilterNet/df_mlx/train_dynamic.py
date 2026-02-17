@@ -134,12 +134,10 @@ _PIPELINE_MIN_MASK_FLOOR = 0.08  # Prevent complete suppression
 _PIPELINE_LOW_ENERGY_ADDITIVE = 0.25  # Additive boost for quiet speech
 _PIPELINE_LOW_SNR_ADDITIVE = 0.25  # Additive boost for low-SNR
 _PIPELINE_PROXY_FLOOR = 0.15  # Higher minimum proxy weight
-_PIPELINE_SPEECH_BAND_WEIGHT = 2.0  # Extra weight on speech band (300-3400 Hz)
 _PIPELINE_MUSIC_SUPPRESSION_WEIGHT = 1.5  # Music suppression strength
 _PIPELINE_VOCAL_HARMONIC_THR = 0.4  # Threshold for vocal harmonic detection
 _PIPELINE_PITCH_STABILITY_THR = 0.3  # Threshold for pitch stability (vocals)
 _PIPELINE_ARTIFACT_SMOOTH_WEIGHT = 0.3  # Temporal smoothing for artifact control
-_PIPELINE_MASK_SATURATION_PENALTY = 0.1  # Penalty for extreme mask values
 
 
 def _batch_to_float(*arrays: mx.array) -> tuple[float, ...]:
@@ -1392,24 +1390,20 @@ def _compute_pipeline_awesome_losses(
     instrument_weight = instrument_gate[:, None, None] * (1.0 - mask)  # Only where noise dominant
     music_suppression_loss = mx.mean(mx.abs(out_log) * instrument_weight)
 
-    # 5. Mask saturation penalty: encourage confident mask predictions
-    # mask * (1-mask) is an entropy-like term:
-    #   - Minimized at 0 or 1 (confident predictions)
-    #   - Maximized at 0.5 (uncertain predictions)
-    # We PENALIZE uncertainty by using this term directly as the loss.
-    # FIX: Previous implementation inverted this (1.0 - 4.0*entropy), which
-    # rewarded uncertainty. Now we penalize uncertainty directly.
+    # 5. Mask saturation metric: measures confidence of ground-truth mask.
+    # NOTE: raw_mask depends only on ground-truth signals (clean_log, noise_log),
+    # NOT model parameters, so its gradient w.r.t. model params is always zero.
+    # We compute it as a diagnostic metric but exclude it from the training loss
+    # to avoid inflating the loss with a gradient-free constant.
     mask_entropy = mx.mean(raw_mask * (1.0 - raw_mask))
-    # Scale to [0, 1]: max entropy at mask=0.5 is 0.25, so multiply by 4
     mask_saturation_loss = 4.0 * mask_entropy
 
-    # Total loss
+    # Total loss (mask_saturation excluded — zero gradient w.r.t. model params)
     total_loss = (
         speech_loss
         + noise_loss
         + _PIPELINE_ARTIFACT_SMOOTH_WEIGHT * smooth_loss
         + _PIPELINE_MUSIC_SUPPRESSION_WEIGHT * music_suppression_loss
-        + _PIPELINE_MASK_SATURATION_PENALTY * mask_saturation_loss
     )
 
     if debug is not None:

@@ -509,15 +509,17 @@ class MultiResolutionSTFTLoss:
             # Complex loss (optional)
             if self.f_complex is not None and self.f_complex > 0:
                 if self.gamma != 1.0:
-                    # Reconstruct complex with compressed magnitude
-                    # pred_complex = pred_mag_comp * exp(i * angle(pred))
-                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
-                    pred_real_comp = pred_mag_comp * mx.cos(pred_angle)
-                    pred_imag_comp = pred_mag_comp * mx.sin(pred_angle)
+                    # Compressed complex: mag_comp * (real/mag, imag/mag)
+                    # Avoids arctan2 whose gradient explodes as O(1/eps)
+                    # for near-silent bins. Direct division has stable
+                    # gradients of O(1/sqrt(eps)) since mag >= sqrt(eps).
+                    pred_phase = pred_mag_comp / pred_mag
+                    pred_real_comp = pred_phase * pred_real
+                    pred_imag_comp = pred_phase * pred_imag
 
-                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
-                    target_real_comp = target_mag_comp * mx.cos(target_angle)
-                    target_imag_comp = target_mag_comp * mx.sin(target_angle)
+                    target_phase = target_mag_comp / target_mag
+                    target_real_comp = target_phase * target_real
+                    target_imag_comp = target_phase * target_imag
                 else:
                     pred_real_comp = pred_real
                     pred_imag_comp = pred_imag
