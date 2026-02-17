@@ -23,7 +23,9 @@ def test_discriminator_update_follows_optimizer_step_cadence() -> None:
 
 
 def test_generator_fm_real_branch_is_stop_grad() -> None:
-    assert "disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav))" in TRAIN_SOURCE
+    assert (
+        "disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav), return_features=_need_feats)" in TRAIN_SOURCE
+    )
 
 
 def test_gan_paths_use_precision_view_before_discriminator() -> None:

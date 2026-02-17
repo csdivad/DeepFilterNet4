@@ -32,6 +32,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
+from mlx.utils import tree_map
 
 from df_mlx.benchmark_gan_sync import (
     _FFT_SIZE,
@@ -181,7 +182,7 @@ def _accumulate_grads(
     """Accumulate grads via tree_map."""
     if acc is None:
         return grads
-    return mx.utils.tree_map(lambda a, g: a + g, acc, grads)
+    return tree_map(lambda a, g: a + g, acc, grads)
 
 
 def _scale_grads(
@@ -189,12 +190,12 @@ def _scale_grads(
     scale: float,
 ) -> Dict[str, Any]:
     """Scale accumulated grads."""
-    return mx.utils.tree_map(lambda g: g * scale, grads)
+    return tree_map(lambda g: g * scale, grads)
 
 
 def _zero_grads(grads: Dict[str, Any]) -> Dict[str, Any]:
     """Zero-fill accumulated grads."""
-    return mx.utils.tree_map(mx.zeros_like, grads)
+    return tree_map(mx.zeros_like, grads)
 
 
 def _run_benchmark_case(
@@ -229,7 +230,7 @@ def _run_benchmark_case(
     micro_count = 0
     global_step = 0
 
-    mx.metal.reset_peak_memory()
+    mx.reset_peak_memory()
 
     for mb_idx in range(total_microbatches):
         batch = _make_batch(batch_size)
@@ -357,7 +358,7 @@ def _run_benchmark_case(
             t1 = time.perf_counter()
             latencies.append((t1 - t0) * 1000.0)
 
-    peak_mem_gb = mx.metal.get_peak_memory() / (1024**3)
+    peak_mem_gb = mx.get_peak_memory() / (1024**3)
 
     step_mean = float(np.mean(latencies)) if latencies else float("nan")
     step_p50 = float(np.median(latencies)) if latencies else float("nan")
@@ -674,7 +675,7 @@ def main() -> None:
             if model is not None:
                 del model, gen_opt, disc, disc_opt
                 gc.collect()
-                mx.metal.reset_peak_memory()
+                mx.reset_peak_memory()
 
             print(f"\n  Building models: mpd_ch={model_key[0]}, " f"msd_ch={model_key[1]}, bs={model_key[2]}...")
             model, gen_opt, disc, disc_opt = _build_models_for_config(
@@ -685,7 +686,7 @@ def main() -> None:
             current_model_key = model_key
         else:
             gc.collect()
-            mx.metal.reset_peak_memory()
+            mx.reset_peak_memory()
 
         assert model is not None
         assert gen_opt is not None

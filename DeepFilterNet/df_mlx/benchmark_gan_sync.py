@@ -115,7 +115,7 @@ def _collect_metadata() -> Dict[str, Any]:
         "os": f"{platform.system()} {platform.release()}",
         "python": platform.python_version(),
         "mlx": mx.__version__,
-        "metal_memory_gb": round(mx.metal.device_info()["memory_size"] / (1024**3), 1),
+        "metal_memory_gb": round(mx.device_info()["memory_size"] / (1024**3), 1),
     }
 
 
