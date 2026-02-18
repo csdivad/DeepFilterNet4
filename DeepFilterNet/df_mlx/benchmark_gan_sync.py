@@ -32,7 +32,6 @@ import gc
 import json
 import platform
 import statistics
-import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -42,8 +41,10 @@ from typing import Any, Dict, List, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-import numpy as np
 
+from df_mlx.benchmark_common import get_chip_name as _get_chip_name
+from df_mlx.benchmark_common import get_gpu_cores as _get_gpu_cores
+from df_mlx.benchmark_common import safe_percentile as _safe_percentile
 from df_mlx.config import get_default_config
 from df_mlx.discriminator import CombinedDiscriminator
 from df_mlx.grad_utils import clip_grad_norm_tree
@@ -67,44 +68,6 @@ class SyncBenchmarkResult:
     step_max_ms: float
     steps_per_sec: float
     total_seconds: float
-
-
-def _safe_percentile(vals: List[float], p: float) -> float:
-    if not vals:
-        return float("nan")
-    arr = np.array(vals)
-    return float(np.percentile(arr, p))
-
-
-def _get_chip_name() -> str:
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return platform.processor() or platform.machine()
-
-
-def _get_gpu_cores() -> int:
-    try:
-        result = subprocess.run(
-            ["system_profiler", "SPDisplaysDataType"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        for line in result.stdout.splitlines():
-            if "Total Number of Cores" in line:
-                return int(line.split(":")[-1].strip())
-    except Exception:
-        pass
-    return -1
 
 
 def _collect_metadata() -> Dict[str, Any]:

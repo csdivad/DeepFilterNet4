@@ -32,7 +32,6 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
-from mlx.utils import tree_map
 
 from df_mlx.benchmark_gan_sync import (
     _FFT_SIZE,
@@ -52,6 +51,8 @@ from df_mlx.grad_utils import clip_grad_norm_tree
 from df_mlx.loss import discriminator_loss
 from df_mlx.model import init_model
 from df_mlx.train import spectral_loss
+from df_mlx.training_ops import accumulate_grads as _accumulate_grads
+from df_mlx.training_ops import scale_grads as _scale_grads
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -174,29 +175,6 @@ def _build_models_for_config(
 # ---------------------------------------------------------------------------
 # Inner loop — mirrors train_dynamic.py eager GAN path
 # ---------------------------------------------------------------------------
-
-
-def _accumulate_grads(
-    acc: Dict[str, Any] | None,
-    grads: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Accumulate grads via tree_map."""
-    if acc is None:
-        return grads
-    return tree_map(lambda a, g: a + g, acc, grads)
-
-
-def _scale_grads(
-    grads: Dict[str, Any],
-    scale: float,
-) -> Dict[str, Any]:
-    """Scale accumulated grads."""
-    return tree_map(lambda g: g * scale, grads)
-
-
-def _zero_grads(grads: Dict[str, Any]) -> Dict[str, Any]:
-    """Zero-fill accumulated grads."""
-    return tree_map(mx.zeros_like, grads)
 
 
 def _run_benchmark_case(

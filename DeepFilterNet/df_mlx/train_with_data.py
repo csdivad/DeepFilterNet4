@@ -31,7 +31,6 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Tuple, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -41,7 +40,7 @@ from tqdm import tqdm
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from df_mlx.grad_utils import clip_grad_norm_tree  # noqa: E402
+from df_mlx.training_ops import clip_grad_norm  # noqa: E402
 
 
 def save_checkpoint(
@@ -108,20 +107,6 @@ def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
             state = json.load(f)
 
     return state  # type: ignore[return-value]
-
-
-def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, float]:
-    """Clip gradients by global norm.
-
-    Args:
-        grads: Nested dict/list of gradients
-        max_norm: Maximum norm
-
-    Returns:
-        Tuple of (clipped_grads, grad_norm)
-    """
-    clipped, total_norm = clip_grad_norm_tree(grads, max_norm)
-    return cast(dict, clipped), float(total_norm)
 
 
 def train(
@@ -279,7 +264,8 @@ def train(
 
             # Gradient clipping (returns clipped grads and norm)
             if max_grad_norm > 0:
-                grads, grad_norm = clip_grad_norm(grads, max_grad_norm)
+                grads, grad_norm_arr = clip_grad_norm(grads, max_grad_norm)
+                grad_norm = float(grad_norm_arr)
 
             # Update parameters
             optimizer.update(model, grads)
