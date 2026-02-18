@@ -580,11 +580,10 @@ def save_checkpoint(
             f.flush()
             os.fsync(f.fileno())
 
-        # Atomic rename
-        tmp_weights.replace(path)
-        tmp_state_path.replace(state_path)
-
-        # Save discriminator weights after main checkpoint is safely written
+        # Prepare discriminator weights to temp file BEFORE main rename,
+        # so that crash between main and disc renames only loses the disc
+        # temp file (which is cleaned up as residue on next validate).
+        tmp_disc: Path | None = None
         if discriminator is not None:
             disc_path = _disc_weights_path(path)
             tmp_disc = disc_path.with_name(f"{disc_path.stem}.tmp{disc_path.suffix}")
@@ -594,8 +593,13 @@ def save_checkpoint(
             if disc_weights:
                 mx.eval(*disc_weights.values())
             mx.save_safetensors(str(tmp_disc), disc_weights)
-            if not tmp_disc.exists():
-                mx.save_safetensors(str(tmp_disc), disc_weights)
+
+        # Atomic rename — main checkpoint first, then discriminator
+        tmp_weights.replace(path)
+        tmp_state_path.replace(state_path)
+
+        if tmp_disc is not None:
+            disc_path = _disc_weights_path(path)
             tmp_disc.replace(disc_path)
 
         if not _validate_checkpoint_pair(path, manifest=manifest):
@@ -752,9 +756,9 @@ def cleanup_checkpoints(
 
     manifest = CheckpointManifest()
 
-    # Find all checkpoint files (epoch_*.safetensors and step_*.safetensors)
+    # Find all checkpoint files (epoch_*, step_*, and interrupted_epoch_*)
     ckpt_files = []
-    for pattern in ["epoch_*.safetensors", "step_*.safetensors"]:
+    for pattern in ["epoch_*.safetensors", "step_*.safetensors", "interrupted_epoch_*.safetensors"]:
         ckpt_files.extend([p for p in checkpoint_dir.glob(pattern) if not _is_disc_weights(p, manifest)])
 
     # Sort by modification time (oldest first)
