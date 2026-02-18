@@ -181,7 +181,7 @@ class TestMaskSaturationRemoved:
 
     def test_mask_saturation_not_in_total_loss(self):
         """Verify mask saturation loss is computed but not in total_loss."""
-        from df_mlx.train_dynamic import _compute_pipeline_awesome_losses
+        from df_mlx.training_losses import _compute_pipeline_awesome_losses
 
         batch, time, freq = 2, 50, 257
         clean_real = mx.random.normal((batch, time, freq))
@@ -233,7 +233,7 @@ class TestMaskSaturationRemoved:
         assert float(mask_saturation_loss) >= 0, "Metric should be non-negative"
 
         # But it should NOT be in the total loss
-        from df_mlx.train_dynamic import (
+        from df_mlx.training_losses import (
             _PIPELINE_ARTIFACT_SMOOTH_WEIGHT,
             _PIPELINE_MUSIC_SUPPRESSION_WEIGHT,
         )

@@ -27,7 +27,7 @@ class TestDtypeGuards:
 
     def test_log1p_mag_fp32_no_cast(self):
         """_log1p_mag should not add astype nodes when input is already FP32."""
-        from df_mlx.train_dynamic import _log1p_mag
+        from df_mlx.training_losses import _log1p_mag
 
         real = mx.ones((2, 10, 32), dtype=mx.float32)
         imag = mx.ones((2, 10, 32), dtype=mx.float32)
@@ -37,7 +37,7 @@ class TestDtypeGuards:
 
     def test_log1p_mag_fp16_casts(self):
         """_log1p_mag should cast FP16 inputs to FP32."""
-        from df_mlx.train_dynamic import _log1p_mag
+        from df_mlx.training_losses import _log1p_mag
 
         real = mx.ones((2, 10, 32), dtype=mx.float16)
         imag = mx.ones((2, 10, 32), dtype=mx.float16)
@@ -47,7 +47,7 @@ class TestDtypeGuards:
 
     def test_log1p_mag_numerical_equivalence(self):
         """FP16 vs FP32 inputs should produce close results."""
-        from df_mlx.train_dynamic import _log1p_mag
+        from df_mlx.training_losses import _log1p_mag
 
         np.random.seed(42)
         data_np = np.random.randn(2, 10, 32).astype(np.float32) * 0.1
@@ -64,7 +64,7 @@ class TestDtypeGuards:
 
     def test_compute_vad_probs_fp32_no_cast(self):
         """_compute_vad_probs should skip casts when inputs are FP32."""
-        from df_mlx.train_dynamic import _compute_vad_probs
+        from df_mlx.training_losses import _compute_vad_probs
 
         clean_real = mx.ones((2, 10, 32), dtype=mx.float32) * 0.5
         clean_imag = mx.ones((2, 10, 32), dtype=mx.float32) * 0.3
@@ -93,7 +93,7 @@ class TestCastOnceAtEntry:
 
     def test_compute_proxy_gates_fp32_passthrough(self):
         """_compute_proxy_gates should skip casts when inputs are FP32."""
-        from df_mlx.train_dynamic import _compute_proxy_gates
+        from df_mlx.training_losses import _compute_proxy_gates
 
         B, T, F = 2, 10, 32
         clean_real = mx.ones((B, T, F), dtype=mx.float32) * 0.5
@@ -181,7 +181,7 @@ class TestMusicnessGuards:
 
     def test_compute_musicness_fp32_passthrough(self):
         """_compute_musicness should skip cast when mag is FP32."""
-        from df_mlx.train_dynamic import _compute_musicness
+        from df_mlx.training_losses import _compute_musicness
 
         mag = mx.ones((2, 10, 32), dtype=mx.float32) * 0.5
         band_mask = mx.ones((1, 1, 32), dtype=mx.float32)
@@ -191,7 +191,7 @@ class TestMusicnessGuards:
 
     def test_compute_improved_musicness_fp32_passthrough(self):
         """_compute_improved_musicness should skip cast when mag is FP32."""
-        from df_mlx.train_dynamic import _compute_improved_musicness
+        from df_mlx.training_losses import _compute_improved_musicness
 
         mag = mx.ones((2, 10, 32), dtype=mx.float32) * 0.5
         band_mask = mx.ones((1, 1, 32), dtype=mx.float32)

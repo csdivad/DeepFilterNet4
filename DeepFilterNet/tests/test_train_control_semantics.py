@@ -8,7 +8,7 @@ import mlx.optimizers as optim
 # Ensure the df_mlx package is importable when running tests from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from df_mlx.train_dynamic import (  # noqa: E402
+from df_mlx.training_checkpoints import (  # noqa: E402
     _TRAIN_MODE_COMPILED,
     _TRAIN_MODE_EAGER,
     maybe_skip_resume_batches,
