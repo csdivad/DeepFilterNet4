@@ -294,13 +294,17 @@ class FusedSpectralLoss:
 
             if self.factor_complex is not None and self.factor_complex > 0:
                 if self.gamma != 1.0:
-                    pred_angle = mx.arctan2(pred_imag, pred_real + self.eps)
-                    target_angle = mx.arctan2(target_imag, target_real + self.eps)
+                    # Compressed complex: mag_c * (real/mag, imag/mag)
+                    # Avoids arctan2 whose gradient explodes as O(1/eps)
+                    # for near-silent bins. Direct division has stable
+                    # gradients of O(1/sqrt(eps)) since mag >= sqrt(eps).
+                    pred_phase = pred_mag_c / pred_mag
+                    target_phase = target_mag_c / target_mag
 
-                    pred_real_c = pred_mag_c * mx.cos(pred_angle)
-                    pred_imag_c = pred_mag_c * mx.sin(pred_angle)
-                    target_real_c = target_mag_c * mx.cos(target_angle)
-                    target_imag_c = target_mag_c * mx.sin(target_angle)
+                    pred_real_c = pred_phase * pred_real
+                    pred_imag_c = pred_phase * pred_imag
+                    target_real_c = target_phase * target_real
+                    target_imag_c = target_phase * target_imag
                 else:
                     pred_real_c = pred_real
                     pred_imag_c = pred_imag
