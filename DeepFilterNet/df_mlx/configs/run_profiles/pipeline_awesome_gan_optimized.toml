@@ -103,10 +103,10 @@ eval_frequency = 6           # benchmarked sweet spot: EF=6 gives best samp/s
                              # Safe range: 4-10. Use 4 if graph accumulation causes OOM.
 
 [vad]
-loss_weight = 0.05
+loss_weight = 0.1
 threshold = 0.1
 margin = 0.05
-speech_loss_weight = 0.01
+speech_loss_weight = 0.05
 warmup_epochs = 5
 snr_gate_db = -10.0
 snr_gate_width = 6.0
@@ -118,13 +118,13 @@ z_slope = 1.0
 [vad.eval]
 mode = "silero"
 every = 2
-batches = 4
+batches = 24
 max_seconds = 0.0
 silero_sample_rate = 16000
 
 [vad.train]
-prob = 0.01
-every_steps = 4
+prob = 0.1
+every_steps = 2
 
 [metrics]
 eval_sisdr = false
@@ -141,7 +141,7 @@ debug_numerics_max_dumps = 5
 nan_skip_batch = false
 
 [enhance]
-speech_boost_db = 5.0
+speech_boost_db = 8.0
 speech_boost_threshold = 0.5
 speech_boost_min_speech_ms = 250
 speech_boost_min_silence_ms = 100

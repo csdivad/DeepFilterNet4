@@ -1447,9 +1447,11 @@ class MLXDataStream:
         self.dataset.set_split(self._checkpoint.split)
         self.dataset.set_epoch(self._checkpoint.epoch)
 
-        # Track iteration state
+        # Track iteration state – initialise from checkpoint so that
+        # get_progress() returns the correct batch count before __iter__
+        # is called (e.g. during resume-position validation).
         self._stream: Optional[Any] = None
-        self._batch_count = 0
+        self._batch_count = self._checkpoint.batch_idx
 
     @classmethod
     def from_checkpoint(
@@ -1714,10 +1716,11 @@ class MLXDataStream:
             Dictionary with progress metrics
         """
         total_batches = len(self)
+        batch = self._checkpoint.batch_idx
         return {
             "epoch": self._checkpoint.epoch,
-            "batch": self._batch_count,
+            "batch": batch,
             "total_batches": total_batches,
             "samples_processed": self._checkpoint.samples_processed,
-            "progress_pct": 100.0 * self._batch_count / max(total_batches, 1),
+            "progress_pct": 100.0 * batch / max(total_batches, 1),
         }
