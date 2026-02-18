@@ -32,36 +32,10 @@ _SKIP_NAMES = frozenset(
     }
 )
 
-_THIRD_PARTY_MODULES = frozenset(
-    {
-        "mlx",
-        "mlx.core",
-        "mlx.nn",
-        "mlx.utils",
-        "mlx.optimizers",
-        "numpy",
-        "np",
-        "json",
-        "pathlib",
-        "dataclasses",
-        "signal",
-        "sys",
-        "os",
-        "time",
-        "re",
-        "argparse",
-        "typing",
-        "subprocess",
-        "math",
-        "safetensors",
-        "tqdm",
-        "tqdm.auto",
-    }
-)
-
 
 def _public_symbols(mod):
-    """Return symbols defined in a module (not imported third-party modules/functions)."""
+    """Return symbols defined in a module (not imported from other df_mlx or third-party modules)."""
+    mod_name = mod.__name__
     symbols = set()
     for name in dir(mod):
         if name in _SKIP_NAMES:
@@ -69,9 +43,9 @@ def _public_symbols(mod):
         obj = getattr(mod, name)
         if inspect.ismodule(obj):
             continue
-        # Skip symbols whose defining module is a third-party package
+        # Only include symbols whose defining module IS this module
         defining_mod = getattr(obj, "__module__", None)
-        if defining_mod and any(defining_mod.startswith(tp) for tp in _THIRD_PARTY_MODULES):
+        if defining_mod and defining_mod != mod_name:
             continue
         symbols.add(name)
     return symbols
