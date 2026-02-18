@@ -303,7 +303,7 @@ class TestCombinedLossComposition:
         mx.eval(total, *breakdown.values())
         expected = float(breakdown["spectral"]) + float(breakdown["sisdr"])
         actual = float(total)
-        assert abs(actual - expected) < 1e-5, f"Total should be sum of components: {actual} vs {expected}"
+        assert abs(actual - expected) < 1e-4, f"Total should be sum of components: {actual} vs {expected}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

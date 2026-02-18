@@ -1,0 +1,121 @@
+"""Verify all training_* module public symbols are re-exported from train_dynamic.
+
+This test prevents drift between the canonical training_* modules and the
+backward-compatibility re-export shim in train_dynamic.py.
+"""
+
+import importlib
+import inspect
+
+_TRAINING_MODULES = [
+    "df_mlx.training_losses",
+    "df_mlx.training_checkpoints",
+    "df_mlx.training_cli",
+    "df_mlx.training_cli_main",
+    "df_mlx.training_ops",
+    "df_mlx.training_signals",
+    "df_mlx.training_waveform",
+]
+
+_SKIP_NAMES = frozenset(
+    {
+        "__builtins__",
+        "__cached__",
+        "__doc__",
+        "__file__",
+        "__loader__",
+        "__name__",
+        "__package__",
+        "__spec__",
+        "__path__",
+        "__all__",
+    }
+)
+
+_THIRD_PARTY_MODULES = frozenset(
+    {
+        "mlx",
+        "mlx.core",
+        "mlx.nn",
+        "mlx.utils",
+        "mlx.optimizers",
+        "numpy",
+        "np",
+        "json",
+        "pathlib",
+        "dataclasses",
+        "signal",
+        "sys",
+        "os",
+        "time",
+        "re",
+        "argparse",
+        "typing",
+        "subprocess",
+        "math",
+        "safetensors",
+        "tqdm",
+        "tqdm.auto",
+    }
+)
+
+
+def _public_symbols(mod):
+    """Return symbols defined in a module (not imported third-party modules/functions)."""
+    symbols = set()
+    for name in dir(mod):
+        if name in _SKIP_NAMES:
+            continue
+        obj = getattr(mod, name)
+        if inspect.ismodule(obj):
+            continue
+        # Skip symbols whose defining module is a third-party package
+        defining_mod = getattr(obj, "__module__", None)
+        if defining_mod and any(defining_mod.startswith(tp) for tp in _THIRD_PARTY_MODULES):
+            continue
+        symbols.add(name)
+    return symbols
+
+
+def test_reexport_completeness():
+    """All training_* public symbols must be re-exported from train_dynamic."""
+    import df_mlx.train_dynamic as td
+
+    missing = []
+    for mod_name in _TRAINING_MODULES:
+        mod = importlib.import_module(mod_name)
+        for name in _public_symbols(mod):
+            if not hasattr(td, name):
+                missing.append(f"{mod_name}.{name}")
+
+    assert missing == [], "Symbols not re-exported from train_dynamic:\n" + "\n".join(
+        f"  - {m}" for m in sorted(missing)
+    )
+
+
+def test_reexported_symbols_are_same_objects():
+    """Re-exported symbols must be the exact same objects (not copies)."""
+    import df_mlx.train_dynamic as td
+
+    mismatches = []
+    for mod_name in _TRAINING_MODULES:
+        mod = importlib.import_module(mod_name)
+        for name in _public_symbols(mod):
+            if not hasattr(td, name):
+                continue
+            orig = getattr(mod, name)
+            reex = getattr(td, name)
+            if orig is not reex:
+                mismatches.append(f"{mod_name}.{name}")
+
+    assert mismatches == [], "Re-exported symbols differ from originals:\n" + "\n".join(
+        f"  - {m}" for m in sorted(mismatches)
+    )
+
+
+def test_hardware_diagnostics_reexported():
+    """print_hardware_diagnostics moved to hardware.py must be re-exported."""
+    from df_mlx.hardware import print_hardware_diagnostics as orig
+    from df_mlx.train_dynamic import print_hardware_diagnostics
+
+    assert print_hardware_diagnostics is orig

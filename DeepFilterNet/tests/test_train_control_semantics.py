@@ -146,8 +146,9 @@ def test_resolve_epoch_train_mode_respects_base_compiled_blockers():
 
 def test_train_loop_logs_modes_and_guards_against_gan_compiled_mix():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
-    assert '_TRAIN_MODE_COMPILED = "COMPILED"' in source
-    assert '_TRAIN_MODE_EAGER = "EAGER"' in source
+    checkpoints_source = (Path(__file__).resolve().parents[1] / "df_mlx" / "training_checkpoints.py").read_text()
+    assert '_TRAIN_MODE_COMPILED = "COMPILED"' in checkpoints_source
+    assert '_TRAIN_MODE_EAGER = "EAGER"' in checkpoints_source
     assert "TRAIN_MODE={train_mode}" in source
     assert "GAN active epoch cannot run compiled step" in source
 
