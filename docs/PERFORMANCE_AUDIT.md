@@ -24,7 +24,7 @@
 ## 2. Repo Performance Map
 
 ### Entrypoints
-- **Training**: `train_dynamic.py:main()` → compiled training step
+- **Training**: `train_dynamic.py:main()` → `training_cli_main.py:main()` → compiled training step
 - **Inference**: `enhance.py:enhance()` / `enhance_streaming()` / `enhance_batch()`
 - **Streaming**: `model.py:StreamingDfNet4.process_audio()`
 
@@ -70,11 +70,11 @@ python -m df_mlx.benchmark_train_step \
 
 ### PERF-P0-001: Redundant FP32 casts in awesome/pipeline loss chain
 - **Severity**: P0
-- **Component**: `train_dynamic.py` loss computation
+- **Component**: `training_losses.py` loss computation
 - **Evidence**:
-  - `_log1p_mag()` (L796-797) unconditionally casts to FP32
-  - Called with FP32 `noise_real/imag` from `_compute_awesome_losses()` (L985) and `_compute_pipeline_awesome_losses()` (L1244)
-  - `_compute_musicness` (L816), `_compute_improved_musicness` (L1131), `_compute_pitch_stability` (L1072), `_compute_harmonic_ratio` (L1100) all defensively cast `mag` that's already FP32
+  - `_log1p_mag()` unconditionally casts to FP32
+  - Called with FP32 `noise_real/imag` from `_compute_awesome_losses()` and `_compute_pipeline_awesome_losses()`
+  - `_compute_musicness`, `_compute_improved_musicness`, `_compute_pitch_stability`, `_compute_harmonic_ratio` all defensively cast `mag` that's already FP32
   - ~9-13 redundant graph nodes per training step
 - **Proposed Optimization**: Add `if x.dtype != mx.float32` guards; cast once at function entry and reuse
 - **Verification**: Compare graph node count before/after; run benchmark_train_step
@@ -82,10 +82,10 @@ python -m df_mlx.benchmark_train_step \
 
 ### PERF-P0-002: Duplicate FP32 casts in `_compute_pipeline_awesome_losses`
 - **Severity**: P0
-- **Component**: `train_dynamic.py:_compute_pipeline_awesome_losses`
+- **Component**: `training_losses.py:_compute_pipeline_awesome_losses`
 - **Evidence**:
-  - L1240-1241: `noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)` for noise
-  - L1263-1266: Same `clean_real/imag, noisy_real/imag` cast again for proxy gates
+  - `_compute_pipeline_awesome_losses()` casts `noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)` for noise
+  - Same `clean_real/imag, noisy_real/imag` cast again for proxy gates
   - 4 redundant casts of the same FP16 source tensors
 - **Proposed Optimization**: Cast once at function entry, reuse named FP32 variables
 - **Verification**: Run existing tests; compare benchmark
@@ -121,7 +121,7 @@ python -m df_mlx.benchmark_train_step \
 ### PERF-P1-003: Validation loop FP32→FP32 no-op casts
 - **Severity**: P1
 - **Component**: `train_dynamic.py` validation loop
-- **Evidence**: L4709-4712: 4 `.astype(mx.float32)` casts on data that's already FP32
+- **Evidence**: Validation loop casts 4× `.astype(mx.float32)` on data that's already FP32
 - **Proposed Optimization**: Add dtype guard
 - **Verification**: Existing validation tests
 - **Risks**: None
@@ -168,16 +168,16 @@ Existing Metal kernels already cover the 3 highest-cost per-frame operations:
 
 | ID | Optimization | Files Changed | Impact |
 |----|-------------|---------------|--------|
-| PERF-P0-001 | dtype guards on `_log1p_mag`, `_compute_musicness`, `_compute_pitch_stability`, `_compute_harmonic_ratio`, `_compute_improved_musicness` | `train_dynamic.py` | ~5 redundant graph nodes eliminated per step |
-| PERF-P0-002 | Cast-once refactor for `_compute_pipeline_awesome_losses` | `train_dynamic.py` | 4 redundant FP16→FP32 casts eliminated |
-| PERF-P0-003 | Cast-once refactor for `_compute_awesome_losses` | `train_dynamic.py` | 4 redundant FP16→FP32 casts eliminated |
-| PERF-P0-004 | dtype guards on `_compute_proxy_gates` | `train_dynamic.py` | 2 conditional cast skips |
+| PERF-P0-001 | dtype guards on `_log1p_mag`, `_compute_musicness`, `_compute_pitch_stability`, `_compute_harmonic_ratio`, `_compute_improved_musicness` | `training_losses.py` | ~5 redundant graph nodes eliminated per step |
+| PERF-P0-002 | Cast-once refactor for `_compute_pipeline_awesome_losses` | `training_losses.py` | 4 redundant FP16→FP32 casts eliminated |
+| PERF-P0-003 | Cast-once refactor for `_compute_awesome_losses` | `training_losses.py` | 4 redundant FP16→FP32 casts eliminated |
+| PERF-P0-004 | dtype guards on `_compute_proxy_gates` | `training_losses.py` | 2 conditional cast skips |
 | PERF-P0-005 | Cached `_erb_fb_T` at model init | `model.py` | 3 per-call transposes eliminated |
 | PERF-P1-001 | Cached SqueezedAttention causal mask by `(seq_len, dtype)` | `modules.py` | Per-call mask creation + cast eliminated |
 | PERF-P1-002 | `CombinedLoss` returns `Dict[str, mx.array]` (lazy) | `loss.py` | 5 GPU sync barriers eliminated |
 | PERF-P1-003 | dtype guards on `si_sdr()` | `loss.py` | 2 conditional cast skips |
-| PERF-P1-004 | dtype guards on `_compute_vad_probs`, `_compute_speech_band_logmag_loss` | `train_dynamic.py` | 4 conditional cast skips |
-| PERF-P1-005 | dtype guards on `specs_to_wavs` | `train_dynamic.py` | 2 conditional cast skips |
+| PERF-P1-004 | dtype guards on `_compute_vad_probs`, `_compute_speech_band_logmag_loss` | `training_losses.py` | 4 conditional cast skips |
+| PERF-P1-005 | dtype guards on `specs_to_wavs` | `training_waveform.py` | 2 conditional cast skips |
 
 **Total estimated reduction**: ~20+ unnecessary graph nodes per training step; 5 GPU sync barriers removed.
 
