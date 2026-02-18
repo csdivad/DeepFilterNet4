@@ -89,6 +89,14 @@ def _handle_sigint(signum, frame):
             data_ckpt_path = _interrupt_state.get("data_checkpoint_path")
             if train_stream is not None and data_ckpt_path is not None:
                 try:
+                    # Sync data stream position with model's authoritative batch count.
+                    # The data iterator may have pre-incremented its counter for the
+                    # *next* batch before the training loop finished processing the
+                    # current one, so the model's batch_idx is the true count of
+                    # fully-processed micro-batches.
+                    train_stream._checkpoint.epoch = epoch_idx
+                    train_stream._checkpoint.batch_idx = batch_idx
+                    train_stream._batch_count = batch_idx
                     train_stream.save_checkpoint(data_ckpt_path)
                     print(f"✅ Data checkpoint saved to {data_ckpt_path}")
                 except Exception as e_data:

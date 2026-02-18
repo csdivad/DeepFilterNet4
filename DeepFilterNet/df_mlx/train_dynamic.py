@@ -1134,12 +1134,27 @@ def train(
         resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
         if resume_requires_mid_epoch:
             if data_epoch != start_epoch or data_batch != resume_batch_idx:
-                raise RuntimeError(
-                    "Model checkpoint and data checkpoint disagree on resume position. "
-                    f"model=(epoch={start_epoch}, micro_batch={resume_batch_idx}, kind={resume_checkpoint_kind}), "
-                    f"data=(epoch={data_epoch}, micro_batch={data_batch}) from {data_resume_source}. "
-                    "Remediation: remove stale data_checkpoint.json or choose matching resume artifacts."
-                )
+                # The model checkpoint is authoritative for how many micro-batches
+                # were fully processed.  The data stream's counter can be ±1 ahead
+                # because its iterator pre-increments before yield, so an interrupt
+                # may capture a higher count.  Auto-correct when the epoch matches
+                # and the batch delta is small; reject only on large or cross-epoch
+                # mismatches.
+                batch_delta = abs(data_batch - resume_batch_idx)
+                if data_epoch == start_epoch and batch_delta <= 1:
+                    print(
+                        f"ℹ️  Auto-correcting data checkpoint batch position: "
+                        f"data={data_batch} → model={resume_batch_idx} "
+                        f"(delta={batch_delta}, epoch={start_epoch})."
+                    )
+                    train_stream.set_resume_position(epoch=start_epoch, batch_idx=resume_batch_idx)
+                else:
+                    raise RuntimeError(
+                        "Model checkpoint and data checkpoint disagree on resume position. "
+                        f"model=(epoch={start_epoch}, micro_batch={resume_batch_idx}, kind={resume_checkpoint_kind}), "
+                        f"data=(epoch={data_epoch}, micro_batch={data_batch}) from {data_resume_source}. "
+                        "Remediation: remove stale data_checkpoint.json or choose matching resume artifacts."
+                    )
         else:
             # Resuming from an epoch-boundary checkpoint should always restart at batch 0.
             if data_epoch != start_epoch or data_batch > 0:

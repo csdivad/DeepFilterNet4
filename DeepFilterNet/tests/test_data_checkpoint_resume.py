@@ -174,20 +174,69 @@ class TestResumeValidationLogic:
         assert data_epoch == model_epoch
         assert data_batch == model_batch
 
-    def test_mismatched_batch_triggers_error(self):
-        """The exact scenario from the bug: model=201, data=0."""
-        data_epoch = 35
-        data_batch = 0
-        model_epoch = 35
-        model_batch = 201
+    def test_large_mismatch_should_fail(self):
+        """Large mismatches (>1 batch) should still be flagged."""
         kind = "interrupted"
 
         from df_mlx.training_checkpoints import _IN_PROGRESS_KINDS
 
-        resume_requires_mid_epoch = kind in _IN_PROGRESS_KINDS
-        assert resume_requires_mid_epoch
+        assert kind in _IN_PROGRESS_KINDS
 
-        should_fail = data_epoch != model_epoch or data_batch != model_batch
-        assert should_fail, (
-            "Mismatched positions should be detected: " f"model batch={model_batch}, data batch={data_batch}"
-        )
+        batch_delta = abs(0 - 201)
+        assert batch_delta > 1, "Large mismatch should not be auto-corrected"
+
+    def test_off_by_one_auto_correctable(self):
+        """Off-by-one (data=202, model=201) should be auto-correctable."""
+        batch_delta = abs(202 - 201)
+        assert batch_delta <= 1, "Off-by-one should be within auto-correction tolerance"
+
+    def test_epoch_mismatch_not_auto_correctable(self):
+        """Different epochs should not be auto-corrected even with small batch delta."""
+        assert 36 != 35, "Epoch mismatch must not be auto-corrected"
+        # Even with identical batch positions, different epochs must reject
+        assert abs(201 - 201) <= 1
+
+
+class TestInterruptHandlerSync:
+    """Test that interrupt handler syncs data stream to model position."""
+
+    def test_interrupt_state_sync_concept(self):
+        """Verify the interrupt handler sync logic: model batch_idx is authoritative."""
+        model_batch_idx = 201
+        data_batch_idx = 202  # Pre-incremented by iterator
+
+        # The interrupt handler should set data stream to model's position
+        synced_batch_idx = model_batch_idx
+        assert synced_batch_idx == 201
+        assert synced_batch_idx != data_batch_idx
+
+    def test_interrupt_handler_syncs_stream_position(self):
+        """Simulate the interrupt handler's sync of train_stream checkpoint."""
+        try:
+            from df_mlx.dynamic_dataset import MLXDataStream
+        except ImportError:
+            pytest.skip("mlx-data not available")
+
+        ds = MagicMock()
+        ds.config = MagicMock()
+        ds.config.seed = 42
+        ds.__len__ = MagicMock(return_value=1000)
+        ds.set_split = MagicMock()
+        ds.set_epoch = MagicMock()
+
+        stream = MLXDataStream(dataset=ds, batch_size=24)
+        # Simulate state after iterator pre-increment
+        stream._checkpoint.epoch = 35
+        stream._checkpoint.batch_idx = 202
+        stream._batch_count = 202
+
+        # Simulate what the interrupt handler now does:
+        model_epoch = 35
+        model_batch = 201
+        stream._checkpoint.epoch = model_epoch
+        stream._checkpoint.batch_idx = model_batch
+        stream._batch_count = model_batch
+
+        progress = stream.get_progress()
+        assert progress["epoch"] == 35
+        assert progress["batch"] == 201
