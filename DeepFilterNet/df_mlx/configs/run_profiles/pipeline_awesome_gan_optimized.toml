@@ -49,6 +49,7 @@ use_mlx_data = true
 [checkpoint]
 checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_optimized"
 save_strategy = "epoch"
+save_total_limit = 3        # keep last 3 epoch/step checkpoints; best.safetensors is preserved separately
 validate_every = 1
 checkpoint_batches = 300     # up from 200: less frequent checkpoint I/O
 check_chkpts = false
