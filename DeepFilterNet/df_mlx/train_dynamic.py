@@ -150,6 +150,12 @@ from df_mlx.training_ops import (  # noqa: E402, F401
     clip_grad_norm,
     scale_grads,
 )
+from df_mlx.training_session import (  # noqa: E402, F401
+    _SENTINEL,
+    _TRAIN_KWARGS,
+    TrainingSession,
+    _kwargs_from_run_config,
+)
 from df_mlx.training_signals import (  # noqa: E402, F401
     _handle_sigint,
     _interrupt_state,

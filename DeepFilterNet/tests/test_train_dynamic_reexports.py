@@ -13,12 +13,14 @@ _TRAINING_MODULES = [
     "df_mlx.training_cli",
     "df_mlx.training_cli_main",
     "df_mlx.training_ops",
+    "df_mlx.training_session",
     "df_mlx.training_signals",
     "df_mlx.training_waveform",
 ]
 
 _SKIP_NAMES = frozenset(
     {
+        "__annotations__",
         "__builtins__",
         "__cached__",
         "__doc__",
