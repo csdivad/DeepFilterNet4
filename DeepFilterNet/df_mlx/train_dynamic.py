@@ -102,6 +102,41 @@ _TQDM_KWARGS = {
     "dynamic_ncols": True,
 }
 
+_tqdm_panels_env = os.getenv("DFNET_TQDM_PANELS", "").strip().lower()
+if _tqdm_panels_env in {"1", "true", "yes", "on"}:
+    _tqdm_panels = True
+elif _tqdm_panels_env in {"0", "false", "no", "off"}:
+    _tqdm_panels = False
+else:
+    # Default on interactive terminals only.
+    _tqdm_panels = not _tqdm_disable
+
+
+def _build_setup_panel_line(
+    *,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    dynamic_loss: str,
+    gan_enabled: bool,
+    vad_enabled: bool,
+    checkpoint_dir: str,
+    use_fp16: bool,
+) -> str:
+    """Build single-line setup metadata for the persistent setup panel."""
+    return (
+        "SETUP │ "
+        f"epochs={epochs} "
+        f"bs={batch_size} "
+        f"lr={learning_rate:.1e} "
+        f"loss={dynamic_loss} "
+        f"gan={'on' if gan_enabled else 'off'} "
+        f"vad={'on' if vad_enabled else 'off'} "
+        f"fp16={'on' if use_fp16 else 'off'} "
+        f"ckpt={checkpoint_dir}"
+    )
+
+
 # =============================================================================
 # VAD-based speech preservation helpers
 # =============================================================================
@@ -3310,6 +3345,32 @@ def train(
             print("    - " + ", ".join(stage_parts))
     print("=" * 60)
 
+    tqdm_setup_panel = None
+    tqdm_train_position = 0
+    tqdm_valid_position = 0
+    if _tqdm_panels:
+        setup_line = _build_setup_panel_line(
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            dynamic_loss=dynamic_loss,
+            gan_enabled=gan_enabled,
+            vad_enabled=vad_enabled,
+            checkpoint_dir=checkpoint_dir,
+            use_fp16=bool(use_fp16),
+        )
+        tqdm_setup_panel = tqdm(
+            total=1,
+            desc=setup_line,
+            bar_format="{desc}",
+            position=0,
+            leave=True,
+            **_TQDM_KWARGS,
+        )
+        tqdm_setup_panel.update(1)
+        tqdm_train_position = 1
+        tqdm_valid_position = 2
+
     train_config = {
         **config.__dict__,
         "train_config_path": train_config_path,
@@ -3586,6 +3647,8 @@ def train(
             )
             if start_epoch >= epochs:
                 print(f"✅ Training already complete (checkpoint epoch {ckpt_epoch}/{epochs}).")
+                if tqdm_setup_panel is not None:
+                    tqdm_setup_panel.close()
                 return
 
     if validation_report and validation_report["last_completed_epoch"] > last_completed_epoch:
@@ -4455,13 +4518,17 @@ def train(
                 prefetch_factor=2,
             )
 
+        valid_tqdm_kwargs = dict(_TQDM_KWARGS)
+        if _tqdm_panels:
+            valid_tqdm_kwargs["position"] = tqdm_valid_position
+
         valid_pbar = tqdm(
             valid_loader,
             total=valid_steps,
             desc=label,
             unit="batch",
             leave=False,
-            **_TQDM_KWARGS,
+            **valid_tqdm_kwargs,
         )
 
         sisdr_fn = None
@@ -5357,13 +5424,17 @@ def train(
             if did_skip:
                 print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
 
+        train_tqdm_kwargs = dict(_TQDM_KWARGS)
+        if _tqdm_panels:
+            train_tqdm_kwargs["position"] = tqdm_train_position
+
         train_pbar = tqdm(
             enumerate(islice(data_iterator, train_total)),
             total=train_total,
             desc=f"Epoch {epoch + 1}/{epochs}",
             unit="batch",
             leave=True,
-            **_TQDM_KWARGS,
+            **train_tqdm_kwargs,
         )
 
         # Throughput tracking: accumulate samples and wall-clock time over sync windows
@@ -6636,6 +6707,9 @@ def train(
     print(f"Final checkpoint: {final_path}")
     print(f"Best checkpoint: {ckpt_dir / 'best.safetensors'}")
     print(f"Checkpoints:     {ckpt_dir}")
+
+    if tqdm_setup_panel is not None:
+        tqdm_setup_panel.close()
 
 
 def main():
