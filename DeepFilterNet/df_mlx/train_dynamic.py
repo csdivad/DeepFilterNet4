@@ -3406,9 +3406,11 @@ def train(
             total_forward_time += fwd_time
 
             # Only convert loss to float when synced (avoids blocking)
+            _loss_was_nonfinite = False
             if should_sync:
                 loss_val = float(loss)
                 if not math.isfinite(loss_val):
+                    _loss_was_nonfinite = True
                     # Non-finite loss was already handled by clip_grad_norm
                     # (grads zeroed) and optionally diagnosed above.
                     # Substitute zero so epoch averaging isn't poisoned, and
@@ -3505,12 +3507,18 @@ def train(
                 # This must be outside the emit_detailed_metrics guard because
                 # use_vad_loss / use_awesome_loss / use_pipeline_awesome_loss
                 # reference out[0]/out[1] regardless of sync mode.
+                # Skip entirely when the loss was non-finite — model output
+                # contains NaN so all metric computations would be garbage
+                # and debug checks would crash with fail_fast=True.
                 needs_model_out = (
-                    use_vad_loss
-                    or use_awesome_loss
-                    or use_pipeline_awesome_loss
-                    or use_vad_train_reg
-                    or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+                    not _loss_was_nonfinite
+                    and (
+                        use_vad_loss
+                        or use_awesome_loss
+                        or use_pipeline_awesome_loss
+                        or use_vad_train_reg
+                        or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
+                    )
                 )
                 if needs_model_out:
                     out = pred_spec_for_logging
