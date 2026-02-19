@@ -3510,15 +3510,12 @@ def train(
                 # Skip entirely when the loss was non-finite — model output
                 # contains NaN so all metric computations would be garbage
                 # and debug checks would crash with fail_fast=True.
-                needs_model_out = (
-                    not _loss_was_nonfinite
-                    and (
-                        use_vad_loss
-                        or use_awesome_loss
-                        or use_pipeline_awesome_loss
-                        or use_vad_train_reg
-                        or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
-                    )
+                needs_model_out = not _loss_was_nonfinite and (
+                    use_vad_loss
+                    or use_awesome_loss
+                    or use_pipeline_awesome_loss
+                    or use_vad_train_reg
+                    or (emit_detailed_metrics and (use_mrstft_loss or gan_active))
                 )
                 if needs_model_out:
                     out = pred_spec_for_logging
@@ -3571,7 +3568,7 @@ def train(
                             gan_fm_loss_val = float(feature_match_loss(real_feats, fake_feats))
                             train_gan_fm_loss += gan_fm_loss_val * epoch_eval_frequency
 
-                if use_vad_loss:
+                if use_vad_loss and needs_model_out:
                     vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                         clean_real,
                         clean_imag,
@@ -3636,7 +3633,7 @@ def train(
                         train_vad_clip_ref += clip_ref
                         train_vad_clip_out += clip_out
 
-                if use_awesome_loss:
+                if use_awesome_loss and needs_model_out:
                     (
                         awesome_loss,
                         awesome_speech,
@@ -3753,7 +3750,7 @@ def train(
                         train_eps_noise_rate += noise_eps_rate
                         num_debug_logs += 1
 
-                if use_pipeline_awesome_loss:
+                if use_pipeline_awesome_loss and needs_model_out:
                     (
                         awesome_loss,
                         awesome_speech,
@@ -3856,7 +3853,7 @@ def train(
                     train_snr_boost += snr_boost_mean
                     num_awesome_logs += 1
 
-                if use_vad_train_reg and apply_vad_reg:
+                if use_vad_train_reg and apply_vad_reg and needs_model_out:
                     vad_reg_loss, vad_dec, gate, _, _, _, _ = _compute_vad_reg_loss(
                         clean_real,
                         clean_imag,
