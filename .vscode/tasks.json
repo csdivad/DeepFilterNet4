@@ -10,6 +10,11 @@
 			"label": "Format Files",
 			"type": "shell",
 			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m black --line-length 100 DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1 && .venv/bin/python -m isort --profile black DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1"
+		},
+		{
+			"label": "Git commit DUP-7.1",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'refactor(loss): remove dead MaskSpecLoss class (DUP-7.1)' --no-verify --no-gpg-sign"
 		}
 	]
 }
