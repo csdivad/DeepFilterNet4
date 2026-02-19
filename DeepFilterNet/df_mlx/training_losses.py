@@ -87,6 +87,38 @@ def _sync_model_config_with_dataset(model_cfg: Any, dataset_cfg: Any) -> None:
     model_cfg.df.nb_df = dataset_cfg.nb_df
 
 
+def _z_score_clean_energy(
+    clean_real: mx.array,
+    clean_imag: mx.array,
+    band_mask: mx.array,
+    band_bins: float,
+    vad_z_threshold: float,
+    vad_z_slope: float,
+    eps: float = _EPS,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    """Shared z-scored clean energy computation used by VAD and proxy gates.
+
+    Returns:
+        clean_power: (B, T, F) power spectrum
+        clean_band: (B, T) band energy
+        log_clean: (B, T) log10 band energy
+        z_ref_raw: (B, T) raw z-scored energy (before clipping)
+        z_ref: (B, T) clipped z-scored energy
+        p_ref: (B, T) sigmoid VAD probability
+    """
+    clean_power = clean_real**2 + clean_imag**2
+    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+    log_clean = mx.log10(clean_band + eps)
+    mu = mx.mean(log_clean, axis=1, keepdims=True)
+    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+    z_slope = max(vad_z_slope, 1e-3)
+    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+    return clean_power, clean_band, log_clean, z_ref_raw, z_ref, p_ref
+
+
 def _compute_vad_probs(
     clean_real: mx.array,
     clean_imag: mx.array,
@@ -100,8 +132,14 @@ def _compute_vad_probs(
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
     _assume_float32: bool = False,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[mx.array, mx.array]:
-    """Compute soft VAD probabilities from log-band energy (z-scored per utterance)."""
+    """Compute soft VAD probabilities from log-band energy (z-scored per utterance).
+
+    Args:
+        _precomputed_z: Optional tuple from ``_z_score_clean_energy`` to skip
+            redundant clean-signal z-scoring.
+    """
     if not _assume_float32:
         if clean_real.dtype != mx.float32:
             clean_real = clean_real.astype(mx.float32)
@@ -111,26 +149,25 @@ def _compute_vad_probs(
             out_real = out_real.astype(mx.float32)
         if out_imag.dtype != mx.float32:
             out_imag = out_imag.astype(mx.float32)
-    clean_power = clean_real**2 + clean_imag**2
+
+    if _precomputed_z is not None:
+        _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
+    else:
+        _, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _z_score_clean_energy(
+            clean_real, clean_imag, band_mask, band_bins, vad_z_threshold, vad_z_slope, eps
+        )
+
     out_power = out_real**2 + out_imag**2
-
-    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
     out_band = mx.sum(out_power * band_mask, axis=-1) / (band_bins + eps)
-
-    log_clean = mx.log10(clean_band + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    # Edge case: ensure minimum variance to avoid instability on silence
-    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
-
-    z_ref_raw = (log_clean - mu) / (sigma + eps)
+    sigma = mx.sqrt(
+        mx.maximum(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True), _MIN_VARIANCE) + eps
+    )
     z_out_raw = (mx.log10(out_band + eps) - mu) / (sigma + eps)
-    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
     z_out = mx.clip(z_out_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
-
     z_slope = max(vad_z_slope, 1e-3)
-    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
     p_out = mx.sigmoid((z_out - vad_z_threshold) / z_slope)
+
     if debug is not None:
         debug.check("vad.clean_band", clean_band, debug_ctx)
         debug.check("vad.out_band", out_band, debug_ctx)
@@ -313,6 +350,7 @@ def _compute_proxy_gates(
     noise_real: mx.array | None = None,
     noise_imag: mx.array | None = None,
     _assume_float32: bool = False,
+    _precomputed_z: tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute proxy VAD gates and statistics.
 
@@ -321,6 +359,8 @@ def _compute_proxy_gates(
             subtraction when the caller already has this value).
         noise_imag: Pre-computed ``noisy_imag - clean_imag``.
         _assume_float32: When True, skip dtype checks — caller guarantees FP32 inputs.
+        _precomputed_z: Optional tuple from ``_z_score_clean_energy`` to skip
+            redundant clean-signal z-scoring.
 
     Returns:
         proxy_frame: (B, T) speech presence proxy
@@ -340,27 +380,29 @@ def _compute_proxy_gates(
             noisy_real = noisy_real.astype(mx.float32)
         if noisy_imag.dtype != mx.float32:
             noisy_imag = noisy_imag.astype(mx.float32)
-    clean_power = clean_real**2 + clean_imag**2
+
+    if _precomputed_z is not None:
+        clean_power, clean_band, log_clean, z_ref_raw, z_ref, p_ref = _precomputed_z
+    else:
+        clean_power = clean_real**2 + clean_imag**2
+        clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
+        log_clean = mx.log10(clean_band + eps)
+        mu = mx.mean(log_clean, axis=1, keepdims=True)
+        variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
+        sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
+        z_ref_raw = (log_clean - mu) / (sigma + eps)
+        z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
+        z_slope = max(vad_z_slope, 1e-3)
+        p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
+
     if noise_real is None:
         noise_real = noisy_real - clean_real
     if noise_imag is None:
         noise_imag = noisy_imag - clean_imag
     noise_power = noise_real**2 + noise_imag**2
 
-    clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
     noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
     speech_ratio = clean_band / (clean_band + noise_band + eps)
-
-    log_clean = mx.log10(clean_band + eps)
-    mu = mx.mean(log_clean, axis=1, keepdims=True)
-    # Edge case: ensure minimum variance to avoid instability on silence
-    variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
-    sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
-    z_ref_raw = (log_clean - mu) / (sigma + eps)
-    z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
-
-    z_slope = max(vad_z_slope, 1e-3)
-    p_ref = mx.sigmoid((z_ref - vad_z_threshold) / z_slope)
 
     # Modulation proxy from z-scored energy trajectory
     # Edge case: if only 1 frame, no modulation can be computed
@@ -917,7 +959,14 @@ def _compute_vad_reg_loss(
     """Compute sparse VAD regularizer loss gated by speech ratio and musicness.
 
     Uses VAD probabilities only as stop-grad weights (non-differentiable).
+    Computes clean-signal z-scoring once and shares it between VAD probs
+    and proxy gates to avoid redundant computation.
     """
+    # Compute z-scored clean energy ONCE (shared by vad_probs and proxy_gates)
+    precomputed_z = _z_score_clean_energy(
+        clean_real, clean_imag, band_mask, band_bins, vad_z_threshold, vad_z_slope, eps
+    )
+
     p_ref, p_out = _compute_vad_probs(
         clean_real,
         clean_imag,
@@ -930,6 +979,7 @@ def _compute_vad_reg_loss(
         eps=eps,
         debug=debug,
         debug_ctx=debug_ctx,
+        _precomputed_z=precomputed_z,
     )
 
     vad_decrease = mx.maximum(p_ref - p_out - vad_margin, 0.0)
@@ -950,6 +1000,7 @@ def _compute_vad_reg_loss(
         eps=eps,
         debug=debug,
         debug_ctx=debug_ctx,
+        _precomputed_z=precomputed_z,
     )
 
     ratio_gate = mx.sigmoid((speech_ratio - vad_threshold) / 0.1)
