@@ -99,16 +99,18 @@ def _compute_vad_probs(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
 ) -> tuple[mx.array, mx.array]:
     """Compute soft VAD probabilities from log-band energy (z-scored per utterance)."""
-    if clean_real.dtype != mx.float32:
-        clean_real = clean_real.astype(mx.float32)
-    if clean_imag.dtype != mx.float32:
-        clean_imag = clean_imag.astype(mx.float32)
-    if out_real.dtype != mx.float32:
-        out_real = out_real.astype(mx.float32)
-    if out_imag.dtype != mx.float32:
-        out_imag = out_imag.astype(mx.float32)
+    if not _assume_float32:
+        if clean_real.dtype != mx.float32:
+            clean_real = clean_real.astype(mx.float32)
+        if clean_imag.dtype != mx.float32:
+            clean_imag = clean_imag.astype(mx.float32)
+        if out_real.dtype != mx.float32:
+            out_real = out_real.astype(mx.float32)
+        if out_imag.dtype != mx.float32:
+            out_imag = out_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
     out_power = out_real**2 + out_imag**2
 
@@ -202,16 +204,18 @@ def _compute_speech_band_logmag_loss(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
 ) -> mx.array:
     """Compute speech-band log-magnitude L1 loss weighted by VAD gate."""
-    if clean_real.dtype != mx.float32:
-        clean_real = clean_real.astype(mx.float32)
-    if clean_imag.dtype != mx.float32:
-        clean_imag = clean_imag.astype(mx.float32)
-    if out_real.dtype != mx.float32:
-        out_real = out_real.astype(mx.float32)
-    if out_imag.dtype != mx.float32:
-        out_imag = out_imag.astype(mx.float32)
+    if not _assume_float32:
+        if clean_real.dtype != mx.float32:
+            clean_real = clean_real.astype(mx.float32)
+        if clean_imag.dtype != mx.float32:
+            clean_imag = clean_imag.astype(mx.float32)
+        if out_real.dtype != mx.float32:
+            out_real = out_real.astype(mx.float32)
+        if out_imag.dtype != mx.float32:
+            out_imag = out_imag.astype(mx.float32)
     clean_mag = mx.sqrt(clean_real**2 + clean_imag**2 + eps)
     out_mag = mx.sqrt(out_real**2 + out_imag**2 + eps)
 
@@ -229,12 +233,18 @@ def _compute_speech_band_logmag_loss(
     return loss
 
 
-def _log1p_mag(real: mx.array, imag: mx.array, eps: float = _EPS) -> mx.array:
+def _log1p_mag(
+    real: mx.array,
+    imag: mx.array,
+    eps: float = _EPS,
+    _assume_float32: bool = False,
+) -> mx.array:
     """Compute log1p magnitude for complex STFT."""
-    if real.dtype != mx.float32:
-        real = real.astype(mx.float32)
-    if imag.dtype != mx.float32:
-        imag = imag.astype(mx.float32)
+    if not _assume_float32:
+        if real.dtype != mx.float32:
+            real = real.astype(mx.float32)
+        if imag.dtype != mx.float32:
+            imag = imag.astype(mx.float32)
     mag = mx.sqrt(real**2 + imag**2 + eps)
     return mx.log1p(mag)
 
@@ -246,6 +256,7 @@ def _compute_musicness(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
 ) -> tuple[mx.array, mx.array]:
     """Compute a cheap musicness score and its inverse gate.
 
@@ -253,7 +264,7 @@ def _compute_musicness(
     Returns per-sample musicness and a [0,1] gate (1 = keep speech bias).
     """
     # Spectral flatness over speech band
-    if mag.dtype != mx.float32:
+    if not _assume_float32 and mag.dtype != mx.float32:
         mag = mag.astype(mx.float32)
     log_mag = mx.log(mag + eps)
     mean_log = mx.sum(log_mag * band_mask, axis=-1) / (band_bins + eps)
@@ -301,6 +312,7 @@ def _compute_proxy_gates(
     debug_ctx: dict[str, Any] | None = None,
     noise_real: mx.array | None = None,
     noise_imag: mx.array | None = None,
+    _assume_float32: bool = False,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute proxy VAD gates and statistics.
 
@@ -308,6 +320,7 @@ def _compute_proxy_gates(
         noise_real: Pre-computed ``noisy_real - clean_real`` (avoids duplicate
             subtraction when the caller already has this value).
         noise_imag: Pre-computed ``noisy_imag - clean_imag``.
+        _assume_float32: When True, skip dtype checks — caller guarantees FP32 inputs.
 
     Returns:
         proxy_frame: (B, T) speech presence proxy
@@ -318,14 +331,15 @@ def _compute_proxy_gates(
         energy_boost: (B, 1) low-energy boost
         snr_boost: (B, 1) low-SNR boost
     """
-    if clean_real.dtype != mx.float32:
-        clean_real = clean_real.astype(mx.float32)
-    if clean_imag.dtype != mx.float32:
-        clean_imag = clean_imag.astype(mx.float32)
-    if noisy_real.dtype != mx.float32:
-        noisy_real = noisy_real.astype(mx.float32)
-    if noisy_imag.dtype != mx.float32:
-        noisy_imag = noisy_imag.astype(mx.float32)
+    if not _assume_float32:
+        if clean_real.dtype != mx.float32:
+            clean_real = clean_real.astype(mx.float32)
+        if clean_imag.dtype != mx.float32:
+            clean_imag = clean_imag.astype(mx.float32)
+        if noisy_real.dtype != mx.float32:
+            noisy_real = noisy_real.astype(mx.float32)
+        if noisy_imag.dtype != mx.float32:
+            noisy_imag = noisy_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
     if noise_real is None:
         noise_real = noisy_real - clean_real
@@ -371,6 +385,7 @@ def _compute_proxy_gates(
         eps=eps,
         debug=debug,
         debug_ctx=debug_ctx,
+        _assume_float32=_assume_float32,
     )
 
     if not proxy_enabled:
@@ -438,12 +453,12 @@ def _compute_awesome_losses(
     out_real_f32 = out_real.astype(mx.float32) if out_real.dtype != mx.float32 else out_real
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
 
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps)
-    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps)
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps, _assume_float32=True)
 
     noise_real = noisy_real_f32 - clean_real_f32
     noise_imag = noisy_imag_f32 - clean_imag_f32
-    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps, _assume_float32=True)
 
     mask_logits = mx.clip(
         mask_sharpness * (clean_log - noise_log),
@@ -484,6 +499,7 @@ def _compute_awesome_losses(
         debug_ctx=debug_ctx,
         noise_real=noise_real,
         noise_imag=noise_imag,
+        _assume_float32=True,
     )
 
     proxy_frame = proxy_frame[:, :, None]
@@ -524,6 +540,7 @@ def _compute_pitch_stability(
     band_mask: mx.array,
     band_bins: float,
     eps: float = _EPS,
+    _assume_float32: bool = False,
 ) -> mx.array:
     """Compute pitch stability metric to detect sustained vocals vs speech.
 
@@ -532,7 +549,7 @@ def _compute_pitch_stability(
 
     Returns per-sample pitch stability in [0, 1], where 1 = very stable (vocal-like).
     """
-    if mag.dtype != mx.float32:
+    if not _assume_float32 and mag.dtype != mx.float32:
         mag = mag.astype(mx.float32)
     band_mag = mag * band_mask
 
@@ -555,13 +572,14 @@ def _compute_pitch_stability(
 def _compute_harmonic_ratio(
     mag: mx.array,
     eps: float = _EPS,
+    _assume_float32: bool = False,
 ) -> mx.array:
     """Compute harmonic-to-noise ratio to detect tonal content (vocals/music).
 
     Uses autocorrelation proxy: high HNR = more harmonic/tonal content.
     Returns per-sample HNR score in [0, 1].
     """
-    if mag.dtype != mx.float32:
+    if not _assume_float32 and mag.dtype != mx.float32:
         mag = mag.astype(mx.float32)
 
     # Simple proxy: ratio of peak to mean energy in low-mid frequencies
@@ -585,6 +603,7 @@ def _compute_improved_musicness(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    _assume_float32: bool = False,
 ) -> tuple[mx.array, mx.array, mx.array]:
     """Compute improved musicness score with vocal detection.
 
@@ -593,7 +612,7 @@ def _compute_improved_musicness(
         vocal_gate: (B,) gate for vocal content (1 = protect as speech)
         instrument_gate: (B,) gate for instrumental content (1 = suppress)
     """
-    if mag.dtype != mx.float32:
+    if not _assume_float32 and mag.dtype != mx.float32:
         mag = mag.astype(mx.float32)
 
     # Original spectral flatness
@@ -616,10 +635,10 @@ def _compute_improved_musicness(
     flux_gate = mx.sigmoid((_AWESOME_MUSIC_FLUX_THR - flux_mean) / _AWESOME_MUSIC_FLUX_WIDTH)
 
     # Pitch stability (vocals = less stable than instruments)
-    pitch_stability = _compute_pitch_stability(mag, band_mask, band_bins, eps)
+    pitch_stability = _compute_pitch_stability(mag, band_mask, band_bins, eps, _assume_float32=_assume_float32)
 
     # Harmonic ratio
-    harmonic_ratio = _compute_harmonic_ratio(mag, eps)
+    harmonic_ratio = _compute_harmonic_ratio(mag, eps, _assume_float32=_assume_float32)
 
     # Musicness from original features
     musicness_base = mx.clip(tonal_mean.squeeze(-1) * flux_gate.squeeze(-1), 0.0, 1.0)
@@ -708,12 +727,12 @@ def _compute_pipeline_awesome_losses(
     out_imag_f32 = out_imag.astype(mx.float32) if out_imag.dtype != mx.float32 else out_imag
 
     # Compute log magnitudes using pre-cast FP32 values (no redundant casts in _log1p_mag)
-    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps)
-    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps)
+    clean_log = _log1p_mag(clean_real_f32, clean_imag_f32, eps=eps, _assume_float32=True)
+    out_log = _log1p_mag(out_real_f32, out_imag_f32, eps=eps, _assume_float32=True)
 
     noise_real = noisy_real_f32 - clean_real_f32
     noise_imag = noisy_imag_f32 - clean_imag_f32
-    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps)
+    noise_log = _log1p_mag(noise_real, noise_imag, eps=eps, _assume_float32=True)
 
     # Compute speech/noise dominance mask with floor
     mask_logits = mx.clip(
@@ -781,6 +800,7 @@ def _compute_pipeline_awesome_losses(
         eps=eps,
         debug=debug,
         debug_ctx=debug_ctx,
+        _assume_float32=True,
     )
 
     # Music gate: downweight for instrumental, but preserve vocal-like content
