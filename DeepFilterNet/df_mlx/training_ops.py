@@ -125,7 +125,9 @@ class NumericDebugger:
         if not all_finite:
             from tqdm import tqdm
 
-            tqdm.write(f"⚠️  Non-finite gradients in {name} " f"(ctx={ctx}) — skipping optimizer update")
+            tqdm.write(
+                f"⚠️  Non-finite gradients in {name} " f"(ctx={ctx}) — skipping optimizer update"
+            )
         return all_finite
 
 
@@ -176,6 +178,26 @@ def accumulate_grads(accumulated: Any | None, new_grads: Any) -> Any:
     return add_trees(accumulated, new_grads)
 
 
+_scale_cache: dict[float, mx.array] = {}
+
+
+def _get_scale_array(scale: float) -> mx.array:
+    """Return a cached mx.array for the given scale value.
+
+    Gradient accumulation typically calls scale_grads with the same
+    value (1/grad_accumulation_steps) every accumulation window, so
+    caching avoids repeated Python→C++ allocation round-trips.
+    """
+    arr = _scale_cache.get(scale)
+    if arr is None:
+        arr = mx.array(scale, dtype=mx.float32)
+        # Bounded cache: evict oldest when > 8 entries (unlikely in practice)
+        if len(_scale_cache) > 8:
+            _scale_cache.pop(next(iter(_scale_cache)))
+        _scale_cache[scale] = arr
+    return arr
+
+
 def scale_grads(grads: Any, scale: float) -> Any:
     """Scale all gradients by a constant factor.
 
@@ -186,7 +208,7 @@ def scale_grads(grads: Any, scale: float) -> Any:
     Returns:
         Scaled gradient tree
     """
-    scale_arr = mx.array(scale, dtype=mx.float32)
+    scale_arr = _get_scale_array(scale)
 
     def apply_scale(x: Any) -> Any:
         if isinstance(x, mx.array):

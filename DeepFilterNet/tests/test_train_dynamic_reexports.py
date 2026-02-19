@@ -36,11 +36,18 @@ _SKIP_NAMES = frozenset(
 
 
 def _public_symbols(mod):
-    """Return symbols defined in a module (not imported from other df_mlx or third-party modules)."""
+    """Return symbols defined in a module (not imported from other df_mlx or third-party modules).
+
+    Skips symbols starting with underscore unless they are listed in __all__.
+    """
     mod_name = mod.__name__
+    mod_all = set(getattr(mod, "__all__", []))
     symbols = set()
     for name in dir(mod):
         if name in _SKIP_NAMES:
+            continue
+        # Skip underscore-prefixed names unless they're in __all__
+        if name.startswith("_") and name not in mod_all:
             continue
         obj = getattr(mod, name)
         if inspect.ismodule(obj):

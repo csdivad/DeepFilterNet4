@@ -7,6 +7,9 @@ from typing import Callable
 
 import mlx.core as mx
 
+# Cached scalar zero — avoids allocation on early-return paths.
+_ZERO = mx.array(0.0)
+
 
 def specs_to_wavs(
     out_spec: tuple[mx.array, mx.array],
@@ -25,8 +28,16 @@ def specs_to_wavs(
             out_spec[1].astype(mx.float32) if out_spec[1].dtype != mx.float32 else out_spec[1],
         )
         clean_spec = (
-            (clean_spec[0].astype(mx.float32) if clean_spec[0].dtype != mx.float32 else clean_spec[0]),
-            (clean_spec[1].astype(mx.float32) if clean_spec[1].dtype != mx.float32 else clean_spec[1]),
+            (
+                clean_spec[0].astype(mx.float32)
+                if clean_spec[0].dtype != mx.float32
+                else clean_spec[0]
+            ),
+            (
+                clean_spec[1].astype(mx.float32)
+                if clean_spec[1].dtype != mx.float32
+                else clean_spec[1]
+            ),
         )
 
     clean_wav = istft_fn(
@@ -70,7 +81,7 @@ def compute_mrstft_loss(
     stays in mixed precision.
     """
     if istft_fn is None or loss_fn is None:
-        return mx.array(0.0)
+        return _ZERO
 
     out_wav, clean_wav = specs_to_wavs(
         out_spec,
@@ -97,7 +108,9 @@ def _gan_waveform_view(wav: mx.array, *, use_fp16: bool) -> mx.array:
     return wav
 
 
-def _disc_crop_waveform(wav: mx.array, max_samples: int, crop_start: int | None = None) -> tuple[mx.array, int]:
+def _disc_crop_waveform(
+    wav: mx.array, max_samples: int, crop_start: int | None = None
+) -> tuple[mx.array, int]:
     """Random-crop waveform along the time axis for discriminator input.
 
     Waveform-domain discriminators (MPD/MSD) produce enormous activation tensors
