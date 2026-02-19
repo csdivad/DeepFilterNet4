@@ -14,12 +14,10 @@ The discriminators output both final scores and intermediate feature maps
 for feature matching loss computation.
 """
 
-from typing import List, Literal, Tuple
+from typing import List, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-
-from .loss import FeatureMatchingLoss, discriminator_loss, generator_loss
 
 # ============================================================================
 # Utility Functions
@@ -145,29 +143,17 @@ class PeriodDiscriminator(nn.Module):
 
         # Convolutional layers with increasing channels
         self.convs = [
-            weight_norm_conv2d(
-                1, channels, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)
-            ),
-            weight_norm_conv2d(
-                channels, channels * 2, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)
-            ),
-            weight_norm_conv2d(
-                channels * 2, channels * 4, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)
-            ),
-            weight_norm_conv2d(
-                channels * 4, channels * 8, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)
-            ),
-            weight_norm_conv2d(
-                channels * 8, channels * 16, (kernel_size, 1), 1, (get_padding(kernel_size), 0)
-            ),
+            weight_norm_conv2d(1, channels, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)),
+            weight_norm_conv2d(channels, channels * 2, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)),
+            weight_norm_conv2d(channels * 2, channels * 4, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)),
+            weight_norm_conv2d(channels * 4, channels * 8, (kernel_size, 1), (3, 1), (get_padding(kernel_size), 0)),
+            weight_norm_conv2d(channels * 8, channels * 16, (kernel_size, 1), 1, (get_padding(kernel_size), 0)),
         ]
 
         # Final output layer
         self.output = weight_norm_conv2d(channels * 16, 1, (3, 1), 1, (1, 0))
 
-    def __call__(
-        self, x: mx.array, return_features: bool = True
-    ) -> Tuple[mx.array, List[mx.array] | None]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[mx.array, List[mx.array] | None]:
         """Forward pass.
 
         Args:
@@ -247,24 +233,16 @@ class ScaleDiscriminator(nn.Module):
             weight_norm_conv1d(1, channels, 15, 1, padding=7),
             weight_norm_conv1d(channels, channels, kernel_size, 2, padding=kernel_size // 2),
             weight_norm_conv1d(channels, channels * 2, kernel_size, 2, padding=kernel_size // 2),
-            weight_norm_conv1d(
-                channels * 2, channels * 4, kernel_size, 4, padding=kernel_size // 2
-            ),
-            weight_norm_conv1d(
-                channels * 4, channels * 8, kernel_size, 4, padding=kernel_size // 2
-            ),
-            weight_norm_conv1d(
-                channels * 8, channels * 8, kernel_size, 1, padding=kernel_size // 2
-            ),
+            weight_norm_conv1d(channels * 2, channels * 4, kernel_size, 4, padding=kernel_size // 2),
+            weight_norm_conv1d(channels * 4, channels * 8, kernel_size, 4, padding=kernel_size // 2),
+            weight_norm_conv1d(channels * 8, channels * 8, kernel_size, 1, padding=kernel_size // 2),
             weight_norm_conv1d(channels * 8, channels * 8, 5, 1, padding=2),
         ]
 
         # Final output
         self.output = weight_norm_conv1d(channels * 8, 1, 3, 1, padding=1)
 
-    def __call__(
-        self, x: mx.array, return_features: bool = True
-    ) -> Tuple[mx.array, List[mx.array] | None]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[mx.array, List[mx.array] | None]:
         """Forward pass.
 
         Args:
@@ -333,9 +311,7 @@ class MultiPeriodDiscriminator(nn.Module):
         self.periods = periods
         self.discriminators = [PeriodDiscriminator(period=p, channels=channels) for p in periods]
 
-    def __call__(
-        self, x: mx.array, return_features: bool = True
-    ) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through all period discriminators.
 
         Args:
@@ -405,9 +381,7 @@ class MultiScaleDiscriminator(nn.Module):
         x = x.reshape(batch, samples // factor, factor)
         return mx.mean(x, axis=-1)
 
-    def __call__(
-        self, x: mx.array, return_features: bool = True
-    ) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through all scale discriminators.
 
         Args:
@@ -465,9 +439,7 @@ class CombinedDiscriminator(nn.Module):
             channels=msd_channels,
         )
 
-    def __call__(
-        self, x: mx.array, return_features: bool = True
-    ) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
+    def __call__(self, x: mx.array, return_features: bool = True) -> Tuple[List[mx.array], List[List[mx.array]] | None]:
         """Forward pass through both MPD and MSD.
 
         Args:
@@ -576,110 +548,3 @@ class SpectralDiscriminator(nn.Module):
         x = x.reshape(batch, -1)
 
         return x, feature_maps
-
-
-# ============================================================================
-# GAN Training Utilities
-# ============================================================================
-
-
-def compute_discriminator_loss(
-    discriminator: nn.Module,
-    real_audio: mx.array,
-    fake_audio: mx.array,
-) -> Tuple[mx.array, dict]:
-    """Compute discriminator loss on real and fake audio.
-
-    Args:
-        discriminator: Discriminator module
-        real_audio: Real audio samples (batch, samples)
-        fake_audio: Generated audio samples (batch, samples)
-
-    Returns:
-        Tuple of (loss, loss_dict) where loss_dict contains breakdown
-    """
-    # Stop gradients on fake audio for discriminator training
-    fake_audio = mx.stop_gradient(fake_audio)
-
-    # Forward pass
-    real_outs, _ = discriminator(real_audio)
-    fake_outs, _ = discriminator(fake_audio)
-
-    # Compute loss
-    total_loss, real_loss, fake_loss = discriminator_loss(real_outs, fake_outs)
-
-    return total_loss, {
-        "disc_loss": float(total_loss),
-        "disc_real": float(real_loss),
-        "disc_fake": float(fake_loss),
-    }
-
-
-def compute_generator_loss(
-    discriminator: nn.Module,
-    real_audio: mx.array,
-    fake_audio: mx.array,
-    feature_match_factor: float = 2.0,
-) -> Tuple[mx.array, dict]:
-    """Compute generator loss including adversarial and feature matching.
-
-    Args:
-        discriminator: Discriminator module
-        real_audio: Real audio samples (batch, samples)
-        fake_audio: Generated audio samples (batch, samples)
-        feature_match_factor: Weight for feature matching loss
-
-    Returns:
-        Tuple of (loss, loss_dict)
-    """
-    # Forward pass (with gradients on fake)
-    real_outs, real_features = discriminator(real_audio)
-    fake_outs, fake_features = discriminator(fake_audio)
-
-    # Adversarial loss - generator wants discriminator to output high for fake
-    adv_loss = generator_loss(fake_outs)
-
-    # Feature matching loss
-    fm_loss_fn = FeatureMatchingLoss(factor=feature_match_factor)
-    fm_loss = fm_loss_fn(real_features, fake_features)
-
-    total_loss = adv_loss + fm_loss
-
-    return total_loss, {
-        "gen_adv_loss": float(adv_loss),
-        "gen_fm_loss": float(fm_loss),
-        "gen_total_loss": float(total_loss),
-    }
-
-
-# ============================================================================
-# Factory Functions
-# ============================================================================
-
-
-def create_discriminator(
-    disc_type: Literal["combined", "mpd", "msd", "spectral"] = "combined",
-    **kwargs,
-) -> nn.Module:
-    """Create discriminator from type string.
-
-    Args:
-        disc_type: Type of discriminator
-        **kwargs: Arguments passed to discriminator constructor
-
-    Returns:
-        Discriminator module
-    """
-    discriminators = {
-        "combined": CombinedDiscriminator,
-        "mpd": MultiPeriodDiscriminator,
-        "msd": MultiScaleDiscriminator,
-        "spectral": SpectralDiscriminator,
-    }
-
-    if disc_type not in discriminators:
-        raise ValueError(
-            f"Unknown discriminator type: {disc_type}. " f"Available: {list(discriminators.keys())}"
-        )
-
-    return discriminators[disc_type](**kwargs)

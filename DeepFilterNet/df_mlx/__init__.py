@@ -108,8 +108,6 @@ if MLX_AVAILABLE:
         PeriodDiscriminator,
         ScaleDiscriminator,
         SpectralDiscriminator,
-        compute_discriminator_loss,
-        compute_generator_loss,
     )
     from .evaluation import (  # noqa: F401
         EvaluationResults,
@@ -338,8 +336,6 @@ if MLX_AVAILABLE:
         "MultiScaleDiscriminator",
         "CombinedDiscriminator",
         "SpectralDiscriminator",
-        "compute_discriminator_loss",
-        "compute_generator_loss",
         # STOI (new)
         "stoi",
         "stoi_numpy",
@@ -411,8 +407,7 @@ else:
 
     def _mlx_not_available(*args, **kwargs):
         raise ImportError(
-            "MLX is not available. MLX only works on Apple Silicon Macs. "
-            "Install with: pip install mlx"
+            "MLX is not available. MLX only works on Apple Silicon Macs. " "Install with: pip install mlx"
         )
 
     # Create stubs for common imports

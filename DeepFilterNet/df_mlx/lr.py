@@ -479,8 +479,6 @@ def create_scheduler(
     }
 
     if scheduler_type not in schedulers:
-        raise ValueError(
-            f"Unknown scheduler type: {scheduler_type}. " f"Available: {list(schedulers.keys())}"
-        )
+        raise ValueError(f"Unknown scheduler type: {scheduler_type}. " f"Available: {list(schedulers.keys())}")
 
     return schedulers[scheduler_type](**kwargs)

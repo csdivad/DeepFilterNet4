@@ -197,8 +197,7 @@ class SpectralLoss:
                     target_imag_c = target_imag
 
                 complex_loss = (
-                    mx.mean((pred_real_c - target_real_c) ** 2)
-                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
                 ) * self.factor_complex
                 total_loss = total_loss + complex_loss
 
@@ -253,9 +252,7 @@ class FusedSpectralLoss:
         self._compiled_loss = mx.compile(self._compute_loss)
 
     @staticmethod
-    def _stft_inline(
-        x: mx.array, n_fft: int, hop_length: int, window: mx.array
-    ) -> Tuple[mx.array, mx.array]:
+    def _stft_inline(x: mx.array, n_fft: int, hop_length: int, window: mx.array) -> Tuple[mx.array, mx.array]:
         """Compute STFT inline without function-call overhead."""
         pad_amount = n_fft // 2
         x_padded = mx.pad(x, [(0, 0), (pad_amount, pad_amount)])
@@ -264,9 +261,7 @@ class FusedSpectralLoss:
         frame_starts = mx.arange(num_frames) * hop_length
         offsets = mx.arange(n_fft)
         indices = frame_starts[:, None] + offsets[None, :]
-        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(
-            x_padded.shape[0], num_frames, n_fft
-        )
+        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(x_padded.shape[0], num_frames, n_fft)
         frames = frames * window
         fft_out = mx.fft.rfft(frames, axis=-1)
         return mx.real(fft_out), mx.imag(fft_out)
@@ -319,8 +314,7 @@ class FusedSpectralLoss:
                     target_imag_c = target_imag
 
                 complex_loss = (
-                    mx.mean((pred_real_c - target_real_c) ** 2)
-                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
                 ) * self.factor_complex
                 total_loss = total_loss + complex_loss
 
@@ -944,97 +938,3 @@ class CombinedLoss:
 
         losses["total"] = total_loss
         return total_loss, losses
-
-
-# ============================================================================
-# ASR Loss (placeholder for Whisper-based loss)
-# ============================================================================
-
-
-class ASRLoss:
-    """ASR-based loss using Whisper embeddings.
-
-    NOTE: This is a placeholder. Full implementation requires
-    whisper integration which is already in df.loss.ASRLoss.
-    For MLX, consider using mlx-whisper.
-
-    Args:
-        factor: Loss weight for embedding similarity
-        factor_lm: Loss weight for language model loss
-        model: Whisper model name
-    """
-
-    def __init__(
-        self,
-        factor: float = 1.0,
-        factor_lm: float = 1.0,
-        model: str = "base.en",
-    ):
-        raise NotImplementedError(
-            "MLX ASRLoss is not yet implemented. "
-            "Use df.loss.ASRLoss (PyTorch) or disable ASR loss in your config."
-        )
-
-    def _lazy_init(self):
-        """Lazy initialization of Whisper model."""
-        if self._initialized:
-            return
-
-        try:
-            import mlx_whisper
-
-            self.whisper = mlx_whisper.load_models.load_model(self.model)
-            self._initialized = True
-        except ImportError:
-            raise ImportError("ASRLoss requires mlx-whisper. Install with: pip install mlx-whisper")
-
-    def __call__(
-        self,
-        pred: mx.array,
-        target: mx.array,
-    ) -> mx.array:
-        """Compute ASR embedding loss.
-
-        Args:
-            pred: Predicted audio (batch, samples)
-            target: Target audio (batch, samples)
-
-        Returns:
-            ASR embedding loss
-        """
-        self._lazy_init()
-        # TODO: Implement full ASR loss with MLX Whisper
-        # For now, return placeholder
-        raise NotImplementedError(
-            "Full ASR loss implementation pending. " "Use df.loss.ASRLoss for PyTorch version."
-        )
-
-
-# ============================================================================
-# Factory Functions
-# ============================================================================
-
-
-def create_loss_fn(
-    loss_type: str = "combined",
-    **kwargs,
-) -> CombinedLoss | SpectralLoss | FusedSpectralLoss | SiSdrLoss:
-    """Factory function to create loss functions.
-
-    Args:
-        loss_type: Type of loss ("combined", "spectral", "fused_spectral", "sisdr")
-        **kwargs: Arguments passed to loss constructor
-
-    Returns:
-        Configured loss function
-    """
-    if loss_type == "combined":
-        return CombinedLoss(**kwargs)
-    elif loss_type == "spectral":
-        return SpectralLoss(**kwargs)
-    elif loss_type == "fused_spectral":
-        return FusedSpectralLoss(**kwargs)
-    elif loss_type == "sisdr":
-        return SiSdrLoss(**kwargs)
-    else:
-        raise ValueError(f"Unknown loss type: {loss_type}")
