@@ -98,9 +98,7 @@ def _record_sort_key(record: CheckpointRecord) -> tuple[int, float]:
     return (record.global_step, record.mtime)
 
 
-def _validate_checkpoint_pair(
-    checkpoint_path: Path, *, manifest: CheckpointManifest | None = None
-) -> bool:
+def _validate_checkpoint_pair(checkpoint_path: Path, *, manifest: CheckpointManifest | None = None) -> bool:
     """Validate that both weights and state files exist and are non-empty.
 
     Args:
@@ -318,9 +316,7 @@ def validate_checkpoint_dir(
                 record.errors.append(f"kind mismatch (expected {sorted(expected_kinds)})")
             if expected.get("epoch") is not None and isinstance(epoch, int):
                 if epoch != expected["epoch"]:
-                    record.errors.append(
-                        f"epoch mismatch (state {epoch} vs name {expected['epoch']})"
-                    )
+                    record.errors.append(f"epoch mismatch (state {epoch} vs name {expected['epoch']})")
             if expected.get("global_step") is not None and isinstance(global_step, int):
                 if global_step != expected["global_step"]:
                     record.errors.append(
@@ -349,15 +345,9 @@ def validate_checkpoint_dir(
 
         if state.get("current_epoch") is not None and state.get("current_epoch") != epoch:
             record.errors.append("current_epoch mismatch")
-        if (
-            state.get("last_saved_global_step") is not None
-            and state.get("last_saved_global_step") != global_step
-        ):
+        if state.get("last_saved_global_step") is not None and state.get("last_saved_global_step") != global_step:
             record.errors.append("last_saved_global_step mismatch")
-        if (
-            state.get("last_saved_batch_idx") is not None
-            and state.get("last_saved_batch_idx") != batch_idx
-        ):
+        if state.get("last_saved_batch_idx") is not None and state.get("last_saved_batch_idx") != batch_idx:
             record.errors.append("last_saved_batch_idx mismatch")
 
         if validate_load and not record.errors:
@@ -370,9 +360,7 @@ def validate_checkpoint_dir(
         if record.valid:
             report["valid"] += 1
             if record.last_completed_epoch is not None:
-                report["last_completed_epoch"] = max(
-                    report["last_completed_epoch"], record.last_completed_epoch
-                )
+                report["last_completed_epoch"] = max(report["last_completed_epoch"], record.last_completed_epoch)
         else:
             report["invalid"].append((ckpt, "; ".join(record.errors)))
 
@@ -390,15 +378,11 @@ def validate_checkpoint_dir(
 
     if marker_epochs:
         completed_epochs = {
-            rec.epoch
-            for rec in records
-            if rec.valid and rec.kind in _COMPLETED_KINDS and rec.epoch is not None
+            rec.epoch for rec in records if rec.valid and rec.kind in _COMPLETED_KINDS and rec.epoch is not None
         }
         for epoch_idx, marker in marker_epochs.items():
             if epoch_idx not in completed_epochs:
-                report["invalid"].append(
-                    (marker, "epoch complete marker without valid end-of-epoch checkpoint")
-                )
+                report["invalid"].append((marker, "epoch complete marker without valid end-of-epoch checkpoint"))
 
     valid_records = [rec for rec in records if rec.valid]
     if valid_records:
@@ -420,21 +404,15 @@ def validate_checkpoint_dir(
     for rec in valid_by_time:
         if rec.epoch is not None:
             if last_epoch_seen is not None and rec.epoch < last_epoch_seen:
-                report["invalid"].append(
-                    (rec.path, "epoch decreased relative to earlier checkpoint")
-                )
+                report["invalid"].append((rec.path, "epoch decreased relative to earlier checkpoint"))
             last_epoch_seen = rec.epoch
         if rec.global_step is not None:
             if last_step_seen is not None and rec.global_step < last_step_seen:
-                report["invalid"].append(
-                    (rec.path, "global_step decreased relative to earlier checkpoint")
-                )
+                report["invalid"].append((rec.path, "global_step decreased relative to earlier checkpoint"))
             last_step_seen = rec.global_step
         if rec.last_completed_epoch is not None:
             if last_completed_seen is not None and rec.last_completed_epoch < last_completed_seen:
-                report["invalid"].append(
-                    (rec.path, "last_completed_epoch decreased relative to earlier checkpoint")
-                )
+                report["invalid"].append((rec.path, "last_completed_epoch decreased relative to earlier checkpoint"))
             last_completed_seen = rec.last_completed_epoch
 
     data_ckpt = checkpoint_dir / "data_checkpoint.json"
@@ -451,9 +429,7 @@ def validate_checkpoint_dir(
             if report["latest_state"] and isinstance(data_epoch, int):
                 latest_epoch = report["latest_state"].get("epoch")
                 if isinstance(latest_epoch, int) and data_epoch > latest_epoch:
-                    report["invalid"].append(
-                        (data_ckpt, "data checkpoint epoch exceeds latest model checkpoint epoch")
-                    )
+                    report["invalid"].append((data_ckpt, "data checkpoint epoch exceeds latest model checkpoint epoch"))
         except Exception as e:
             report["invalid"].append((data_ckpt, f"data checkpoint load error: {e}"))
 
@@ -742,9 +718,7 @@ def load_checkpoint(
                             missing_disc.append(name)
                     discriminator.update(tree_unflatten(disc_pairs))
                     if missing_disc:
-                        print(
-                            f"⚠️  {len(missing_disc)} discriminator parameters missing in checkpoint"
-                        )
+                        print(f"⚠️  {len(missing_disc)} discriminator parameters missing in checkpoint")
                 except Exception as e:
                     print(f"⚠️  Failed to load discriminator weights: {e}")
             else:
@@ -765,12 +739,8 @@ def load_checkpoint(
         epoch = state.get("epoch", 0)
         kind = state.get("kind", "epoch_end")
         completed_kinds = {"epoch_end", "best", "best_final", "final"}
-        last_completed = state.get(
-            "last_completed_epoch", epoch if kind in completed_kinds else epoch - 1
-        )
-        print(
-            f"✅ Loaded checkpoint from epoch {epoch} (kind={kind}, last_completed={last_completed})"
-        )
+        last_completed = state.get("last_completed_epoch", epoch if kind in completed_kinds else epoch - 1)
+        print(f"✅ Loaded checkpoint from epoch {epoch} (kind={kind}, last_completed={last_completed})")
         return state
 
     except Exception as e:
@@ -798,9 +768,7 @@ def cleanup_checkpoints(
     # Find all checkpoint files (epoch_*, step_*, and interrupted_epoch_*)
     ckpt_files = []
     for pattern in ["epoch_*.safetensors", "step_*.safetensors", "interrupted_epoch_*.safetensors"]:
-        ckpt_files.extend(
-            [p for p in checkpoint_dir.glob(pattern) if not _is_disc_weights(p, manifest)]
-        )
+        ckpt_files.extend([p for p in checkpoint_dir.glob(pattern) if not _is_disc_weights(p, manifest)])
 
     # Sort by modification time (oldest first)
     ckpt_files.sort(key=lambda p: p.stat().st_mtime)
@@ -825,9 +793,7 @@ def cleanup_checkpoints(
         # Remove epoch completion marker if present
         marker_epoch = manifest.expected_from_name(ckpt_path).get("epoch")
         if marker_epoch is not None:
-            marker_path = (
-                checkpoint_dir / f"epoch_{marker_epoch + 1:03d}{manifest.epoch_complete_suffix}"
-            )
+            marker_path = checkpoint_dir / f"epoch_{marker_epoch + 1:03d}{manifest.epoch_complete_suffix}"
             marker_path.unlink(missing_ok=True)
 
 

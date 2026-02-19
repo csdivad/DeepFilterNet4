@@ -125,9 +125,7 @@ class NumericDebugger:
         if not all_finite:
             from tqdm import tqdm
 
-            tqdm.write(
-                f"⚠️  Non-finite gradients in {name} " f"(ctx={ctx}) — skipping optimizer update"
-            )
+            tqdm.write(f"⚠️  Non-finite gradients in {name} " f"(ctx={ctx}) — skipping optimizer update")
         return all_finite
 
 

@@ -1553,14 +1553,31 @@ def train(
         snr: mx.array,
         debug_ctx: dict[str, Any],
     ) -> None:
-        """Run a diagnostic forward pass with detailed finite checks."""
+        """Run a diagnostic forward pass with detailed finite checks.
+
+        Uses a non-fail-fast debugger so all components are checked and
+        logged even when multiple contain non-finite values.
+        """
         if debugger is None:
             return
+        # Use a non-fail-fast copy so diagnosis completes fully instead of
+        # crashing on the first non-finite intermediate value.
+        from dataclasses import replace as _dc_replace
+
+        diag_cfg = _dc_replace(debugger.config, fail_fast=False)
+        diag = NumericDebugger(diag_cfg)
+        tqdm.write("  [diagnose] Running non-finite diagnostic pass...")
+        findings: list[str] = []
+
+        def _diag_check(name: str, tensor: mx.array) -> None:
+            if not diag.check(name, tensor, debug_ctx):
+                findings.append(name)
+
         out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
-        debugger.check("model.out_real", out[0], debug_ctx)
-        debugger.check("model.out_imag", out[1], debug_ctx)
+        _diag_check("model.out_real", out[0])
+        _diag_check("model.out_imag", out[1])
         spec_loss = spectral_loss(out, (clean_real, clean_imag))
-        debugger.check("spec_loss", spec_loss, debug_ctx)
+        _diag_check("spec_loss", spec_loss)
         if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
             mrstft_loss = compute_mrstft_loss(
                 out,
@@ -1572,7 +1589,7 @@ def train(
                 target_len=mrstft_target_len,
                 force_fp32=True,
             )
-            debugger.check("mrstft_loss", mrstft_loss, debug_ctx)
+            _diag_check("mrstft_loss", mrstft_loss)
         if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
             out_wav, clean_wav = specs_to_wavs(
                 out,
@@ -1587,10 +1604,10 @@ def train(
             disc_fake, fake_feats = discriminator(out_wav)
             disc_real, real_feats = discriminator(clean_wav)
             gan_g_loss = gen_loss_fn(disc_fake)
-            debugger.check("gan_g_loss", gan_g_loss, debug_ctx)
+            _diag_check("gan_g_loss", gan_g_loss)
             if feature_match_loss is not None and gan_fm_weight > 0:
                 fm_loss = feature_match_loss(real_feats, fake_feats)
-                debugger.check("gan_fm_loss", fm_loss, debug_ctx)
+                _diag_check("gan_fm_loss", fm_loss)
         if use_awesome_loss:
             _compute_awesome_losses(
                 noisy_real,
@@ -1608,7 +1625,7 @@ def train(
                 vad_snr_gate_db,
                 vad_snr_gate_width,
                 vad_proxy_enabled,
-                debug=debugger,
+                debug=diag,
                 debug_ctx=debug_ctx,
             )
         if use_pipeline_awesome_loss:
@@ -1628,7 +1645,7 @@ def train(
                 vad_snr_gate_db,
                 vad_snr_gate_width,
                 vad_proxy_enabled,
-                debug=debugger,
+                debug=diag,
                 debug_ctx=debug_ctx,
             )
         if use_vad_loss:
@@ -1646,7 +1663,7 @@ def train(
                 vad_snr_gate_width,
                 vad_z_threshold,
                 vad_z_slope,
-                debug=debugger,
+                debug=diag,
                 debug_ctx=debug_ctx,
             )
             if vad_speech_loss_weight > 0:
@@ -1659,7 +1676,7 @@ def train(
                     vad_band_mask,
                     vad_band_bins,
                     gate,
-                    debug=debugger,
+                    debug=diag,
                     debug_ctx=debug_ctx,
                 )
         if use_vad_train_reg:
@@ -1679,9 +1696,14 @@ def train(
                 vad_z_slope,
                 vad_snr_gate_db,
                 vad_snr_gate_width,
-                debug=debugger,
+                debug=diag,
                 debug_ctx=debug_ctx,
             )
+
+        if findings:
+            tqdm.write(f"  [diagnose] Non-finite in: {', '.join(findings)}")
+        else:
+            tqdm.write("  [diagnose] All individual components finite — NaN likely in backward pass")
 
     # -- Compile-boundary shape guardrails ----------------------------------
     def _assert_compile_boundary_shapes(
@@ -3292,7 +3314,6 @@ def train(
                                 snr,
                                 debug_ctx,
                             )
-                            debugger.check("train.loss", loss, debug_ctx)
                     if grad_norm_arr is not None:
                         grad_norm = float(grad_norm_arr)
 

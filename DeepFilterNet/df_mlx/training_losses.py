@@ -160,9 +160,7 @@ def _compute_vad_probs(
     out_power = out_real**2 + out_imag**2
     out_band = mx.sum(out_power * band_mask, axis=-1) / (band_bins + eps)
     mu = mx.mean(log_clean, axis=1, keepdims=True)
-    sigma = mx.sqrt(
-        mx.maximum(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True), _MIN_VARIANCE) + eps
-    )
+    sigma = mx.sqrt(mx.maximum(mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True), _MIN_VARIANCE) + eps)
     z_out_raw = (mx.log10(out_band + eps) - mu) / (sigma + eps)
     z_out = mx.clip(z_out_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
     z_slope = max(vad_z_slope, 1e-3)
