@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 _EPS = 1e-8
+_MIN_VARIANCE = 1e-4
 
 # =============================================================================
 # Awesome loss (speech-preserving contrastive) + proxy VAD constants
@@ -69,7 +70,8 @@ def _build_speech_band_mask(
     band_bins = float(mask.sum())
     if band_bins < 1:
         raise ValueError(
-            f"Speech band [{band_low_hz}, {band_high_hz}] Hz has no bins for " f"n_freqs={n_freqs}, sr={sample_rate}."
+            f"Speech band [{band_low_hz}, {band_high_hz}] Hz has no bins for "
+            f"n_freqs={n_freqs}, sr={sample_rate}."
         )
     return mx.array(mask), band_bins
 
@@ -118,7 +120,6 @@ def _compute_vad_probs(
     mu = mx.mean(log_clean, axis=1, keepdims=True)
     # Edge case: ensure minimum variance to avoid instability on silence
     variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
-    _MIN_VARIANCE = 1e-4
     sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
 
     z_ref_raw = (log_clean - mu) / (sigma + eps)
@@ -299,8 +300,15 @@ def _compute_proxy_gates(
     eps: float = _EPS,
     debug: NumericDebugger | None = None,
     debug_ctx: dict[str, Any] | None = None,
+    noise_real: mx.array | None = None,
+    noise_imag: mx.array | None = None,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Compute proxy VAD gates and statistics.
+
+    Args:
+        noise_real: Pre-computed ``noisy_real - clean_real`` (avoids duplicate
+            subtraction when the caller already has this value).
+        noise_imag: Pre-computed ``noisy_imag - clean_imag``.
 
     Returns:
         proxy_frame: (B, T) speech presence proxy
@@ -320,8 +328,10 @@ def _compute_proxy_gates(
     if noisy_imag.dtype != mx.float32:
         noisy_imag = noisy_imag.astype(mx.float32)
     clean_power = clean_real**2 + clean_imag**2
-    noise_real = noisy_real - clean_real
-    noise_imag = noisy_imag - clean_imag
+    if noise_real is None:
+        noise_real = noisy_real - clean_real
+    if noise_imag is None:
+        noise_imag = noisy_imag - clean_imag
     noise_power = noise_real**2 + noise_imag**2
 
     clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
@@ -332,7 +342,6 @@ def _compute_proxy_gates(
     mu = mx.mean(log_clean, axis=1, keepdims=True)
     # Edge case: ensure minimum variance to avoid instability on silence
     variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
-    _MIN_VARIANCE = 1e-4
     sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
     z_ref_raw = (log_clean - mu) / (sigma + eps)
     z_ref = mx.clip(z_ref_raw, -_VAD_LOGIT_CLAMP, _VAD_LOGIT_CLAMP)
@@ -368,7 +377,9 @@ def _compute_proxy_gates(
     if not proxy_enabled:
         proxy_frame = mx.ones_like(clean_band)
     else:
-        proxy_frame = p_ref * (_AWESOME_PROXY_RATIO_FLOOR + _AWESOME_PROXY_RATIO_SCALE * speech_ratio)
+        proxy_frame = p_ref * (
+            _AWESOME_PROXY_RATIO_FLOOR + _AWESOME_PROXY_RATIO_SCALE * speech_ratio
+        )
         proxy_frame = proxy_frame * mod_gate * music_gate[:, None]
         proxy_frame = proxy_frame * (
             1.0 + _AWESOME_LOW_ENERGY_WEIGHT * energy_boost + _AWESOME_LOW_SNR_WEIGHT * snr_boost
@@ -474,6 +485,8 @@ def _compute_awesome_losses(
         eps=eps,
         debug=debug,
         debug_ctx=debug_ctx,
+        noise_real=noise_real,
+        noise_imag=noise_imag,
     )
 
     proxy_frame = proxy_frame[:, :, None]
@@ -725,9 +738,8 @@ def _compute_pipeline_awesome_losses(
 
     # Reuse pre-cast FP32 values for proxy gates (no duplicate casts)
     clean_power = clean_real_f32**2 + clean_imag_f32**2
-    noise_real_f32 = noisy_real_f32 - clean_real_f32
-    noise_imag_f32 = noisy_imag_f32 - clean_imag_f32
-    noise_power = noise_real_f32**2 + noise_imag_f32**2
+    # Reuse noise_real/noise_imag computed above (avoids duplicate subtraction)
+    noise_power = noise_real**2 + noise_imag**2
 
     clean_band = mx.sum(clean_power * band_mask, axis=-1) / (band_bins + eps)
     noise_band = mx.sum(noise_power * band_mask, axis=-1) / (band_bins + eps)
@@ -739,7 +751,6 @@ def _compute_pipeline_awesome_losses(
     mu = mx.mean(log_clean, axis=1, keepdims=True)
     variance = mx.mean((log_clean - mu) ** 2, axis=1, keepdims=True)
     # Use a minimum variance threshold to avoid division instability on silence
-    _MIN_VARIANCE = 1e-4
     sigma = mx.sqrt(mx.maximum(variance, _MIN_VARIANCE) + eps)
     # When variance is too low, z-scores become unreliable; clamp them
     z_ref_raw = (log_clean - mu) / (sigma + eps)
@@ -788,7 +799,11 @@ def _compute_pipeline_awesome_losses(
         base_proxy = base_proxy * mod_gate * music_gate[:, None]
 
         # ADDITIVE boosts (key improvement for low-signal speech)
-        proxy_frame = base_proxy + _PIPELINE_LOW_ENERGY_ADDITIVE * energy_boost + _PIPELINE_LOW_SNR_ADDITIVE * snr_boost
+        proxy_frame = (
+            base_proxy
+            + _PIPELINE_LOW_ENERGY_ADDITIVE * energy_boost
+            + _PIPELINE_LOW_SNR_ADDITIVE * snr_boost
+        )
         proxy_frame = mx.clip(proxy_frame, _PIPELINE_PROXY_FLOOR, 5.0)
 
     proxy_frame = mx.stop_gradient(proxy_frame)
