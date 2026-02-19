@@ -136,11 +136,13 @@ def _tree_all_finite(tree: Any) -> bool:
 
     Batches all per-leaf isfinite reductions lazily and evaluates with a
     single sync barrier instead of O(N) individual syncs.
+    Uses ``mx.concatenate`` on scalar results to avoid the shape-inference
+    overhead of ``mx.stack`` on a dynamic-length list.
     """
-    checks = [mx.all(mx.isfinite(v)) for _, v in tree_flatten(tree) if v is not None]
+    checks = [mx.all(mx.isfinite(v)).reshape(1) for _, v in tree_flatten(tree) if v is not None]
     if not checks:
         return True
-    return bool(mx.all(mx.stack(checks)))
+    return bool(mx.all(mx.concatenate(checks)))
 
 
 def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:

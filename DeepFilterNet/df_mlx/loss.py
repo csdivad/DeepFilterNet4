@@ -707,16 +707,17 @@ class FeatureMatchingLoss:
         Returns:
             Feature matching loss (scalar)
         """
-        total = _ZERO
-        count = 0
+        # Collect per-layer means instead of sequential scalar accumulation.
+        # This breaks the chain dependency in the compiled graph, allowing
+        # independent mx.mean(mx.abs(...)) ops to be scheduled in parallel.
+        means: list[mx.array] = []
         for real_disc, fake_disc in zip(real_fmaps, fake_fmaps):
             for real_feat, fake_feat in zip(real_disc, fake_disc):
-                total = total + mx.mean(mx.abs(real_feat - fake_feat))
-                count += 1
+                means.append(mx.mean(mx.abs(real_feat - fake_feat)))
 
-        if count == 0:
+        if not means:
             return _ZERO
-        return (total / count) * self.factor
+        return mx.mean(mx.stack(means)) * self.factor
 
 
 # ============================================================================
@@ -740,15 +741,13 @@ def discriminator_loss(
         Tuple of (total_loss, real_loss, fake_loss)
     """
     n_disc = len(real_outputs)
-    real_loss = _ZERO
-    for r in real_outputs:
-        real_loss = real_loss + mx.mean(mx.maximum(1 - r, 0))
-    fake_loss = _ZERO
-    for f in fake_outputs:
-        fake_loss = fake_loss + mx.mean(mx.maximum(1 + f, 0))
-    if n_disc > 0:
-        real_loss = real_loss / n_disc
-        fake_loss = fake_loss / n_disc
+    if n_disc == 0:
+        return _ZERO, _ZERO, _ZERO
+    # Collect per-discriminator losses, then stack+mean to break chain dependency
+    real_means = [mx.mean(mx.maximum(1 - r, 0)) for r in real_outputs]
+    fake_means = [mx.mean(mx.maximum(1 + f, 0)) for f in fake_outputs]
+    real_loss = mx.mean(mx.stack(real_means))
+    fake_loss = mx.mean(mx.stack(fake_means))
     total_loss = real_loss + fake_loss
 
     return total_loss, real_loss, fake_loss
@@ -766,11 +765,12 @@ def generator_loss(fake_outputs: list[mx.array]) -> mx.array:
     Returns:
         Generator loss (scalar)
     """
-    total = _ZERO
     n = len(fake_outputs)
-    for f in fake_outputs:
-        total = total + mx.mean(-f)
-    return total / max(n, 1)
+    if n == 0:
+        return _ZERO
+    # Collect per-discriminator losses, then stack+mean to break chain dependency
+    means = [mx.mean(-f) for f in fake_outputs]
+    return mx.mean(mx.stack(means))
 
 
 # ============================================================================
