@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_test_output.txt"
+		},
+		{
+			"label": "Format Files",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m black --line-length 100 DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1 && .venv/bin/python -m isort --profile black DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1"
+		}
+	]
+}

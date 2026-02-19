@@ -192,7 +192,6 @@ if MLX_AVAILABLE:
         Trainer,
         convert_pytorch_weights,
         load_pytorch_checkpoint,
-        multi_resolution_stft_loss,
         spectral_loss,
         train,
     )
@@ -279,7 +278,6 @@ if MLX_AVAILABLE:
         "Trainer",
         "train",
         "spectral_loss",
-        "multi_resolution_stft_loss",
         "load_pytorch_checkpoint",
         "convert_pytorch_weights",
         # Checkpoint conversion
@@ -407,7 +405,8 @@ else:
 
     def _mlx_not_available(*args, **kwargs):
         raise ImportError(
-            "MLX is not available. MLX only works on Apple Silicon Macs. " "Install with: pip install mlx"
+            "MLX is not available. MLX only works on Apple Silicon Macs. "
+            "Install with: pip install mlx"
         )
 
     # Create stubs for common imports

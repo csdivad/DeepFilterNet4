@@ -3108,8 +3108,7 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
-                                f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO

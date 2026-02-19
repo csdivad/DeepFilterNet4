@@ -27,7 +27,7 @@ from .checkpoint import CheckpointManager, PatienceState, check_patience
 from .config import LossConfig
 from .discriminator import CombinedDiscriminator
 from .evaluation import ValidationMetrics
-from .loss import CombinedLoss, FeatureMatchingLoss, discriminator_loss, generator_loss
+from .loss import FeatureMatchingLoss, discriminator_loss, generator_loss
 from .lr import CosineScheduler
 from .model import DfNet4, count_parameters
 from .train import MultiResolutionSTFTLoss
@@ -143,7 +143,6 @@ class GANTrainer:
         # Loss functions
         self.spectral_loss = MultiResolutionSTFTLoss.from_config(self.loss_config)
         self.feature_matching_loss = FeatureMatchingLoss()
-        self.combined_loss = CombinedLoss(self.loss_config)
 
         # Checkpoint manager
         self.checkpoint_dir = Path(config.checkpoint_dir)
