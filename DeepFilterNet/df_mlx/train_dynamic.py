@@ -1366,7 +1366,7 @@ def train(
                 vad_z_threshold,
                 vad_z_slope,
             )
-            speech_loss = mx.array(0.0)
+            speech_loss = _SCALAR_ZERO
             if vad_speech_loss_weight > 0:
                 speech_loss = _compute_speech_band_logmag_loss(
                     clean_real,
@@ -1559,7 +1559,7 @@ def train(
                     vad_z_threshold,
                     vad_z_slope,
                 )
-                speech_loss = mx.array(0.0)
+                speech_loss = _SCALAR_ZERO
                 if vad_speech_loss_weight > 0:
                     speech_loss = _compute_speech_band_logmag_loss(
                         clean_real,
@@ -2976,6 +2976,17 @@ def train(
         accumulated_loss = _SCALAR_ZERO
         micro_batches_in_accum = 0
 
+        # Cached mx.array weight scalars — avoid per-batch mx.array() allocation
+        # when the Python float hasn't changed.
+        _prev_vad_w: float | None = None
+        _prev_vad_w_mx = _SCALAR_ZERO
+        _prev_speech_w: float | None = None
+        _prev_speech_w_mx = _SCALAR_ZERO
+        _prev_awesome_w: float | None = None
+        _prev_awesome_w_mx = _SCALAR_ZERO
+        _prev_vad_reg_w: float | None = None
+        _prev_vad_reg_w_mx = _SCALAR_ZERO
+
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
         resume_batches_for_epoch = 0
         if resume_from and resume_checkpoint_kind in _IN_PROGRESS_KINDS and epoch == start_epoch:
@@ -3098,13 +3109,22 @@ def train(
 
             vad_weight = epoch_vad_loss_weight * warmup_frac
             speech_weight = epoch_vad_speech_loss_weight * warmup_frac
-            vad_weight_mx = mx.array(vad_weight, dtype=mx.float32)
-            speech_weight_mx = mx.array(speech_weight, dtype=mx.float32)
+            if vad_weight != _prev_vad_w:
+                _prev_vad_w = vad_weight
+                _prev_vad_w_mx = mx.array(vad_weight, dtype=mx.float32)
+            vad_weight_mx = _prev_vad_w_mx
+            if speech_weight != _prev_speech_w:
+                _prev_speech_w = speech_weight
+                _prev_speech_w_mx = mx.array(speech_weight, dtype=mx.float32)
+            speech_weight_mx = _prev_speech_w_mx
             awesome_frac = 1.0
             if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
                 awesome_frac = min(1.0, global_step / max(awesome_warmup_steps, 1))
             awesome_weight = epoch_awesome_loss_weight * awesome_frac
-            awesome_weight_mx = mx.array(awesome_weight, dtype=mx.float32)
+            if awesome_weight != _prev_awesome_w:
+                _prev_awesome_w = awesome_weight
+                _prev_awesome_w_mx = mx.array(awesome_weight, dtype=mx.float32)
+            awesome_weight_mx = _prev_awesome_w_mx
 
             apply_vad_reg = False
             if use_vad_train_reg:
@@ -3113,7 +3133,10 @@ def train(
                 elif vad_train_prob > 0:
                     apply_vad_reg = random.random() < vad_train_prob
             vad_reg_weight = vad_weight if apply_vad_reg else 0.0
-            vad_reg_weight_mx = mx.array(vad_reg_weight, dtype=mx.float32)
+            if vad_reg_weight != _prev_vad_reg_w:
+                _prev_vad_reg_w = vad_reg_weight
+                _prev_vad_reg_w_mx = mx.array(vad_reg_weight, dtype=mx.float32)
+            vad_reg_weight_mx = _prev_vad_reg_w_mx
 
             # Track whether optimizer was updated this iteration (for gradient accumulation)
             did_optimizer_update = False

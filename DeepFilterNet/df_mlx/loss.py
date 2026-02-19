@@ -784,14 +784,16 @@ class FeatureMatchingLoss:
         Returns:
             Feature matching loss (scalar)
         """
-        losses = []
+        total = _ZERO
+        count = 0
         for real_disc, fake_disc in zip(real_fmaps, fake_fmaps):
             for real_feat, fake_feat in zip(real_disc, fake_disc):
-                losses.append(mx.mean(mx.abs(real_feat - fake_feat)))
+                total = total + mx.mean(mx.abs(real_feat - fake_feat))
+                count += 1
 
-        if not losses:
+        if count == 0:
             return _ZERO
-        return mx.mean(mx.stack(losses)) * self.factor
+        return (total / count) * self.factor
 
 
 # ============================================================================
@@ -814,11 +816,16 @@ def discriminator_loss(
     Returns:
         Tuple of (total_loss, real_loss, fake_loss)
     """
-    real_losses = [mx.mean(mx.maximum(1 - r, 0)) for r in real_outputs]
-    fake_losses = [mx.mean(mx.maximum(1 + f, 0)) for f in fake_outputs]
-
-    real_loss = mx.mean(mx.stack(real_losses))
-    fake_loss = mx.mean(mx.stack(fake_losses))
+    n_disc = len(real_outputs)
+    real_loss = _ZERO
+    for r in real_outputs:
+        real_loss = real_loss + mx.mean(mx.maximum(1 - r, 0))
+    fake_loss = _ZERO
+    for f in fake_outputs:
+        fake_loss = fake_loss + mx.mean(mx.maximum(1 + f, 0))
+    if n_disc > 0:
+        real_loss = real_loss / n_disc
+        fake_loss = fake_loss / n_disc
     total_loss = real_loss + fake_loss
 
     return total_loss, real_loss, fake_loss
@@ -836,8 +843,11 @@ def generator_loss(fake_outputs: list[mx.array]) -> mx.array:
     Returns:
         Generator loss (scalar)
     """
-    losses = [mx.mean(-f) for f in fake_outputs]
-    return mx.mean(mx.stack(losses))
+    total = _ZERO
+    n = len(fake_outputs)
+    for f in fake_outputs:
+        total = total + mx.mean(-f)
+    return total / max(n, 1)
 
 
 # ============================================================================
