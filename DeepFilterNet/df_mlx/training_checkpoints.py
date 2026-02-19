@@ -704,7 +704,7 @@ def load_checkpoint(
         state_path = manifest.state_path(ckpt_path)
         state = {}
         if state_path.exists():
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
 
         # Restore optimizer state if provided

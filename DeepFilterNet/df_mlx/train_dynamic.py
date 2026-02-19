@@ -2580,8 +2580,11 @@ def train(
                     "buckets": bucket_summary,
                 }
                 ablation_path = ckpt_dir / "ablation_metrics.jsonl"
-                with open(ablation_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(ablation_row) + "\n")
+                try:
+                    with open(ablation_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(ablation_row) + "\n")
+                except OSError as exc:
+                    tqdm.write(f"\u26a0\ufe0f  Failed to write ablation metrics: {exc}")
 
         return valid_loss / max(num_valid_batches, 1)
 
@@ -3359,7 +3362,12 @@ def train(
                             if gan_disc_grad_clip > 0:
                                 disc_grads, _ = clip_grad_norm(disc_grads, gan_disc_grad_clip)
 
-                            disc_optimizer.update(discriminator, disc_grads)
+                            if _tree_all_finite(disc_grads):
+                                disc_optimizer.update(discriminator, disc_grads)
+                            else:
+                                tqdm.write(
+                                    f"\u26a0\ufe0f  Non-finite disc grads; skipping disc update (step={global_step})"
+                                )
 
                         if should_sync:
                             # Gen state was already eval'd above.
