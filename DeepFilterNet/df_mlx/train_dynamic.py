@@ -2755,6 +2755,9 @@ def train(
     max_train_batches = train_config.get("max_train_batches")
     max_valid_batches = train_config.get("max_valid_batches")
 
+    # Cache config-constant mx.array values outside the training loop
+    _gan_disc_grad_clip_mx = mx.array(float(gan_disc_grad_clip), dtype=mx.float32)
+
     start_display = f"{start_epoch + 1}/{epochs} (idx {start_epoch})"
     lc_display = (
         f"{last_completed_epoch + 1} (idx {last_completed_epoch})"
@@ -2839,6 +2842,8 @@ def train(
                 gan_scale = 1.0
         gan_weight = gan_adv_weight * gan_scale
         fm_weight = gan_fm_weight * gan_scale
+        gan_weight_mx = mx.array(gan_weight, dtype=mx.float32)
+        fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
         gan_active = gan_enabled and gan_scale > 0.0
 
         # GAN epochs use a tighter eval_frequency to bound lazy-graph
@@ -3109,8 +3114,6 @@ def train(
                     apply_vad_reg = random.random() < vad_train_prob
             vad_reg_weight = vad_weight if apply_vad_reg else 0.0
             vad_reg_weight_mx = mx.array(vad_reg_weight, dtype=mx.float32)
-            gan_weight_mx = mx.array(gan_weight, dtype=mx.float32)
-            fm_weight_mx = mx.array(fm_weight, dtype=mx.float32)
 
             # Track whether optimizer was updated this iteration (for gradient accumulation)
             did_optimizer_update = False
@@ -3439,7 +3442,7 @@ def train(
                             disc_loss = compiled_disc_update_step(
                                 clean_wav_d,
                                 pred_wav_d,
-                                mx.array(float(gan_disc_grad_clip)),
+                                _gan_disc_grad_clip_mx,
                             )
                         else:
 

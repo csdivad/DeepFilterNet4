@@ -24,6 +24,8 @@ from .ops import get_window, stft
 
 EPS = 1e-10
 
+_ZERO = mx.array(0.0)
+
 
 def as_complex(x: mx.array) -> Tuple[mx.array, mx.array]:
     """Convert real tensor with last dim 2 to (real, imag) tuple."""
@@ -153,7 +155,7 @@ class SpectralLoss:
         if target.ndim == 1:
             target = mx.expand_dims(target, axis=0)
 
-        total_loss = mx.array(0.0)
+        total_loss = _ZERO
 
         for fft_size, hop_size in zip(self.fft_sizes, self.hop_sizes):
             pred_real, pred_imag = stft(pred, n_fft=fft_size, hop_length=hop_size)
@@ -195,7 +197,8 @@ class SpectralLoss:
                     target_imag_c = target_imag
 
                 complex_loss = (
-                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                    mx.mean((pred_real_c - target_real_c) ** 2)
+                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
                 ) * self.factor_complex
                 total_loss = total_loss + complex_loss
 
@@ -250,7 +253,9 @@ class FusedSpectralLoss:
         self._compiled_loss = mx.compile(self._compute_loss)
 
     @staticmethod
-    def _stft_inline(x: mx.array, n_fft: int, hop_length: int, window: mx.array) -> Tuple[mx.array, mx.array]:
+    def _stft_inline(
+        x: mx.array, n_fft: int, hop_length: int, window: mx.array
+    ) -> Tuple[mx.array, mx.array]:
         """Compute STFT inline without function-call overhead."""
         pad_amount = n_fft // 2
         x_padded = mx.pad(x, [(0, 0), (pad_amount, pad_amount)])
@@ -259,7 +264,9 @@ class FusedSpectralLoss:
         frame_starts = mx.arange(num_frames) * hop_length
         offsets = mx.arange(n_fft)
         indices = frame_starts[:, None] + offsets[None, :]
-        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(x_padded.shape[0], num_frames, n_fft)
+        frames = mx.take(x_padded, indices.flatten(), axis=1).reshape(
+            x_padded.shape[0], num_frames, n_fft
+        )
         frames = frames * window
         fft_out = mx.fft.rfft(frames, axis=-1)
         return mx.real(fft_out), mx.imag(fft_out)
@@ -271,7 +278,7 @@ class FusedSpectralLoss:
         if target.ndim == 1:
             target = mx.expand_dims(target, axis=0)
 
-        total_loss = mx.array(0.0)
+        total_loss = _ZERO
 
         for i, (fft_size, hop_size) in enumerate(zip(self.fft_sizes, self.hop_sizes)):
             window = self._windows[i]
@@ -312,7 +319,8 @@ class FusedSpectralLoss:
                     target_imag_c = target_imag
 
                 complex_loss = (
-                    mx.mean((pred_real_c - target_real_c) ** 2) + mx.mean((pred_imag_c - target_imag_c) ** 2)
+                    mx.mean((pred_real_c - target_real_c) ** 2)
+                    + mx.mean((pred_imag_c - target_imag_c) ** 2)
                 ) * self.factor_complex
                 total_loss = total_loss + complex_loss
 
@@ -782,7 +790,7 @@ class FeatureMatchingLoss:
                 losses.append(mx.mean(mx.abs(real_feat - fake_feat)))
 
         if not losses:
-            return mx.array(0.0)
+            return _ZERO
         return mx.mean(mx.stack(losses)) * self.factor
 
 
@@ -897,7 +905,7 @@ class CombinedLoss:
             Tuple of (total_loss, loss_breakdown_dict) where dict values are lazy mx.array
         """
         losses: Dict[str, mx.array] = {}
-        total_loss = mx.array(0.0)
+        total_loss = _ZERO
 
         # Spectral loss
         spec_loss = self.spectral_loss(pred_wav, target_wav)
@@ -953,7 +961,8 @@ class ASRLoss:
         model: str = "base.en",
     ):
         raise NotImplementedError(
-            "MLX ASRLoss is not yet implemented. " "Use df.loss.ASRLoss (PyTorch) or disable ASR loss in your config."
+            "MLX ASRLoss is not yet implemented. "
+            "Use df.loss.ASRLoss (PyTorch) or disable ASR loss in your config."
         )
 
     def _lazy_init(self):
@@ -986,7 +995,9 @@ class ASRLoss:
         self._lazy_init()
         # TODO: Implement full ASR loss with MLX Whisper
         # For now, return placeholder
-        raise NotImplementedError("Full ASR loss implementation pending. " "Use df.loss.ASRLoss for PyTorch version.")
+        raise NotImplementedError(
+            "Full ASR loss implementation pending. " "Use df.loss.ASRLoss for PyTorch version."
+        )
 
 
 # ============================================================================

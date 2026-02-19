@@ -132,13 +132,15 @@ class NumericDebugger:
 
 
 def _tree_all_finite(tree: Any) -> bool:
-    """Fast tree-wide finite check (no dumps)."""
-    for _, value in tree_flatten(tree):
-        if value is None:
-            continue
-        if not bool(mx.all(mx.isfinite(value))):
-            return False
-    return True
+    """Fast tree-wide finite check (no dumps).
+
+    Batches all per-leaf isfinite reductions lazily and evaluates with a
+    single sync barrier instead of O(N) individual syncs.
+    """
+    checks = [mx.all(mx.isfinite(v)) for _, v in tree_flatten(tree) if v is not None]
+    if not checks:
+        return True
+    return bool(mx.all(mx.stack(checks)))
 
 
 def clip_grad_norm(grads, max_norm: float) -> Tuple[dict, mx.array]:
