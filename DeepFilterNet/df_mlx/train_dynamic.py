@@ -1963,7 +1963,12 @@ def train(
     # -- Compiled discriminator update step (GAN-P2) -------------------------
     compiled_disc_update_step = None
 
-    if experimental_compiled_gan and discriminator is not None and disc_optimizer is not None:
+    if (
+        experimental_compiled_gan
+        and discriminator is not None
+        and disc_optimizer is not None
+        and gan_loss_fns is not None
+    ):
         disc_update_state = [discriminator.state, disc_optimizer.state]
         _, _disc_loss_fn_ref = gan_loss_fns  # capture discriminator_loss
 
