@@ -3409,11 +3409,25 @@ def train(
             if should_sync:
                 loss_val = float(loss)
                 if not math.isfinite(loss_val):
-                    raise FloatingPointError(
-                        "Non-finite loss detected "
-                        f"(epoch={epoch}, batch={batch_idx}, step={global_step}). "
-                        "Re-run with --debug-numerics for detailed diagnostics."
+                    # Non-finite loss was already handled by clip_grad_norm
+                    # (grads zeroed) and optionally diagnosed above.
+                    # Substitute zero so epoch averaging isn't poisoned, and
+                    # count it so we can abort if too many accumulate.
+                    nonfinite_loss_count = getattr(train, "_nonfinite_loss_count", 0) + 1
+                    train._nonfinite_loss_count = nonfinite_loss_count  # type: ignore[attr-defined]
+                    tqdm.write(
+                        f"⚠️  Non-finite loss_val at sync point "
+                        f"(epoch={epoch}, batch={batch_idx}, step={global_step}, "
+                        f"cumulative_nonfinite={nonfinite_loss_count})"
                     )
+                    _MAX_NONFINITE_LOSSES = 50
+                    if nonfinite_loss_count >= _MAX_NONFINITE_LOSSES:
+                        raise FloatingPointError(
+                            f"Aborting: {nonfinite_loss_count} non-finite losses "
+                            f"in this session (epoch={epoch}, step={global_step}). "
+                            "Model is likely diverged."
+                        )
+                    loss_val = 0.0
                 train_loss += loss_val * epoch_eval_frequency  # Approximate accumulated loss
                 if gan_active and gan_d_loss_val:
                     train_gan_d_loss += gan_d_loss_val
