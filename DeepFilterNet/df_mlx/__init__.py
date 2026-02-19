@@ -78,7 +78,12 @@ if MLX_AVAILABLE:
     from .convert import load_mlx_checkpoint  # noqa: F401
     from .convert import save_mlx_checkpoint  # noqa: F401
     from .convert import load_pytorch_checkpoint as load_pytorch_ckpt  # noqa: F401
-    from .datastore import DatastoreConfig, MLXDataLoader, MLXDatastoreWriter, StreamingMLXDataLoader  # noqa: F401
+    from .datastore import (  # noqa: F401
+        DatastoreConfig,
+        MLXDataLoader,
+        MLXDatastoreWriter,
+        StreamingMLXDataLoader,
+    )
 
     # Legacy model architectures (GRU-based)
     from .deepfilternet import DFNet1, ModelParams1  # noqa: F401
@@ -148,7 +153,13 @@ if MLX_AVAILABLE:
         cosine_scheduler,
         create_scheduler,
     )
-    from .mamba import BidirectionalMamba, GroupedLinear, Mamba, MambaBlock, SqueezedMamba  # noqa: F401
+    from .mamba import (  # noqa: F401
+        BidirectionalMamba,
+        GroupedLinear,
+        Mamba,
+        MambaBlock,
+        SqueezedMamba,
+    )
     from .model import DfNet4, DfNet4Lite, count_parameters, init_model, model_summary  # noqa: F401
     from .modules import (  # noqa: F401
         ComplexMask,
@@ -167,7 +178,15 @@ if MLX_AVAILABLE:
     )
 
     # Multi-frame processing modules
-    from .multiframe import CRM, DF, DFreal, MfMvdr, MfWf, MultiFrameModule, MultiResolutionDF  # noqa: F401
+    from .multiframe import (  # noqa: F401
+        CRM,
+        DF,
+        DFreal,
+        MfMvdr,
+        MfWf,
+        MultiFrameModule,
+        MultiResolutionDF,
+    )
     from .ops import erb_fb as make_erb_fb  # noqa: F401
     from .ops import erb_fb_and_inverse, erb_transform, istft, stft  # noqa: F401
     from .stoi import stoi, stoi_loss, stoi_numpy  # noqa: F401
@@ -392,7 +411,8 @@ else:
 
     def _mlx_not_available(*args, **kwargs):
         raise ImportError(
-            "MLX is not available. MLX only works on Apple Silicon Macs. " "Install with: pip install mlx"
+            "MLX is not available. MLX only works on Apple Silicon Macs. "
+            "Install with: pip install mlx"
         )
 
     # Create stubs for common imports

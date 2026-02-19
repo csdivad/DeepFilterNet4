@@ -111,9 +111,11 @@ def _make_batch(batch_size: int) -> Dict[str, mx.array]:
     }
 
 
-def _make_waveforms(batch_size: int) -> Tuple[mx.array, mx.array]:
-    pred_wav = mx.random.normal((batch_size, _DISC_MAX_SAMPLES))
-    clean_wav = mx.random.normal((batch_size, _DISC_MAX_SAMPLES))
+def _make_waveforms(
+    batch_size: int, max_samples: int = _DISC_MAX_SAMPLES
+) -> Tuple[mx.array, mx.array]:
+    pred_wav = mx.random.normal((batch_size, max_samples))
+    clean_wav = mx.random.normal((batch_size, max_samples))
     return pred_wav, clean_wav
 
 
@@ -124,7 +126,18 @@ def _make_waveforms(batch_size: int) -> Tuple[mx.array, mx.array]:
 
 def _build_models(
     batch_size: int,
+    mpd_channels: int = 32,
+    msd_channels: int = 128,
+    disc_max_samples: int = _DISC_MAX_SAMPLES,
 ) -> Tuple[nn.Module, optim.Optimizer, nn.Module, optim.Optimizer]:
+    """Build gen + disc + optimizers with warmed-up states.
+
+    Args:
+        batch_size: Batch size for warmup.
+        mpd_channels: MPD channels for discriminator.
+        msd_channels: MSD channels for discriminator.
+        disc_max_samples: Waveform length for discriminator warmup.
+    """
     cfg = get_default_config()
     cfg.audio.sr = _SAMPLE_RATE
     cfg.audio.fft_size = _FFT_SIZE
@@ -140,16 +153,16 @@ def _build_models(
 
     disc = CombinedDiscriminator(
         mpd_periods=(2, 3, 5, 7, 11),
-        mpd_channels=32,
+        mpd_channels=mpd_channels,
         msd_scales=3,
-        msd_channels=128,
+        msd_channels=msd_channels,
     )
     disc.train()
     disc_opt = optim.Adam(learning_rate=1e-4)
 
     # Warm up parameters so optimizer states are initialized
     batch = _make_batch(batch_size)
-    pred_wav, clean_wav = _make_waveforms(batch_size)
+    pred_wav, clean_wav = _make_waveforms(batch_size, disc_max_samples)
 
     # Gen forward
     gen_loss_and_grad = nn.value_and_grad(
@@ -387,12 +400,18 @@ def _print_comparison(old: SyncBenchmarkResult, new: SyncBenchmarkResult) -> Non
     print()
     print(f"  {'Metric':<20} {'OLD (5 barriers)':>18} {'NEW (1 barrier)':>18} {'Speedup':>10}")
     print(f"  {'-' * 20} {'-' * 18} {'-' * 18} {'-' * 10}")
-    print(f"  {'Mean (ms)':<20} {old.step_mean_ms:>18.2f} {new.step_mean_ms:>18.2f} " f"{speedup_mean:>9.2f}x")
+    print(
+        f"  {'Mean (ms)':<20} {old.step_mean_ms:>18.2f} {new.step_mean_ms:>18.2f} "
+        f"{speedup_mean:>9.2f}x"
+    )
     print(
         f"  {'Median (ms)':<20} {old.step_median_ms:>18.2f} {new.step_median_ms:>18.2f} "
         f"{old.step_median_ms / new.step_median_ms if new.step_median_ms > 0 else 0:>9.2f}x"
     )
-    print(f"  {'P95 (ms)':<20} {old.step_p95_ms:>18.2f} {new.step_p95_ms:>18.2f} " f"{speedup_p95:>9.2f}x")
+    print(
+        f"  {'P95 (ms)':<20} {old.step_p95_ms:>18.2f} {new.step_p95_ms:>18.2f} "
+        f"{speedup_p95:>9.2f}x"
+    )
     print(
         f"  {'P99 (ms)':<20} {old.step_p99_ms:>18.2f} {new.step_p99_ms:>18.2f} "
         f"{old.step_p99_ms / new.step_p99_ms if new.step_p99_ms > 0 else 0:>9.2f}x"
@@ -406,7 +425,9 @@ def _print_comparison(old: SyncBenchmarkResult, new: SyncBenchmarkResult) -> Non
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark GAN sync-barrier patterns (old=5 barriers vs new=1)")
+    parser = argparse.ArgumentParser(
+        description="Benchmark GAN sync-barrier patterns (old=5 barriers vs new=1)"
+    )
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size (default: 4)")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup steps per repeat")
     parser.add_argument("--steps", type=int, default=40, help="Measured steps per repeat")
@@ -476,7 +497,11 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         payload: Any = {
             "results": [asdict(old_result), asdict(new_result)],
-            "speedup_mean": old_result.step_mean_ms / new_result.step_mean_ms if new_result.step_mean_ms > 0 else 0,
+            "speedup_mean": (
+                old_result.step_mean_ms / new_result.step_mean_ms
+                if new_result.step_mean_ms > 0
+                else 0
+            ),
             "saved_ms_per_step": old_result.step_mean_ms - new_result.step_mean_ms,
         }
         if args.metadata:

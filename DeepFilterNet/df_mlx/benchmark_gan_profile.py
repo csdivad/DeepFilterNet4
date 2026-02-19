@@ -35,22 +35,15 @@ import numpy as np
 from mlx.utils import tree_flatten
 
 from df_mlx.benchmark_gan_sync import (
-    _FFT_SIZE,
-    _HOP_SIZE,
-    _NB_DF,
-    _NB_ERB,
-    _NUM_FREQS,
-    _SAMPLE_RATE,
+    _DISC_MAX_SAMPLES,
+    _build_models,
     _collect_metadata,
     _make_batch,
     _safe_percentile,
 )
 from df_mlx.benchmark_train_step import collect_reproducibility_metadata
-from df_mlx.config import get_default_config
-from df_mlx.discriminator import CombinedDiscriminator
 from df_mlx.grad_utils import clip_grad_norm_tree
 from df_mlx.loss import discriminator_loss
-from df_mlx.model import init_model
 from df_mlx.train import spectral_loss
 from df_mlx.training_ops import accumulate_grads as _accumulate_grads
 from df_mlx.training_ops import scale_grads as _scale_grads
@@ -59,7 +52,6 @@ from df_mlx.training_ops import scale_grads as _scale_grads
 # Constants
 # ---------------------------------------------------------------------------
 
-_DISC_MAX_SAMPLES = 48000
 _MB = 1024**2
 
 
@@ -135,84 +127,6 @@ class ProfileRunResult:
     total_p50_ms: float
     total_p95_ms: float
     peak_memory_mb: float
-
-
-# ---------------------------------------------------------------------------
-# Model construction (mirrors benchmark_gan_throughput.py)
-# ---------------------------------------------------------------------------
-
-
-def _make_waveforms(
-    batch_size: int,
-    max_samples: int,
-) -> Tuple[mx.array, mx.array]:
-    pred = mx.random.normal((batch_size, max_samples))
-    clean = mx.random.normal((batch_size, max_samples))
-    return pred, clean
-
-
-def _build_models(
-    batch_size: int,
-    mpd_channels: int,
-    msd_channels: int,
-    disc_max_samples: int,
-) -> Tuple[nn.Module, optim.Optimizer, nn.Module, optim.Optimizer]:
-    """Build gen + disc + optimizers with warmed-up states."""
-    cfg = get_default_config()
-    cfg.audio.sr = _SAMPLE_RATE
-    cfg.audio.fft_size = _FFT_SIZE
-    cfg.audio.hop_size = _HOP_SIZE
-    cfg.audio.nb_freqs = _NUM_FREQS
-    cfg.audio.n_freqs = _NUM_FREQS
-    cfg.erb.nb_erb = _NB_ERB
-    cfg.df.nb_df = _NB_DF
-
-    model = init_model(config=cfg, variant="full")
-    model.train()
-    gen_opt = optim.Adam(learning_rate=1e-4)
-
-    disc = CombinedDiscriminator(
-        mpd_periods=(2, 3, 5, 7, 11),
-        mpd_channels=mpd_channels,
-        msd_scales=3,
-        msd_channels=msd_channels,
-    )
-    disc.train()
-    disc_opt = optim.Adam(learning_rate=1e-4)
-
-    # Warm up so optimizer states are allocated
-    batch = _make_batch(batch_size)
-    pred_wav, clean_wav = _make_waveforms(batch_size, disc_max_samples)
-
-    gen_loss_and_grad = nn.value_and_grad(
-        model,
-        lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(m((nr, ni), fe, fs), (cr, ci)),
-    )
-    loss, grads = gen_loss_and_grad(
-        model,
-        batch["noisy_real"],
-        batch["noisy_imag"],
-        batch["feat_erb"],
-        batch["feat_spec"],
-        batch["clean_real"],
-        batch["clean_imag"],
-    )
-    grads, _ = clip_grad_norm_tree(grads, 1.0)
-    gen_opt.update(model, grads)
-    mx.eval(loss, model.parameters(), gen_opt.state)
-
-    def _disc_init(d: nn.Module) -> mx.array:
-        real_out, _ = d(clean_wav, return_features=False)
-        fake_out, _ = d(mx.stop_gradient(pred_wav), return_features=False)
-        total, _, _ = discriminator_loss(real_out, fake_out)
-        return total
-
-    disc_loss, disc_grads = nn.value_and_grad(disc, _disc_init)(disc)
-    disc_grads, _ = clip_grad_norm_tree(disc_grads, 1.0)
-    disc_opt.update(disc, disc_grads)
-    mx.eval(disc_loss, disc.parameters(), disc_opt.state)
-
-    return model, gen_opt, disc, disc_opt
 
 
 # ---------------------------------------------------------------------------
@@ -840,9 +754,15 @@ def _print_phase_table(result: ProfileRunResult) -> None:
             (i for i, a in enumerate(result.aggregated) if a.name == ag.name),
             -1,
         )
-        mem_bef_vals = [sp.phases[idx].memory_before_mb for sp in result.step_profiles if idx < len(sp.phases)]
-        mem_aft_vals = [sp.phases[idx].memory_after_mb for sp in result.step_profiles if idx < len(sp.phases)]
-        peak_vals = [sp.phases[idx].peak_memory_mb for sp in result.step_profiles if idx < len(sp.phases)]
+        mem_bef_vals = [
+            sp.phases[idx].memory_before_mb for sp in result.step_profiles if idx < len(sp.phases)
+        ]
+        mem_aft_vals = [
+            sp.phases[idx].memory_after_mb for sp in result.step_profiles if idx < len(sp.phases)
+        ]
+        peak_vals = [
+            sp.phases[idx].peak_memory_mb for sp in result.step_profiles if idx < len(sp.phases)
+        ]
 
         mem_bef = float(np.mean(mem_bef_vals)) if mem_bef_vals else 0.0
         mem_aft = float(np.mean(mem_aft_vals)) if mem_aft_vals else 0.0
@@ -914,7 +834,9 @@ def _print_breakdown_summary(result: ProfileRunResult) -> None:
     print("-" * 40)
     for ag in result.aggregated:
         idx = next((i for i, a in enumerate(result.aggregated) if a.name == ag.name), -1)
-        deltas = [sp.phases[idx].memory_delta_mb for sp in result.step_profiles if idx < len(sp.phases)]
+        deltas = [
+            sp.phases[idx].memory_delta_mb for sp in result.step_profiles if idx < len(sp.phases)
+        ]
         mean_delta = float(np.mean(deltas)) if deltas else 0.0
         if abs(mean_delta) > 10:
             direction = "+" if mean_delta > 0 else ""
@@ -947,7 +869,8 @@ def _print_breakdown_summary(result: ProfileRunResult) -> None:
         disc_compute = sum(
             ag.wall_mean_ms
             for ag in result.aggregated
-            if ag.name in ("disc_forward_backward", "disc_grad_clip", "disc_optimizer_update", "disc_eval")
+            if ag.name
+            in ("disc_forward_backward", "disc_grad_clip", "disc_optimizer_update", "disc_eval")
         )
         gen_compute_pct = gen_compute / total_wall * 100 if total_wall > 0 else 0
         disc_compute_pct = disc_compute / total_wall * 100 if total_wall > 0 else 0
@@ -1027,7 +950,9 @@ def _print_side_by_side(
 
     iso_by_name = {a.name: a for a in iso.aggregated}
     e2e_by_name = {a.name: a for a in e2e.aggregated}
-    all_names = list(dict.fromkeys([a.name for a in iso.aggregated] + [a.name for a in e2e.aggregated]))
+    all_names = list(
+        dict.fromkeys([a.name for a in iso.aggregated] + [a.name for a in e2e.aggregated])
+    )
 
     for name in all_names:
         ia = iso_by_name.get(name)
@@ -1038,7 +963,14 @@ def _print_side_by_side(
         ee = ea.eval_mean_ms if ea else 0.0
         delta = ew - iw
 
-        print(f"{name:<26} " f"{iw:>9.1f} " f"{ie:>9.1f} " f"{ew:>9.1f} " f"{ee:>9.1f} " f"{delta:>+8.1f}")
+        print(
+            f"{name:<26} "
+            f"{iw:>9.1f} "
+            f"{ie:>9.1f} "
+            f"{ew:>9.1f} "
+            f"{ee:>9.1f} "
+            f"{delta:>+8.1f}"
+        )
 
     print(_DIVIDER * 110)
     iso_total = iso.total_mean_ms
