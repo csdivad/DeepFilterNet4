@@ -45,6 +45,16 @@
 			"label": "Commit DUP-7.2",
 			"type": "shell",
 			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'refactor(train): delegate MultiResolutionSTFTLoss to SpectralLoss (DUP-7.2)' --no-verify --no-gpg-sign"
+		},
+		{
+			"label": "Push changes",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git log --oneline -5 && echo '---' && git push 2>&1"
+		},
+		{
+			"label": "Commit and push audit report",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'docs: add Pass 7 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
 		}
 	]
 }
