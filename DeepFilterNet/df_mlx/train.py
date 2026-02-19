@@ -26,6 +26,7 @@ import mlx.optimizers as optim
 import numpy as np
 
 from .config import LossConfig, TrainConfig
+from .loss import SpectralLoss
 from .model import DfNet4, count_parameters
 
 # ============================================================================
@@ -435,8 +436,20 @@ class MultiResolutionSTFTLoss:
         self.f_complex = f_complex
         self.eps = eps
 
+        # Delegate core computation to canonical SpectralLoss (loss.py)
+        self._spectral_loss = SpectralLoss(
+            fft_sizes=self.fft_sizes,
+            hop_sizes=self.hop_sizes,
+            gamma=self.gamma,
+            factor=self.factor,
+            factor_complex=self.f_complex,
+            eps=self.eps,
+        )
+
     def __call__(self, pred: mx.array, target: mx.array) -> mx.array:
         """Compute multi-resolution STFT loss.
+
+        Delegates to SpectralLoss (loss.py) — the canonical implementation.
 
         Args:
             pred: Predicted waveform (batch, samples) or (samples,)
@@ -445,66 +458,7 @@ class MultiResolutionSTFTLoss:
         Returns:
             Scalar loss value
         """
-        from .ops import stft
-
-        # Handle 1D input
-        if pred.ndim == 1:
-            pred = mx.expand_dims(pred, axis=0)
-        if target.ndim == 1:
-            target = mx.expand_dims(target, axis=0)
-
-        total_loss = mx.array(0.0)
-
-        for fft_size, hop_size in zip(self.fft_sizes, self.hop_sizes):
-            # Compute STFTs
-            pred_real, pred_imag = stft(pred, n_fft=fft_size, hop_length=hop_size)
-            target_real, target_imag = stft(target, n_fft=fft_size, hop_length=hop_size)
-
-            # Compute magnitudes
-            pred_mag = mx.sqrt(pred_real**2 + pred_imag**2 + self.eps)
-            target_mag = mx.sqrt(target_real**2 + target_imag**2 + self.eps)
-
-            # Apply gamma compression if needed
-            if self.gamma != 1.0:
-                pred_mag_comp = mx.power(mx.maximum(pred_mag, self.eps), self.gamma)
-                target_mag_comp = mx.power(mx.maximum(target_mag, self.eps), self.gamma)
-            else:
-                pred_mag_comp = pred_mag
-                target_mag_comp = target_mag
-
-            # Magnitude loss (MSE)
-            mag_loss = mx.mean((pred_mag_comp - target_mag_comp) ** 2) * self.factor
-            total_loss = total_loss + mag_loss
-
-            # Complex loss (optional)
-            if self.f_complex is not None and self.f_complex > 0:
-                if self.gamma != 1.0:
-                    # Compressed complex: mag_comp * (real/mag, imag/mag)
-                    # Avoids arctan2 whose gradient explodes as O(1/eps)
-                    # for near-silent bins. Direct division has stable
-                    # gradients of O(1/sqrt(eps)) since mag >= sqrt(eps).
-                    pred_phase = pred_mag_comp / pred_mag
-                    pred_real_comp = pred_phase * pred_real
-                    pred_imag_comp = pred_phase * pred_imag
-
-                    target_phase = target_mag_comp / target_mag
-                    target_real_comp = target_phase * target_real
-                    target_imag_comp = target_phase * target_imag
-                else:
-                    pred_real_comp = pred_real
-                    pred_imag_comp = pred_imag
-                    target_real_comp = target_real
-                    target_imag_comp = target_imag
-
-                # MSE on real/imag components
-                complex_loss = (
-                    mx.mean((pred_real_comp - target_real_comp) ** 2)
-                    + mx.mean((pred_imag_comp - target_imag_comp) ** 2)
-                ) * self.f_complex
-                total_loss = total_loss + complex_loss
-
-        # Average over resolutions
-        return total_loss / len(self.fft_sizes)
+        return self._spectral_loss(pred, target)
 
     def compute_per_resolution(self, pred: mx.array, target: mx.array) -> Dict[str, mx.array]:
         """Compute loss breakdown per resolution (for logging).
