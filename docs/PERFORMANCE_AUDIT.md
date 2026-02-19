@@ -147,7 +147,8 @@ Existing Metal kernels already cover the 3 highest-cost per-frame operations:
 2. `istft_overlap_add_kernel` — fused overlap-add + window normalization
 3. `mel_power_log_kernel` — fused power-spectrum → mel → log
 
-### Additional candidates (ranked):
+### Additional candidates (ranked)
+
 | Priority | Operation | Current | Proposed | Expected Win |
 |----------|-----------|---------|----------|-------------|
 | P1 | Complex mask + concat (DfOp output) | 2× concat + 4 muls + 2 adds | Fused Metal kernel | Minor — eliminates 2 allocations |
