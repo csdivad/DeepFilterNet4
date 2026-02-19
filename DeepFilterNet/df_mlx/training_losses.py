@@ -70,8 +70,7 @@ def _build_speech_band_mask(
     band_bins = float(mask.sum())
     if band_bins < 1:
         raise ValueError(
-            f"Speech band [{band_low_hz}, {band_high_hz}] Hz has no bins for "
-            f"n_freqs={n_freqs}, sr={sample_rate}."
+            f"Speech band [{band_low_hz}, {band_high_hz}] Hz has no bins for " f"n_freqs={n_freqs}, sr={sample_rate}."
         )
     return mx.array(mask), band_bins
 
@@ -377,9 +376,7 @@ def _compute_proxy_gates(
     if not proxy_enabled:
         proxy_frame = mx.ones_like(clean_band)
     else:
-        proxy_frame = p_ref * (
-            _AWESOME_PROXY_RATIO_FLOOR + _AWESOME_PROXY_RATIO_SCALE * speech_ratio
-        )
+        proxy_frame = p_ref * (_AWESOME_PROXY_RATIO_FLOOR + _AWESOME_PROXY_RATIO_SCALE * speech_ratio)
         proxy_frame = proxy_frame * mod_gate * music_gate[:, None]
         proxy_frame = proxy_frame * (
             1.0 + _AWESOME_LOW_ENERGY_WEIGHT * energy_boost + _AWESOME_LOW_SNR_WEIGHT * snr_boost
@@ -799,11 +796,7 @@ def _compute_pipeline_awesome_losses(
         base_proxy = base_proxy * mod_gate * music_gate[:, None]
 
         # ADDITIVE boosts (key improvement for low-signal speech)
-        proxy_frame = (
-            base_proxy
-            + _PIPELINE_LOW_ENERGY_ADDITIVE * energy_boost
-            + _PIPELINE_LOW_SNR_ADDITIVE * snr_boost
-        )
+        proxy_frame = base_proxy + _PIPELINE_LOW_ENERGY_ADDITIVE * energy_boost + _PIPELINE_LOW_SNR_ADDITIVE * snr_boost
         proxy_frame = mx.clip(proxy_frame, _PIPELINE_PROXY_FLOOR, 5.0)
 
     proxy_frame = mx.stop_gradient(proxy_frame)

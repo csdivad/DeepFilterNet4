@@ -405,8 +405,7 @@ else:
 
     def _mlx_not_available(*args, **kwargs):
         raise ImportError(
-            "MLX is not available. MLX only works on Apple Silicon Macs. "
-            "Install with: pip install mlx"
+            "MLX is not available. MLX only works on Apple Silicon Macs. " "Install with: pip install mlx"
         )
 
     # Create stubs for common imports

@@ -50,9 +50,7 @@ def batch_audio():
     for _ in range(batch_size):
         t = np.linspace(0, duration, num_samples, dtype=np.float32)
         freq = np.random.uniform(200, 1000)
-        signal = np.sin(2 * np.pi * freq * t) + 0.1 * np.random.randn(num_samples).astype(
-            np.float32
-        )
+        signal = np.sin(2 * np.pi * freq * t) + 0.1 * np.random.randn(num_samples).astype(np.float32)
         signals.append(signal)
 
     return mx.array(np.stack(signals))
@@ -771,9 +769,7 @@ class TestFullModel:
 
         # Enhance audio
         result = model.enhance(sample_audio)
-        assert isinstance(
-            result, mx.array
-        ), "enhance() should return mx.array when return_spec=False"
+        assert isinstance(result, mx.array), "enhance() should return mx.array when return_spec=False"
         enhanced = result
         mx.eval(enhanced)
 
@@ -3014,9 +3010,7 @@ class TestIntegration:
 
         # Enhance
         result = model.enhance(noisy)
-        assert isinstance(
-            result, mx.array
-        ), "enhance() should return mx.array when return_spec=False"
+        assert isinstance(result, mx.array), "enhance() should return mx.array when return_spec=False"
         enhanced = result
         mx.eval(enhanced)
 
@@ -3329,9 +3323,7 @@ class TestIntegration:
         noisy = mx.random.normal(shape=(num_samples,)) * 0.5
 
         result = model.enhance(noisy)
-        assert isinstance(
-            result, mx.array
-        ), "enhance() should return mx.array when return_spec=False"
+        assert isinstance(result, mx.array), "enhance() should return mx.array when return_spec=False"
         enhanced = result
         mx.eval(enhanced)
 
@@ -3791,12 +3783,8 @@ class TestNumericalEquivalence:
         mx.eval(loss_mlx)
 
         # PyTorch reference (same formula as MLX implementation)
-        pred_mag = torch.sqrt(
-            torch.from_numpy(pred_real_np) ** 2 + torch.from_numpy(pred_imag_np) ** 2 + 1e-8
-        )
-        target_mag = torch.sqrt(
-            torch.from_numpy(target_real_np) ** 2 + torch.from_numpy(target_imag_np) ** 2 + 1e-8
-        )
+        pred_mag = torch.sqrt(torch.from_numpy(pred_real_np) ** 2 + torch.from_numpy(pred_imag_np) ** 2 + 1e-8)
+        target_mag = torch.sqrt(torch.from_numpy(target_real_np) ** 2 + torch.from_numpy(target_imag_np) ** 2 + 1e-8)
         mag_loss = torch.mean(torch.abs(pred_mag - target_mag))
 
         complex_loss = torch.mean(
@@ -3958,9 +3946,7 @@ class TestStreaming:
 
         # State should have changed
         second_state = np.array(state.mamba_states)
-        assert not np.allclose(
-            first_state, second_state
-        ), "Mamba state should change between frames"
+        assert not np.allclose(first_state, second_state), "Mamba state should change between frames"
 
     def test_state_reset(self, streaming_model):
         """Test that reinitializing state resets everything."""
@@ -4029,10 +4015,7 @@ class TestStreaming:
 
         # Generate deterministic audio
         np.random.seed(42)
-        audio_frames = [
-            mx.array(np.random.randn(hop_length).astype(np.float32) * 0.1)
-            for _ in range(num_frames)
-        ]
+        audio_frames = [mx.array(np.random.randn(hop_length).astype(np.float32) * 0.1) for _ in range(num_frames)]
 
         # First pass
         state1 = streaming_model.init_state(batch_size=1)

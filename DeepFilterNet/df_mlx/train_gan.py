@@ -442,9 +442,7 @@ class GANTrainer:
             # Logging
             if step % self.config.log_every_steps == 0:
                 avg_gen = np.mean(gen_losses[-self.config.log_every_steps :])
-                avg_disc = (
-                    np.mean(disc_losses[-self.config.log_every_steps :]) if disc_losses else 0.0
-                )
+                avg_disc = np.mean(disc_losses[-self.config.log_every_steps :]) if disc_losses else 0.0
                 avg_time = np.mean(step_times[-self.config.log_every_steps :])
 
                 logger.info(
@@ -613,9 +611,7 @@ class GANTrainer:
 
         # Combine and save atomically (tmp → replace)
         all_weights = {**gen_weights, **disc_weights}
-        tmp_weights = checkpoint_path.with_name(
-            f"{checkpoint_path.stem}.tmp{checkpoint_path.suffix}"
-        )
+        tmp_weights = checkpoint_path.with_name(f"{checkpoint_path.stem}.tmp{checkpoint_path.suffix}")
         mx.save_safetensors(str(tmp_weights), all_weights)
         os.replace(str(tmp_weights), str(checkpoint_path))
 
@@ -650,13 +646,9 @@ class GANTrainer:
         weights: Dict[str, mx.array] = mx.load(str(path))  # type: ignore
 
         # Separate generator and discriminator weights
-        gen_weights = {
-            k.replace("generator.", ""): v for k, v in weights.items() if k.startswith("generator.")
-        }
+        gen_weights = {k.replace("generator.", ""): v for k, v in weights.items() if k.startswith("generator.")}
         disc_weights = {
-            k.replace("discriminator.", ""): v
-            for k, v in weights.items()
-            if k.startswith("discriminator.")
+            k.replace("discriminator.", ""): v for k, v in weights.items() if k.startswith("discriminator.")
         }
 
         self.generator.load_weights(list(gen_weights.items()))
