@@ -15,6 +15,7 @@ Optimized for Apple Silicon with:
 """
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple
@@ -730,23 +731,30 @@ def save_checkpoint(
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-    # Save model weights
     params = model.parameters()
     flat_params = tree_flatten(params)
     weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(path), weights)
+    if weights:
+        mx.eval(*weights.values())
+    mx.save_safetensors(str(tmp_weights), weights)
 
-    # Save training state as JSON
     state_path = path.with_suffix(".json")
+    tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
     state = {
         "epoch": epoch,
         "step": step,
         "loss": loss,
         **extra_state,
     }
-    with open(state_path, "w") as f:
+    with open(tmp_state, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    tmp_weights.replace(path)
+    tmp_state.replace(state_path)
 
     return path
 
@@ -1057,7 +1065,9 @@ class Trainer:
         return total_loss / max(count, 1)
 
     def save_checkpoint(self, filename: str):
-        """Save model checkpoint.
+        """Save model checkpoint atomically.
+
+        Uses temp files + atomic rename to prevent corruption on crash.
 
         Args:
             filename: Checkpoint filename
@@ -1065,15 +1075,18 @@ class Trainer:
         from mlx.utils import tree_flatten
 
         path = self.checkpoint_dir / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-        # Save weights - flatten the nested dict to a flat dict for safetensors
         params = self.model.parameters()
         flat_params = tree_flatten(params)
         weights = {k: v for k, v in flat_params}
-        mx.save_safetensors(str(path), weights)
+        if weights:
+            mx.eval(*weights.values())
+        mx.save_safetensors(str(tmp_weights), weights)
 
-        # Save training state
         state_path = path.with_suffix(".json")
+        tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
         state = {
             "step": self.step,
             "best_loss": self.best_loss,
@@ -1083,8 +1096,13 @@ class Trainer:
                 "warmup_steps": self.config.warmup_steps,
             },
         }
-        with open(state_path, "w") as f:
+        with open(tmp_state, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        tmp_weights.replace(path)
+        tmp_state.replace(state_path)
 
         print(f"Saved checkpoint: {path}")
 
@@ -1094,13 +1112,26 @@ class Trainer:
         Args:
             path: Path to checkpoint file
         """
+        from mlx.utils import tree_flatten, tree_unflatten
+
         path = Path(path)
 
-        # Load weights
         weights = mx.load(str(path))
-        self.model.load_weights(weights)
 
-        # Load training state if exists
+        flat_model = tree_flatten(self.model.parameters())
+        pairs = []
+        missing = []
+        for name, param in flat_model:
+            if isinstance(weights, dict) and name in weights:
+                pairs.append((name, weights[name]))
+            else:
+                pairs.append((name, param))
+                missing.append(name)
+
+        self.model.update(tree_unflatten(pairs))
+        if missing:
+            print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
+
         state_path = path.with_suffix(".json")
         if state_path.exists():
             with open(state_path) as f:
@@ -1188,7 +1219,7 @@ def load_pytorch_checkpoint(
     mlx_weights = convert_pytorch_weights(numpy_state)
 
     # Load into model
-    model.load_weights(mlx_weights)
+    model.load_weights(list(mlx_weights.items()))
 
     print(f"Loaded PyTorch checkpoint: {checkpoint_path}")
     return model

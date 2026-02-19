@@ -11,6 +11,7 @@ Based on the PyTorch implementation in df/train.py with adaptations for MLX.
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -442,7 +443,9 @@ class GANTrainer:
             # Logging
             if step % self.config.log_every_steps == 0:
                 avg_gen = np.mean(gen_losses[-self.config.log_every_steps :])
-                avg_disc = np.mean(disc_losses[-self.config.log_every_steps :]) if disc_losses else 0.0
+                avg_disc = (
+                    np.mean(disc_losses[-self.config.log_every_steps :]) if disc_losses else 0.0
+                )
                 avg_time = np.mean(step_times[-self.config.log_every_steps :])
 
                 logger.info(
@@ -609,11 +612,15 @@ class GANTrainer:
         disc_flat = tree_flatten(disc_params)
         disc_weights = {f"discriminator.{k}": v for k, v in disc_flat}
 
-        # Combine and save
+        # Combine and save atomically (tmp → replace)
         all_weights = {**gen_weights, **disc_weights}
-        mx.save_safetensors(str(checkpoint_path), all_weights)
+        tmp_weights = checkpoint_path.with_name(
+            f"{checkpoint_path.stem}.tmp{checkpoint_path.suffix}"
+        )
+        mx.save_safetensors(str(tmp_weights), all_weights)
+        os.replace(str(tmp_weights), str(checkpoint_path))
 
-        # Save training state
+        # Save training state atomically
         state_path = checkpoint_path.with_suffix(".json")
         state = {
             "epoch": self.epoch,
@@ -623,8 +630,12 @@ class GANTrainer:
             "gen_lr_state": self.gen_lr_schedule.state_dict(),
             "disc_lr_state": self.disc_lr_schedule.state_dict(),
         }
-        with open(state_path, "w") as f:
+        tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
+        with open(tmp_state, "w") as f:
             json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp_state), str(state_path))
 
         logger.info(f"Saved checkpoint: {checkpoint_path}")
 
@@ -640,9 +651,13 @@ class GANTrainer:
         weights: Dict[str, mx.array] = mx.load(str(path))  # type: ignore
 
         # Separate generator and discriminator weights
-        gen_weights = {k.replace("generator.", ""): v for k, v in weights.items() if k.startswith("generator.")}
+        gen_weights = {
+            k.replace("generator.", ""): v for k, v in weights.items() if k.startswith("generator.")
+        }
         disc_weights = {
-            k.replace("discriminator.", ""): v for k, v in weights.items() if k.startswith("discriminator.")
+            k.replace("discriminator.", ""): v
+            for k, v in weights.items()
+            if k.startswith("discriminator.")
         }
 
         self.generator.load_weights(list(gen_weights.items()))

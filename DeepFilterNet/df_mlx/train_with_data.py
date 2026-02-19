@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -52,7 +53,9 @@ def save_checkpoint(
     loss: float,
     best_valid_loss: float,
 ) -> None:
-    """Save a training checkpoint.
+    """Save a training checkpoint atomically.
+
+    Uses temp files + atomic rename to prevent corruption on crash.
 
     Args:
         model: Model to save
@@ -65,22 +68,30 @@ def save_checkpoint(
     from mlx.utils import tree_flatten
 
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
 
-    # Flatten nested params for safetensors
     params = model.parameters()
     flat_params = tree_flatten(params)
     weights = {k: v for k, v in flat_params}
-    mx.save_safetensors(str(path), weights)
+    if weights:
+        mx.eval(*weights.values())
+    mx.save_safetensors(str(tmp_weights), weights)
 
-    # Save training state
     state_path = path.with_suffix(".state.json")
+    tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
     state = {
         "epoch": epoch,
         "loss": loss,
         "best_valid_loss": best_valid_loss,
     }
-    with open(state_path, "w") as f:
+    with open(tmp_state, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    tmp_weights.replace(path)
+    tmp_state.replace(state_path)
 
 
 def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
@@ -93,13 +104,26 @@ def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
     Returns:
         Training state dict
     """
+    from mlx.utils import tree_flatten, tree_unflatten
+
     ckpt_path = Path(path)
 
-    # Load weights
     weights = mx.load(str(ckpt_path))
-    model.load_weights(weights)
 
-    # Load training state
+    flat_model = tree_flatten(model.parameters())
+    pairs = []
+    missing = []
+    for name, param in flat_model:
+        if isinstance(weights, dict) and name in weights:
+            pairs.append((name, weights[name]))
+        else:
+            pairs.append((name, param))
+            missing.append(name)
+
+    model.update(tree_unflatten(pairs))
+    if missing:
+        print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
+
     state_path = ckpt_path.with_suffix(".state.json")
     state = {}
     if state_path.exists():
