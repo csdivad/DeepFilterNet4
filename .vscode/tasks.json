@@ -70,6 +70,11 @@
 			"label": "Commit DUP-8.1",
 			"type": "shell",
 			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git diff --cached --stat && git commit -m 'refactor(train): delegate Trainer.save_checkpoint to module-level save_checkpoint (DUP-8.1)' --no-verify --no-gpg-sign 2>&1"
+		},
+		{
+			"label": "Commit report and push",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'docs: add Pass 8 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
 		}
 	]
 }
