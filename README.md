@@ -1,11 +1,11 @@
 # DeepFilterNet
 
-This file is a pointer to the canonical README at the repository root.
 
-See [../README.md](../README.md).
+> [!NOTE] 
+> All config options are also override-able on the CLI
 
 ```bash
-python df/train.py --model-type dfnet4 path/to/dataset.cfg path/to/data/ path/to/output/
+python -m df_mlx.train_dynamic --run-config /path/to/run_config.toml
 ```
 
 #### GAN Training

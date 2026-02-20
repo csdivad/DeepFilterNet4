@@ -1,0 +1,244 @@
+# Curriculum-optimized GAN training profile for Apple Silicon (M3 Pro / M4 Max 36GB)
+#
+# Derived from pipeline_awesome_gan_optimized.toml with loss landscape analysis.
+# See docs/LOSS_LANDSCAPE_ANALYSIS.md for full rationale.
+#
+# Key improvements over pipeline_awesome_gan_optimized.toml:
+#
+#   1. Rebalanced loss budget: reconstruction:auxiliary from 1:2.83 → 1:1.15
+#      - awesome 1.2→0.8, vad 0.8→0.4, speech 0.6→0.35 — reduces auxiliary
+#        gradient dominance that biased the model toward classification over fidelity
+#      - MRSTFT factor 0.2→0.35 — multi-resolution spectral detail was at noise-level
+#
+#   2. 4-stage pipeline curriculum (new — no prior profile used stages):
+#      - Stage 1 (0–29):   Foundation — spectral-dominant, aux at 15-19% of target
+#      - Stage 2 (30–74):  Ramp — speech-aware at ~50%, VadHead starts learning
+#      - Stage 3 (75–129): Full multi-task — all non-GAN losses at target balance
+#      - Stage 4 (130–199): GAN polish — aux reduced 20% to absorb GAN gradient budget
+#
+#   3. Better GAN integration:
+#      - FM:adversarial ratio 17:1 → 6.25:1 (fm 1.0→0.5, adv 0.06→0.08)
+#      - Start 20 epochs earlier (130 vs 150) with smoother ramp (20 vs 12 epochs)
+#      - disc_lr doubled to 2e-5 to compensate for disc_update_freq=2
+#
+#   4. learning_rate_min raised to 1e-7 — keeps model responsive in late GAN phase
+#      (was 1e-8 implicitly; cosine had decayed to ~1.5e-7 by GAN start)
+#
+# Risk: LOW-MODERATE. Highest-risk change is fm_weight 1.0→0.5 (may need 0.7 if
+# GAN destabilizes). All changes are config-level, no code modifications required.
+#
+# Usage:
+#   python -m df_mlx.train_dynamic \
+#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_curriculum.toml
+
+[dataset]
+cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
+
+[training]
+epochs = 200
+batch_size = 24
+learning_rate = 1e-6
+learning_rate_min = 1e-7     # 10x higher floor than implicit default (1e-8)
+                             # keeps model responsive during GAN phase (epochs 130-200)
+                             # cosine decays to ~2.5e-7 at epoch 130; floor prevents stall
+weight_decay = 0.0
+warmup_epochs = 5
+patience = 10
+grad_accumulation_steps = 2  # effective batch = 48
+max_grad_norm = 1.0          # up from 0.8: more headroom for multi-task gradients
+                             # 4-stage curriculum reduces abrupt gradient shifts
+fp16 = true
+seed = 42
+
+[dataloader]
+num_workers = 8
+prefetch_size = 16
+use_mlx_data = true
+
+[checkpoint]
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_curriculum"
+save_strategy = "epoch"
+save_total_limit = 3
+validate_every = 1
+checkpoint_batches = 300
+check_chkpts = false
+resume = true
+resume_data = true
+
+[model]
+backbone_type = "attention"
+variant = "full"
+
+# ─── Loss Configuration ─────────────────────────────────────────────────────────
+#
+# Total loss (at full convergence, epoch 150+):
+#   L = spec(1.0) + mrstft(0.35) + awesome(0.65) + vad(0.32) + speech(0.28)
+#     + adv(0.08) + fm(0.5)
+#
+# Weight budget:  reconstruction 1.35 : auxiliary 1.25 : GAN 0.58 = balanced
+# Compare prior:  reconstruction 1.20 : auxiliary 3.40 : GAN 1.06 = aux-dominated
+
+[loss]
+dynamic_loss = "pipeline_awesome"
+
+# 4-stage pipeline curriculum
+# - Stages override awesome_loss_weight, vad_loss_weight, vad_speech_loss_weight
+# - GAN follows its own epoch-based ramp (not stage-overridable)
+# - Each stage's base weights are further modulated by their respective warmup ramps
+
+[[loss.pipeline_stages]]
+start_epoch = 0
+name = "foundation"
+# Spectral-dominant: backbone learns denoising fundamentals
+# aux budget = 0.15 + 0.08 + 0.05 = 0.28 vs reconstruction 1.35 → 4.8:1 ratio
+# awesome warmup_steps=2500 means this starts at 0 and rises to 0.15 by ~epoch 10
+awesome_loss_weight = 0.15
+vad_loss_weight = 0.08
+vad_speech_loss_weight = 0.05
+
+[[loss.pipeline_stages]]
+start_epoch = 30
+name = "ramp"
+# Introduce speech-aware supervision at moderate strength
+# aux = 0.45 + 0.20 + 0.15 = 0.80 vs reconstruction 1.35 → 1.7:1 ratio
+# VadHead gets meaningful BCE gradients; pipeline awesome sharpens speech/noise
+awesome_loss_weight = 0.45
+vad_loss_weight = 0.20
+vad_speech_loss_weight = 0.15
+
+[[loss.pipeline_stages]]
+start_epoch = 75
+name = "full_multitask"
+# All non-GAN losses at target strength — model converges on pre-GAN optimum
+# aux = 0.80 + 0.40 + 0.35 = 1.55 vs reconstruction 1.35 → 1:1.15 (balanced)
+# 55 epochs of stable multi-task training before GAN phase
+awesome_loss_weight = 0.80
+vad_loss_weight = 0.40
+vad_speech_loss_weight = 0.35
+
+[[loss.pipeline_stages]]
+start_epoch = 130
+name = "gan_integration"
+# Auxiliary eased ~20% to absorb incoming GAN gradient budget
+# aux = 0.65 + 0.32 + 0.28 = 1.25; GAN = 0→0.58 over 20 epochs
+# Net effect at full GAN ramp: total changes from 2.90 to 3.18 (+10%, not +37%)
+awesome_loss_weight = 0.65
+vad_loss_weight = 0.32
+vad_speech_loss_weight = 0.28
+
+[loss.awesome]
+loss_weight = 0.8            # down from 1.2: reduces aux dominance
+                             # pipeline sub-weights (speech=1.0, noise=1.0, smooth=0.3,
+                             # music=1.5) are internal constants — 0.8 × 1.5 = 1.2
+                             # music suppression still gets strong gradient
+mask_sharpness = 7.0         # sharp speech/noise boundary; consider 5.0 if gradient
+                             # oscillation observed near mask edges
+warmup_steps = 2500          # linear ramp 0→1 over ~10 epochs of global optimizer steps
+proxy_enabled = false        # uniform weighting (proxy adds complexity without clear gain)
+
+[loss.mrstft]
+factor = 0.35                # up from 0.2: was contributing ~5% of spectral L1
+                             # at 0.35, effective contribution ~26% of spectral
+                             # improves transients, formant detail, high-frequency content
+gamma = 0.7                  # moderate dynamic range compression
+                             # lower (0.5) emphasizes quiet speech details
+                             # higher (1.0) treats all magnitudes equally
+f_complex = 0.15             # complex MSE component, complementary to magnitude MSE
+fft_sizes = [512, 1024, 2048]
+hop_sizes = [128, 256, 512]
+
+# ─── GAN Configuration ──────────────────────────────────────────────────────────
+#
+# GAN timeline: silent 0-129 → ramp 130-149 → full 150-199 (50 epochs at full)
+# Compare prior: silent 0-149 → ramp 150-161 → full 162-199 (38 epochs at full)
+#
+# FM:adversarial effective ratio: 0.5 × 1.0 : 0.08 = 6.25:1
+# Compare prior: 1.0 × 1.0 : 0.06 = 16.7:1
+# Lower ratio increases adversarial perceptual feedback while FM still stabilizes
+
+[gan]
+enabled = true
+start_epoch = 130            # 20 epochs earlier: 70 total GAN epochs (was 50)
+ramp_epochs = 20             # smoother ramp: 20 epochs (was 12)
+                             # full GAN weight at epoch 150, then 50 epochs of
+                             # stable adversarial training
+adv_weight = 0.08            # up from 0.06: more perceptual adversarial signal
+                             # range 0.04-0.09 across profiles; 0.08 is moderate
+fm_weight = 0.5              # down from 1.0: FM was drowning adversarial signal
+                             # effective FM = 0.5 × factor(1.0) = 0.5
+                             # HIGHEST-RISK CHANGE: if GAN destabilizes, try 0.7
+discriminator = "combined"
+mpd_periods = [2, 3, 5, 7, 11]
+msd_scales = 3
+disc_lr = 2e-5               # doubled from 1e-5: compensates for disc_update_freq=2
+                             # effective disc LR per generator step matches prior
+disc_weight_decay = 0.01
+disc_grad_clip = 1.0
+disc_update_freq = 2
+disc_max_samples = 24000     # 0.5s: benchmarked 22% faster than 48k
+mpd_channels = 16
+msd_channels = 64
+cache_gen_waveforms = true
+disc_gradient_checkpoint = true
+gen_gradient_checkpoint = true
+eval_frequency = 6           # benchmarked EF=6 optimal
+
+# ─── VAD Configuration ───────────────────────────────────────────────────────────
+#
+# Two sub-components, both weighted by vad_loss_weight × warmup:
+#   1. Proxy VAD loss: mean(gate · relu(p_ref - p_out - margin))
+#   2. VadHead BCE: BCE_with_logits(logits, p_ref)  ← multi-task head
+#
+# BCE gradients flow through shared encoder. At weight=0.4 (down from 0.8),
+# gradient pollution is reduced while VAD accuracy should reach >85% by epoch 75.
+
+[vad]
+loss_weight = 0.4            # down from 0.8: was 80% of spectral; now 30%
+                             # still meaningful signal for VadHead training
+                             # VAD accuracy target: >85% by epoch 75 (Stage 3)
+threshold = 0.58
+margin = 0.05
+speech_loss_weight = 0.35    # down from 0.6: 300-3400Hz band refinement loss
+                             # complementary (not redundant) with full-spectrum spectral
+warmup_epochs = 5            # all VAD sub-losses ramp together
+snr_gate_db = -12.0
+snr_gate_width = 6.0
+band_low_hz = 300.0
+band_high_hz = 3400.0
+z_threshold = 0.0
+z_slope = 1.0
+
+[vad.eval]
+mode = "silero"
+every = 2
+batches = 24
+max_seconds = 0.0
+silero_sample_rate = 16000
+
+[vad.train]
+prob = 0.05
+every_steps = 2
+
+[metrics]
+eval_sisdr = false
+
+[debug]
+verbose = false
+sync_mode = "fast"
+debug_numerics = false
+debug_numerics_fail_fast = true
+debug_numerics_every = 1
+debug_numerics_dump_dir = ""
+debug_numerics_dump_arrays = false
+debug_numerics_max_dumps = 5
+nan_skip_batch = false
+
+[enhance]
+speech_boost_db = 4.0
+speech_boost_threshold = 0.4
+speech_boost_min_speech_ms = 250
+speech_boost_min_silence_ms = 100
+speech_boost_pad_ms = 30
+speech_boost_ramp_ms = 8.0
+speech_boost_peak_limit = 0.99
+speech_boost_silero_sample_rate = 16000
