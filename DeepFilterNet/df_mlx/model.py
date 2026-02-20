@@ -13,7 +13,7 @@ The model processes noisy speech spectrograms and outputs enhanced speech
 by applying learned masks and deep filtering operations.
 """
 
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -186,6 +186,39 @@ class Encoder4(nn.Module):
 # ============================================================================
 
 
+class VadHead(nn.Module):
+    """VAD prediction head.
+
+    Predicts speech presence probability from the backbone embedding.
+
+    Args:
+        p: Model parameters
+    """
+
+    def __init__(self, p: ModelParams4):
+        super().__init__()
+        self.p = p
+
+        # Simple MLP for VAD prediction
+        self.mlp = nn.Sequential(
+            nn.Linear(p.emb_hidden_dim, p.emb_hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(p.emb_hidden_dim // 2, 1),
+            nn.Sigmoid(),
+        )
+
+    def __call__(self, emb: mx.array) -> mx.array:
+        """Forward pass.
+
+        Args:
+            emb: Backbone embedding (batch, time, emb_hidden_dim)
+
+        Returns:
+            VAD probability (batch, time, 1)
+        """
+        return self.mlp(emb)
+
+
 class ErbDecoder4(nn.Module):
     """ERB mask decoder.
 
@@ -294,7 +327,9 @@ class DfDecoder4(nn.Module):
         if output_mode is None:
             output_mode = p.df_output_mode
         if output_mode not in self.VALID_OUTPUT_MODES:
-            raise ValueError(f"output_mode must be one of {self.VALID_OUTPUT_MODES}, got '{output_mode}'")
+            raise ValueError(
+                f"output_mode must be one of {self.VALID_OUTPUT_MODES}, got '{output_mode}'"
+            )
         self.output_mode = output_mode
 
         # Output size depends on mode
@@ -525,7 +560,9 @@ class WaveformEncoder(nn.Module):
         for i in range(num_layers):
             out_ch = base_channels * (2**i)
             self.conv_layers.append(
-                nn.Conv1d(ch, out_ch, kernel_sizes[i], stride=strides[i], padding=kernel_sizes[i] // 2)
+                nn.Conv1d(
+                    ch, out_ch, kernel_sizes[i], stride=strides[i], padding=kernel_sizes[i] // 2
+                )
             )
             self.norms.append(nn.BatchNorm(out_ch))
             ch = out_ch
@@ -763,11 +800,15 @@ class CrossDomainAttention(nn.Module):
         phase_proj = self.phase_proj(phase_feat)
 
         # Time-magnitude cross-attention (time attends to magnitude)
-        tm_attn = self._cross_attention(time_proj, mag_proj, mag_proj, self.tm_q, self.tm_k, self.tm_v)
+        tm_attn = self._cross_attention(
+            time_proj, mag_proj, mag_proj, self.tm_q, self.tm_k, self.tm_v
+        )
         tm_attn = self.norm_tm(time_proj + tm_attn)
 
         # Magnitude-phase cross-attention (magnitude attends to phase)
-        mp_attn = self._cross_attention(mag_proj, phase_proj, phase_proj, self.mp_q, self.mp_k, self.mp_v)
+        mp_attn = self._cross_attention(
+            mag_proj, phase_proj, phase_proj, self.mp_q, self.mp_k, self.mp_v
+        )
         mp_attn = self.norm_mp(mag_proj + mp_attn)
 
         # Concatenate and fuse
@@ -829,7 +870,9 @@ class HybridEncoder(nn.Module):
         )
 
         # Sequence modeling with Mamba
-        self.seq_layers = [SqueezedMamba(emb_hidden_dim, emb_hidden_dim, emb_hidden_dim) for _ in range(2)]
+        self.seq_layers = [
+            SqueezedMamba(emb_hidden_dim, emb_hidden_dim, emb_hidden_dim) for _ in range(2)
+        ]
 
         # LSNR estimation
         lsnr_min = p.lsnr.lsnr_min if hasattr(p, "lsnr") else -15.0
@@ -926,7 +969,8 @@ class DfNet4(nn.Module):
         # Validate lookahead settings
         if self.conv_lookahead > 0:
             assert self.conv_lookahead >= self.df_lookahead, (
-                f"conv_lookahead ({self.conv_lookahead}) must be >= " f"df_lookahead ({self.df_lookahead})"
+                f"conv_lookahead ({self.conv_lookahead}) must be >= "
+                f"df_lookahead ({self.df_lookahead})"
             )
 
         # LSNR dropout settings
@@ -999,6 +1043,7 @@ class DfNet4(nn.Module):
         # Decoders
         self.erb_decoder = ErbDecoder4(p)
         self.df_decoder = DfDecoder4(p)  # Uses p.df_output_mode
+        self.vad_head = VadHead(p)
 
         # Deep filtering operation (only needed for coefficients mode)
         if self.df_output_mode == "coefficients":
@@ -1142,7 +1187,8 @@ class DfNet4(nn.Module):
         feat_erb: mx.array,
         feat_spec: mx.array,
         training: bool = False,
-    ) -> Tuple[mx.array, mx.array]:
+        return_vad: bool = False,
+    ) -> Union[Tuple[mx.array, mx.array], Tuple[Tuple[mx.array, mx.array], mx.array]]:
         """Forward pass.
 
         Args:
@@ -1150,9 +1196,10 @@ class DfNet4(nn.Module):
             feat_erb: ERB features (batch, time, erb_bands)
             feat_spec: DF features (batch, time, df_bins, 2)
             training: Whether in training mode (enables LSNR dropout)
+            return_vad: Whether to return the VAD probability
 
         Returns:
-            Enhanced spectrum as (real, imag)
+            Enhanced spectrum as (real, imag), or tuple of (spectrum, vad_prob) if return_vad=True
         """
         spec_real, spec_imag = spec
         # Shape is (batch, time, freq) - used implicitly in operations below
@@ -1179,6 +1226,9 @@ class DfNet4(nn.Module):
 
         # Mamba backbone
         emb, _ = self.backbone(emb)
+
+        # VAD prediction
+        vad_prob = self.vad_head(emb)
 
         # Decode ERB mask
         erb_mask = self.erb_decoder(emb)  # (batch, time, nb_erb)
@@ -1208,6 +1258,14 @@ class DfNet4(nn.Module):
         # Apply post-filter (optional, reduces musical noise)
         spec_out = self._apply_post_filter(spec_out, spec)
 
+        # Apply VAD gating during inference
+        if not training:
+            # Soft gate with a -40dB floor (0.01)
+            vad_gate = mx.maximum(vad_prob, 0.01)
+            # vad_prob is (batch, time, 1), spec_out is (batch, time, freq)
+            spec_out_real, spec_out_imag = spec_out
+            spec_out = (spec_out_real * vad_gate, spec_out_imag * vad_gate)
+
         # Apply LSNR dropout masking
         if self.lsnr_dropout and training and active_mask is not None:
             spec_out_real, spec_out_imag = spec_out
@@ -1217,6 +1275,8 @@ class DfNet4(nn.Module):
             spec_out_imag = mx.where(active_mask_expanded, spec_out_imag, spec_imag)
             spec_out = (spec_out_real, spec_out_imag)
 
+        if return_vad:
+            return spec_out, vad_prob
         return spec_out
 
     def forward_with_lsnr(
@@ -1314,7 +1374,9 @@ class DfNet4(nn.Module):
         # Compute features
         mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
         feat_erb = mx.matmul(mag, self._erb_fb)
-        feat_spec = mx.stack([spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]], axis=-1)
+        feat_spec = mx.stack(
+            [spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]], axis=-1
+        )
 
         # Forward pass (inference mode - no dropout)
         spec_out = self((spec_real, spec_imag), feat_erb, feat_spec, training=False)
@@ -1395,7 +1457,9 @@ class StreamingState:
         self.hop_length = hop_length
 
         # Mamba state: list of (batch, d_inner, d_state) for each layer
-        self.mamba_states: Optional[mx.array] = None  # Will be (num_layers, batch, d_inner, d_state)
+        self.mamba_states: Optional[mx.array] = (
+            None  # Will be (num_layers, batch, d_inner, d_state)
+        )
 
         # STFT input buffer - stores last n_fft - hop_length samples
         self.input_buffer = mx.zeros((batch_size, n_fft - hop_length))
@@ -1486,7 +1550,9 @@ class StreamingDfNet4(nn.Module):
             num_layers=self.num_backbone_layers,
         )
 
-    def _stft_frame(self, audio_frame: mx.array, state: StreamingState) -> Tuple[mx.array, mx.array]:
+    def _stft_frame(
+        self, audio_frame: mx.array, state: StreamingState
+    ) -> Tuple[mx.array, mx.array]:
         """Compute STFT for a single frame.
 
         Args:
@@ -1546,13 +1612,17 @@ class StreamingDfNet4(nn.Module):
 
         # Shift buffer: keep samples that will overlap with next frame
         new_buffer = mx.zeros_like(state.output_buffer)
-        new_buffer = new_buffer.at[:, : self.n_fft - self.hop_length].add(output[:, self.hop_length :])
+        new_buffer = new_buffer.at[:, : self.n_fft - self.hop_length].add(
+            output[:, self.hop_length :]
+        )
         state.output_buffer = new_buffer
 
         # Update window sum for normalization
         win_sq = self.window * self.window
         new_window_sum = mx.zeros_like(state.window_sum)
-        new_window_sum = new_window_sum.at[: self.n_fft - self.hop_length].add(state.window_sum[self.hop_length :])
+        new_window_sum = new_window_sum.at[: self.n_fft - self.hop_length].add(
+            state.window_sum[self.hop_length :]
+        )
         new_window_sum = new_window_sum + win_sq
         state.window_sum = new_window_sum
 
@@ -1751,7 +1821,9 @@ class StreamingDfNet4(nn.Module):
             ready_samples = output[:, :hop_length]
 
             new_output_buffer = mx.zeros_like(output_buffer)
-            new_output_buffer = new_output_buffer.at[:, : n_fft - hop_length].add(output[:, hop_length:])
+            new_output_buffer = new_output_buffer.at[:, : n_fft - hop_length].add(
+                output[:, hop_length:]
+            )
 
             win_sq = window * window
             new_window_sum = mx.zeros_like(window_sum)
