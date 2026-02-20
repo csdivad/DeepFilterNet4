@@ -235,14 +235,14 @@ $$L_{music} = \text{mean}\!\bigl(\lvert\log(1{+}\lvert\hat{S}\rvert)\rvert \cdot
 | | |
 |---|---|
 | **Source** | [df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py) — `loss_fn()` |
-| **Measures** | Binary Cross-Entropy (BCE) between the model's predicted VAD probability and the energy-based proxy VAD target ($p_{ref}$). |
+| **Measures** | Binary Cross-Entropy (BCE) between the model's VadHead logits and the energy-based proxy VAD target ($p_{ref}$). Uses `nn.losses.binary_cross_entropy(..., with_logits=True)` for numerical stability. |
 
 **Formula:**
 
-$$L_{vad} = \text{BCE}(p_{vad}, p_{ref}) = -\text{mean}\!\bigl(p_{ref} \log(p_{vad} + \varepsilon) + (1 - p_{ref}) \log(1 - p_{vad} + \varepsilon)\bigr)$$
+$$L_{vad} = \text{BCE\_with\_logits}(z_{vad}, p_{ref})$$
 
 where:
-- $p_{vad}$ is the output of the model's `VadHead` (sigmoid activation).
+- $z_{vad}$ is the raw logit output of the model's `VadHead` (no sigmoid — sigmoid is fused inside the BCE kernel).
 - $p_{ref}$ is the energy-based proxy VAD target computed from the clean reference signal.
 
 **Config options:**
@@ -254,7 +254,7 @@ where:
 
 **Details:**
 - The VAD head is trained as a multi-task objective alongside the main enhancement task.
-- The predicted $p_{vad}$ is used during inference for soft-gating the output spectrum to suppress non-speech regions.
+- During inference, $\sigma(z_{vad})$ is used for soft-gating the output spectrum to suppress non-speech regions: $\text{gate} = \max(\sigma(z_{vad}),\, 0.01)$.
 
 **Effect of weight change:** Increasing forces the model to learn better speech presence detection; decreasing focuses the model more on spectral enhancement.
 

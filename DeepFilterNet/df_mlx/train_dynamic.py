@@ -1605,7 +1605,7 @@ def train(
             if not diag.check(name, tensor, debug_ctx):
                 findings.append(name)
 
-        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+        out = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
         if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
             spec_out, vad_logits = out
         else:
