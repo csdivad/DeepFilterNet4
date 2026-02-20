@@ -327,9 +327,7 @@ class DfDecoder4(nn.Module):
         if output_mode is None:
             output_mode = p.df_output_mode
         if output_mode not in self.VALID_OUTPUT_MODES:
-            raise ValueError(
-                f"output_mode must be one of {self.VALID_OUTPUT_MODES}, got '{output_mode}'"
-            )
+            raise ValueError(f"output_mode must be one of {self.VALID_OUTPUT_MODES}, got '{output_mode}'")
         self.output_mode = output_mode
 
         # Output size depends on mode
@@ -560,9 +558,7 @@ class WaveformEncoder(nn.Module):
         for i in range(num_layers):
             out_ch = base_channels * (2**i)
             self.conv_layers.append(
-                nn.Conv1d(
-                    ch, out_ch, kernel_sizes[i], stride=strides[i], padding=kernel_sizes[i] // 2
-                )
+                nn.Conv1d(ch, out_ch, kernel_sizes[i], stride=strides[i], padding=kernel_sizes[i] // 2)
             )
             self.norms.append(nn.BatchNorm(out_ch))
             ch = out_ch
@@ -800,15 +796,11 @@ class CrossDomainAttention(nn.Module):
         phase_proj = self.phase_proj(phase_feat)
 
         # Time-magnitude cross-attention (time attends to magnitude)
-        tm_attn = self._cross_attention(
-            time_proj, mag_proj, mag_proj, self.tm_q, self.tm_k, self.tm_v
-        )
+        tm_attn = self._cross_attention(time_proj, mag_proj, mag_proj, self.tm_q, self.tm_k, self.tm_v)
         tm_attn = self.norm_tm(time_proj + tm_attn)
 
         # Magnitude-phase cross-attention (magnitude attends to phase)
-        mp_attn = self._cross_attention(
-            mag_proj, phase_proj, phase_proj, self.mp_q, self.mp_k, self.mp_v
-        )
+        mp_attn = self._cross_attention(mag_proj, phase_proj, phase_proj, self.mp_q, self.mp_k, self.mp_v)
         mp_attn = self.norm_mp(mag_proj + mp_attn)
 
         # Concatenate and fuse
@@ -870,9 +862,7 @@ class HybridEncoder(nn.Module):
         )
 
         # Sequence modeling with Mamba
-        self.seq_layers = [
-            SqueezedMamba(emb_hidden_dim, emb_hidden_dim, emb_hidden_dim) for _ in range(2)
-        ]
+        self.seq_layers = [SqueezedMamba(emb_hidden_dim, emb_hidden_dim, emb_hidden_dim) for _ in range(2)]
 
         # LSNR estimation
         lsnr_min = p.lsnr.lsnr_min if hasattr(p, "lsnr") else -15.0
@@ -969,8 +959,7 @@ class DfNet4(nn.Module):
         # Validate lookahead settings
         if self.conv_lookahead > 0:
             assert self.conv_lookahead >= self.df_lookahead, (
-                f"conv_lookahead ({self.conv_lookahead}) must be >= "
-                f"df_lookahead ({self.df_lookahead})"
+                f"conv_lookahead ({self.conv_lookahead}) must be >= " f"df_lookahead ({self.df_lookahead})"
             )
 
         # LSNR dropout settings
@@ -1374,9 +1363,7 @@ class DfNet4(nn.Module):
         # Compute features
         mag = mx.sqrt(spec_real**2 + spec_imag**2 + 1e-8)
         feat_erb = mx.matmul(mag, self._erb_fb)
-        feat_spec = mx.stack(
-            [spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]], axis=-1
-        )
+        feat_spec = mx.stack([spec_real[:, :, : self.p.nb_df], spec_imag[:, :, : self.p.nb_df]], axis=-1)
 
         # Forward pass (inference mode - no dropout)
         spec_out = self((spec_real, spec_imag), feat_erb, feat_spec, training=False)
@@ -1457,9 +1444,7 @@ class StreamingState:
         self.hop_length = hop_length
 
         # Mamba state: list of (batch, d_inner, d_state) for each layer
-        self.mamba_states: Optional[mx.array] = (
-            None  # Will be (num_layers, batch, d_inner, d_state)
-        )
+        self.mamba_states: Optional[mx.array] = None  # Will be (num_layers, batch, d_inner, d_state)
 
         # STFT input buffer - stores last n_fft - hop_length samples
         self.input_buffer = mx.zeros((batch_size, n_fft - hop_length))
@@ -1550,9 +1535,7 @@ class StreamingDfNet4(nn.Module):
             num_layers=self.num_backbone_layers,
         )
 
-    def _stft_frame(
-        self, audio_frame: mx.array, state: StreamingState
-    ) -> Tuple[mx.array, mx.array]:
+    def _stft_frame(self, audio_frame: mx.array, state: StreamingState) -> Tuple[mx.array, mx.array]:
         """Compute STFT for a single frame.
 
         Args:
@@ -1612,17 +1595,13 @@ class StreamingDfNet4(nn.Module):
 
         # Shift buffer: keep samples that will overlap with next frame
         new_buffer = mx.zeros_like(state.output_buffer)
-        new_buffer = new_buffer.at[:, : self.n_fft - self.hop_length].add(
-            output[:, self.hop_length :]
-        )
+        new_buffer = new_buffer.at[:, : self.n_fft - self.hop_length].add(output[:, self.hop_length :])
         state.output_buffer = new_buffer
 
         # Update window sum for normalization
         win_sq = self.window * self.window
         new_window_sum = mx.zeros_like(state.window_sum)
-        new_window_sum = new_window_sum.at[: self.n_fft - self.hop_length].add(
-            state.window_sum[self.hop_length :]
-        )
+        new_window_sum = new_window_sum.at[: self.n_fft - self.hop_length].add(state.window_sum[self.hop_length :])
         new_window_sum = new_window_sum + win_sq
         state.window_sum = new_window_sum
 
@@ -1821,9 +1800,7 @@ class StreamingDfNet4(nn.Module):
             ready_samples = output[:, :hop_length]
 
             new_output_buffer = mx.zeros_like(output_buffer)
-            new_output_buffer = new_output_buffer.at[:, : n_fft - hop_length].add(
-                output[:, hop_length:]
-            )
+            new_output_buffer = new_output_buffer.at[:, : n_fft - hop_length].add(output[:, hop_length:])
 
             win_sq = window * window
             new_window_sum = mx.zeros_like(window_sum)
