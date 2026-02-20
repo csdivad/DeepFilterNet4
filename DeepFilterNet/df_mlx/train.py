@@ -893,43 +893,22 @@ class Trainer:
     def save_checkpoint(self, filename: str):
         """Save model checkpoint atomically.
 
-        Uses temp files + atomic rename to prevent corruption on crash.
+        Delegates to the module-level :func:`save_checkpoint`.
 
         Args:
             filename: Checkpoint filename
         """
-        from mlx.utils import tree_flatten
-
-        path = self.checkpoint_dir / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
-
-        params = self.model.parameters()
-        flat_params = tree_flatten(params)
-        weights = {k: v for k, v in flat_params}
-        if weights:
-            mx.eval(*weights.values())
-        mx.save_safetensors(str(tmp_weights), weights)
-
-        state_path = path.with_suffix(".json")
-        tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
-        state = {
-            "step": self.step,
-            "best_loss": self.best_loss,
-            "config": {
+        path = save_checkpoint(
+            model=self.model,
+            path=self.checkpoint_dir / filename,
+            step=self.step,
+            best_loss=self.best_loss,
+            config={
                 "learning_rate": self.config.learning_rate,
                 "weight_decay": self.config.weight_decay,
                 "warmup_steps": self.config.warmup_steps,
             },
-        }
-        with open(tmp_state, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-
-        tmp_weights.replace(path)
-        tmp_state.replace(state_path)
-
+        )
         print(f"Saved checkpoint: {path}")
 
     def load_checkpoint(self, path: str | Path):

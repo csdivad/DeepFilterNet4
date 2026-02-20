@@ -55,6 +55,21 @@
 			"label": "Commit and push audit report",
 			"type": "shell",
 			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'docs: add Pass 7 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
+		},
+		{
+			"label": "DUP-8 baseline tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --tb=short 2>&1 | tee /tmp/dfn_dup8_baseline.txt"
+		},
+		{
+			"label": "DUP-8.1 tests",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --tb=short 2>&1 | tee /tmp/dfn_dup8_test.txt"
+		},
+		{
+			"label": "Commit DUP-8.1",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git diff --cached --stat && git commit -m 'refactor(train): delegate Trainer.save_checkpoint to module-level save_checkpoint (DUP-8.1)' --no-verify --no-gpg-sign 2>&1"
 		}
 	]
 }
