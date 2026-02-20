@@ -399,13 +399,15 @@ class DeepFilterNet4MLXEnhancer:
             checkpoint_path: Path to checkpoint file
 
         Returns:
-            Backbone type: 'gru' or 'mamba' (the only valid BackboneParams values)
+            Backbone type: 'attention', 'gru', or 'mamba'
         """
         import mlx.core as mx
 
         weights = mx.load(checkpoint_path)
         weight_keys = set(weights.keys())
 
+        if any("attention_layers" in k for k in weight_keys):
+            return "attention"
         if any("gru" in k.lower() for k in weight_keys):
             return "gru"
         return "mamba"
