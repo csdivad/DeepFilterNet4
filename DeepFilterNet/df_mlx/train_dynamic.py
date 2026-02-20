@@ -1223,7 +1223,7 @@ def train(
             _gen_fn = mx.checkpoint(model)
         else:
             _gen_fn = model
-        out = _gen_fn(noisy_spec, feat_erb, feat_spec)
+        out = _gen_fn(noisy_spec, feat_erb, feat_spec, return_vad=True)
 
         # Unpack model output (Option C: Multi-task VAD head)
         if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
@@ -1425,7 +1425,7 @@ def train(
                 _gen_fn = mx.checkpoint(model)
             else:
                 _gen_fn = model
-            out = _gen_fn(noisy_spec, feat_erb, feat_spec)
+            out = _gen_fn(noisy_spec, feat_erb, feat_spec, return_vad=True)
 
             # Unpack model output (Option C: Multi-task VAD head)
             if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
@@ -3404,7 +3404,8 @@ def train(
                     _, disc_loss_fn = gan_loss_fns
 
                     if pred_spec_for_logging is None:
-                        pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
+                        pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        # pred_spec is (real, imag) — no return_vad needed here
                         pred_spec = (
                             mx.stop_gradient(pred_spec[0]),
                             mx.stop_gradient(pred_spec[1]),

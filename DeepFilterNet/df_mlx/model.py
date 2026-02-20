@@ -1666,6 +1666,12 @@ class StreamingDfNet4(nn.Module):
         # Apply post-filter
         spec_out = model._apply_post_filter(spec_out, spec)
 
+        # Apply VAD gating (inference-only, matches DfNet4.__call__ behavior)
+        vad_prob = model.vad_head(emb)
+        vad_gate = mx.maximum(vad_prob, 0.01)
+        spec_out_real, spec_out_imag = spec_out
+        spec_out = (spec_out_real * vad_gate, spec_out_imag * vad_gate)
+
         return spec_out, new_state
 
     def _backbone_with_state(
@@ -1727,6 +1733,7 @@ class StreamingDfNet4(nn.Module):
         backbone = model.backbone
         erb_decoder = model.erb_decoder
         df_decoder = model.df_decoder
+        vad_head = model.vad_head
 
         @mx.compile
         def compiled_frame(audio_frame, input_buffer, output_buffer, window_sum, mamba_states):
@@ -1788,6 +1795,11 @@ class StreamingDfNet4(nn.Module):
                 spec_out = model._apply_complex_gain((masked_real, masked_imag), df_out)
 
             spec_out = model._apply_post_filter(spec_out, (spec_real, spec_imag))
+
+            # --- VAD gating (matches DfNet4.__call__ inference behavior) ---
+            vad_prob = vad_head(emb_out)
+            vad_gate = mx.maximum(vad_prob, 0.01)
+            spec_out = (spec_out[0] * vad_gate, spec_out[1] * vad_gate)
 
             # --- iSTFT ---
             sr = mx.squeeze(spec_out[0], axis=1)
