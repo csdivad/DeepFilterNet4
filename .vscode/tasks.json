@@ -75,6 +75,11 @@
 			"label": "Commit report and push",
 			"type": "shell",
 			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git add -A && git commit -m 'docs: add Pass 8 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
+		},
+		{
+			"label": "Verify state",
+			"type": "shell",
+			"command": "cd /Users/andrew/zRepos/DeepFilterNet && git log --oneline -3 && echo '---' && git status --short"
 		}
 	]
 }
