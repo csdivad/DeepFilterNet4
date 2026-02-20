@@ -230,24 +230,20 @@ $$L_{music} = \text{mean}\!\bigl(\lvert\log(1{+}\lvert\hat{S}\rvert)\rvert \cdot
 
 ---
 
-### 2.8 VAD Loss
+### 2.8 VAD Loss (Multi-task Head)
 
 | | |
 |---|---|
-| **Source** | [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py#L152-L199) — `_compute_vad_loss()` |
-| **Measures** | Decrease in Voice Activity Detection probability after enhancement. |
+| **Source** | [df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py) — `loss_fn()` |
+| **Measures** | Binary Cross-Entropy (BCE) between the model's predicted VAD probability and the energy-based proxy VAD target ($p_{ref}$). |
 
 **Formula:**
 
-$$L_{vad} = \text{mean}\!\bigl(\max(p_{ref} - p_{out} - \text{margin},\; 0) \cdot \text{gate}\bigr)$$
+$$L_{vad} = \text{BCE}(p_{vad}, p_{ref}) = -\text{mean}\!\bigl(p_{ref} \log(p_{vad} + \varepsilon) + (1 - p_{ref}) \log(1 - p_{vad} + \varepsilon)\bigr)$$
 
 where:
-
-$$\text{gate} = \text{speech\_gate} \times \text{snr\_gate}$$
-
-- $\text{speech\_gate} = \text{clip}\!\bigl(\frac{p_{ref} - \text{threshold}}{1 - \text{threshold}},\; 0, 1\bigr)$ — high when reference has speech.
-- $\text{snr\_gate} = \sigma\!\bigl(\frac{\text{SNR} - \text{snr\_gate\_db}}{\text{snr\_gate\_width}}\bigr)$ — sigmoid on SNR.
-- $p_{ref}, p_{out}$ computed from z-scored speech-band log-energy.
+- $p_{vad}$ is the output of the model's `VadHead` (sigmoid activation).
+- $p_{ref}$ is the energy-based proxy VAD target computed from the clean reference signal.
 
 **Config options:**
 
@@ -255,18 +251,12 @@ $$\text{gate} = \text{speech\_gate} \times \text{snr\_gate}$$
 |-----------|-------------|
 | `use_vad_loss` | `bool` — enable/disable |
 | `vad_weight` | Multiplier in total loss |
-| `vad_threshold` | Speech gate activation threshold |
-| `vad_margin` | Allowed drop in VAD probability before penalty |
-| `vad_snr_gate_db` | SNR centre for sigmoid gate |
-| `vad_snr_gate_width` | SNR sigmoid width |
-| `vad_z_threshold` | Z-score threshold for VAD probability |
-| `vad_z_slope` | Z-score sigmoid slope |
 
 **Details:**
-- Only penalises VAD **decrease** — no penalty if output has more voice activity.
-- Gate is `stop_gradient` — non-differentiable weight.
+- The VAD head is trained as a multi-task objective alongside the main enhancement task.
+- The predicted $p_{vad}$ is used during inference for soft-gating the output spectrum to suppress non-speech regions.
 
-**Effect of weight change:** Increasing makes the model more cautious about suppressing speech; decreasing allows more aggressive noise reduction.
+**Effect of weight change:** Increasing forces the model to learn better speech presence detection; decreasing focuses the model more on spectral enhancement.
 
 ---
 
