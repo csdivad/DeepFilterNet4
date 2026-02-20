@@ -502,7 +502,7 @@ def train(
     # Determine FP16 setting
     if use_fp16 is None:
         use_fp16 = hw_config.use_fp16
-    print(f"  Mixed precision (FP16): {'enabled' if use_fp16 else 'disabled'}")
+    print(f"  Mixed precision (BF16): {'enabled' if use_fp16 else 'disabled'}")
 
     # Print hardware diagnostics in verbose mode
     if verbose:
@@ -3007,14 +3007,16 @@ def train(
                 debugger.check("batch.feat_spec", feat_spec, debug_ctx)
                 debugger.check("batch.snr", snr, debug_ctx)
 
-            # Convert to FP16 if enabled (mixed precision training)
+            # Convert to BF16 if enabled (mixed precision training)
+            # BF16 has the same exponent range as FP32 (8 bits), eliminating
+            # the gradient overflow/underflow NaN issues seen with FP16.
             if use_fp16:
-                noisy_real = noisy_real.astype(mx.float16)
-                noisy_imag = noisy_imag.astype(mx.float16)
-                clean_real = clean_real.astype(mx.float16)
-                clean_imag = clean_imag.astype(mx.float16)
-                feat_erb = feat_erb.astype(mx.float16)
-                feat_spec = feat_spec.astype(mx.float16)
+                noisy_real = noisy_real.astype(mx.bfloat16)
+                noisy_imag = noisy_imag.astype(mx.bfloat16)
+                clean_real = clean_real.astype(mx.bfloat16)
+                clean_imag = clean_imag.astype(mx.bfloat16)
+                feat_erb = feat_erb.astype(mx.bfloat16)
+                feat_spec = feat_spec.astype(mx.bfloat16)
 
             current_batch_size = noisy_real.shape[0]
 
@@ -3086,7 +3088,7 @@ def train(
                     clean_real,
                     batch_size,
                     check_dtype=use_fp16,
-                    expected_dtype=mx.float16 if use_fp16 else mx.float32,
+                    expected_dtype=mx.bfloat16 if use_fp16 else mx.float32,
                 )
                 should_sync = (batch_idx + 1) % epoch_eval_frequency == 0
 

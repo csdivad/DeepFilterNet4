@@ -100,11 +100,11 @@ def _gan_waveform_view(wav: mx.array, *, use_fp16: bool) -> mx.array:
     """Return GAN discriminator waveform view in the desired precision.
 
     GAN discriminator activations are a major memory contributor when adversarial
-    training activates. Keeping this path in model precision (FP16 when enabled)
+    training activates. Keeping this path in model precision (BF16 when enabled)
     reduces peak memory while MRSTFT can still run in FP32 for stability.
     """
-    if use_fp16 and wav.dtype != mx.float16:
-        return wav.astype(mx.float16)
+    if use_fp16 and wav.dtype != mx.bfloat16:
+        return wav.astype(mx.bfloat16)
     return wav
 
 

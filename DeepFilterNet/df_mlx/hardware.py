@@ -228,7 +228,8 @@ def _build_config_for_profile(profile: HardwareProfile) -> HardwareConfig:
     else:
         config.prefetch_batches = 16
 
-    # FP16 is generally stable on Apple Silicon
+    # FP16/BF16 — BF16 is used for mixed precision on Apple Silicon
+    # (same exponent range as FP32, avoids gradient overflow)
     config.use_fp16 = True
 
     return config

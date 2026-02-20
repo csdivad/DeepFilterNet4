@@ -231,12 +231,12 @@ def main():
         "--fp16",
         action="store_true",
         default=None,
-        help="Enable FP16 (half-precision) training for faster performance",
+        help="Enable mixed-precision training (BF16) for faster performance",
     )
     parser.add_argument(
         "--no-fp16",
         action="store_true",
-        help="Disable FP16 training (use FP32 for full precision)",
+        help="Disable mixed-precision training (use FP32 for full precision)",
     )
     parser.add_argument(
         "--grad-accumulation-steps",

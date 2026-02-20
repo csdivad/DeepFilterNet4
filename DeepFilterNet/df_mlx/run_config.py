@@ -370,11 +370,11 @@ class TrainingConfig:
     )
     fp16: bool | None = cfg_field(
         None,
-        help="Enable FP16 (true/false) or 'auto' for hardware default",
+        help="Enable reduced-precision training (BF16). True/false or 'auto' for hardware default",
         normalize=_normalize_fp16,
         none_sentinel="auto",
         choices=["auto", True, False],
-        notes="If set to 'auto', hardware defaults determine FP16 usage.",
+        notes="If set to 'auto', hardware defaults determine mixed-precision usage. Uses BF16 internally.",
     )
     seed: int | None = cfg_field(
         None,
