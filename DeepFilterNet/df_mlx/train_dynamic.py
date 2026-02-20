@@ -1227,10 +1227,10 @@ def train(
 
         # Unpack model output (Option C: Multi-task VAD head)
         if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-            spec_out, vad_prob = out
+            spec_out, vad_logits = out
         else:
             spec_out = out
-            vad_prob = None
+            vad_logits = None
 
         spec_loss = spectral_loss(spec_out, target_spec)
         total_loss = spec_loss
@@ -1345,18 +1345,12 @@ def train(
                 )
             total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
 
-            # Option C: Multi-task VAD head BCE loss
-            if vad_prob is not None:
-                # p_ref is the energy-based VAD proxy [B, T]
-                # vad_prob is the model's VAD prediction [B, T, 1]
+            # Option C: Multi-task VAD head BCE loss (logits path)
+            if vad_logits is not None:
                 p_ref_expanded = mx.expand_dims(p_ref, axis=-1)
-                # BCE loss: - (y * log(p) + (1-y) * log(1-p))
-                bce_loss = -(
-                    p_ref_expanded * mx.log(vad_prob + 1e-7) + (1.0 - p_ref_expanded) * mx.log(1.0 - vad_prob + 1e-7)
+                vad_head_loss = nn.losses.binary_cross_entropy(
+                    vad_logits, p_ref_expanded, with_logits=True, reduction="mean"
                 )
-                # Average over time and batch
-                vad_head_loss = mx.mean(bce_loss)
-                # Add to total loss (using vad_weight for now, could be a separate weight)
                 total_loss = total_loss + vad_weight * vad_head_loss
 
         if use_vad_train_reg:
@@ -1429,10 +1423,10 @@ def train(
 
             # Unpack model output (Option C: Multi-task VAD head)
             if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-                spec_out, vad_prob = out
+                spec_out, vad_logits = out
             else:
                 spec_out = out
-                vad_prob = None
+                vad_logits = None
 
             spec_loss = spectral_loss(spec_out, target_spec)
             total_loss = spec_loss
@@ -1549,14 +1543,12 @@ def train(
                     )
                 total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
 
-                # Option C: Multi-task VAD head BCE loss
-                if vad_prob is not None:
+                # Option C: Multi-task VAD head BCE loss (logits path)
+                if vad_logits is not None:
                     p_ref_expanded = mx.expand_dims(p_ref, axis=-1)
-                    bce_loss = -(
-                        p_ref_expanded * mx.log(vad_prob + 1e-7)
-                        + (1.0 - p_ref_expanded) * mx.log(1.0 - vad_prob + 1e-7)
+                    vad_head_loss = nn.losses.binary_cross_entropy(
+                        vad_logits, p_ref_expanded, with_logits=True, reduction="mean"
                     )
-                    vad_head_loss = mx.mean(bce_loss)
                     total_loss = total_loss + vad_weight * vad_head_loss
 
             if use_vad_train_reg:
@@ -1615,15 +1607,15 @@ def train(
 
         out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
         if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-            spec_out, vad_prob = out
+            spec_out, vad_logits = out
         else:
             spec_out = out
-            vad_prob = None
+            vad_logits = None
 
         _diag_check("model.out_real", spec_out[0])
         _diag_check("model.out_imag", spec_out[1])
-        if vad_prob is not None:
-            _diag_check("model.vad_prob", vad_prob)
+        if vad_logits is not None:
+            _diag_check("model.vad_logits", vad_logits)
 
         spec_loss = spectral_loss(spec_out, (clean_real, clean_imag))
         _diag_check("spec_loss", spec_loss)
@@ -2140,16 +2132,16 @@ def train(
 
             out = model(noisy_spec, feat_erb, feat_spec, return_vad=True)
             if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-                spec_out, vad_prob = out
+                spec_out, vad_logits = out
             else:
                 spec_out = out
-                vad_prob = None
+                vad_logits = None
 
             if debugger is not None:
                 debugger.check("model.out_real", spec_out[0], debug_ctx)
                 debugger.check("model.out_imag", spec_out[1], debug_ctx)
-                if vad_prob is not None:
-                    debugger.check("model.vad_prob", vad_prob, debug_ctx)
+                if vad_logits is not None:
+                    debugger.check("model.vad_logits", vad_logits, debug_ctx)
             spec_loss = spectral_loss(spec_out, target_spec)
             mrstft_loss = _SCALAR_ZERO
             if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
@@ -2323,14 +2315,12 @@ def train(
             if use_vad_loss:
                 loss = loss + epoch_vad_loss_weight * vad_loss + epoch_vad_speech_loss_weight * speech_loss
 
-                # Option C: Multi-task VAD head BCE loss
-                if vad_prob is not None:
+                # Option C: Multi-task VAD head BCE loss (logits path)
+                if vad_logits is not None:
                     p_ref_expanded = mx.expand_dims(p_ref, axis=-1)
-                    bce_loss = -(
-                        p_ref_expanded * mx.log(vad_prob + 1e-7)
-                        + (1.0 - p_ref_expanded) * mx.log(1.0 - vad_prob + 1e-7)
+                    vad_head_loss = nn.losses.binary_cross_entropy(
+                        vad_logits, p_ref_expanded, with_logits=True, reduction="mean"
                     )
-                    vad_head_loss = mx.mean(bce_loss)
                     loss = loss + epoch_vad_loss_weight * vad_head_loss
 
             residual = mx.mean((spec_out[0] - clean_real) ** 2 + (spec_out[1] - clean_imag) ** 2)
@@ -3593,7 +3583,7 @@ def train(
                     if out is None:
                         out = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
                         if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
-                            spec_out, _vad_prob = out
+                            spec_out, _vad_logits = out
                         else:
                             spec_out = out
                         out = (

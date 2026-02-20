@@ -199,12 +199,13 @@ class VadHead(nn.Module):
         super().__init__()
         self.p = p
 
-        # Simple MLP for VAD prediction
+        # Simple MLP for VAD prediction — returns raw logits.
+        # Sigmoid is applied downstream: in inference gating and via
+        # binary_cross_entropy(with_logits=True) during training.
         self.mlp = nn.Sequential(
             nn.Linear(p.emb_hidden_dim, p.emb_hidden_dim // 2),
             nn.GELU(),
             nn.Linear(p.emb_hidden_dim // 2, 1),
-            nn.Sigmoid(),
         )
 
     def __call__(self, emb: mx.array) -> mx.array:
@@ -214,7 +215,7 @@ class VadHead(nn.Module):
             emb: Backbone embedding (batch, time, emb_hidden_dim)
 
         Returns:
-            VAD probability (batch, time, 1)
+            VAD logits (batch, time, 1) — apply sigmoid for probabilities
         """
         return self.mlp(emb)
 
@@ -1185,10 +1186,10 @@ class DfNet4(nn.Module):
             feat_erb: ERB features (batch, time, erb_bands)
             feat_spec: DF features (batch, time, df_bins, 2)
             training: Whether in training mode (enables LSNR dropout)
-            return_vad: Whether to return the VAD probability
+            return_vad: Whether to return the VAD logits
 
         Returns:
-            Enhanced spectrum as (real, imag), or tuple of (spectrum, vad_prob) if return_vad=True
+            Enhanced spectrum as (real, imag), or tuple of (spectrum, vad_logits) if return_vad=True
         """
         spec_real, spec_imag = spec
         # Shape is (batch, time, freq) - used implicitly in operations below
@@ -1216,8 +1217,8 @@ class DfNet4(nn.Module):
         # Mamba backbone
         emb, _ = self.backbone(emb)
 
-        # VAD prediction
-        vad_prob = self.vad_head(emb)
+        # VAD prediction (logits — sigmoid deferred to where needed)
+        vad_logits = self.vad_head(emb)
 
         # Decode ERB mask
         erb_mask = self.erb_decoder(emb)  # (batch, time, nb_erb)
@@ -1250,8 +1251,7 @@ class DfNet4(nn.Module):
         # Apply VAD gating during inference
         if not training:
             # Soft gate with a -40dB floor (0.01)
-            vad_gate = mx.maximum(vad_prob, 0.01)
-            # vad_prob is (batch, time, 1), spec_out is (batch, time, freq)
+            vad_gate = mx.maximum(mx.sigmoid(vad_logits), 0.01)
             spec_out_real, spec_out_imag = spec_out
             spec_out = (spec_out_real * vad_gate, spec_out_imag * vad_gate)
 
@@ -1265,7 +1265,7 @@ class DfNet4(nn.Module):
             spec_out = (spec_out_real, spec_out_imag)
 
         if return_vad:
-            return spec_out, vad_prob
+            return spec_out, vad_logits
         return spec_out
 
     def forward_with_lsnr(
@@ -1667,8 +1667,8 @@ class StreamingDfNet4(nn.Module):
         spec_out = model._apply_post_filter(spec_out, spec)
 
         # Apply VAD gating (inference-only, matches DfNet4.__call__ behavior)
-        vad_prob = model.vad_head(emb)
-        vad_gate = mx.maximum(vad_prob, 0.01)
+        vad_logits = model.vad_head(emb)
+        vad_gate = mx.maximum(mx.sigmoid(vad_logits), 0.01)
         spec_out_real, spec_out_imag = spec_out
         spec_out = (spec_out_real * vad_gate, spec_out_imag * vad_gate)
 
@@ -1797,8 +1797,8 @@ class StreamingDfNet4(nn.Module):
             spec_out = model._apply_post_filter(spec_out, (spec_real, spec_imag))
 
             # --- VAD gating (matches DfNet4.__call__ inference behavior) ---
-            vad_prob = vad_head(emb_out)
-            vad_gate = mx.maximum(vad_prob, 0.01)
+            vad_logits = vad_head(emb_out)
+            vad_gate = mx.maximum(mx.sigmoid(vad_logits), 0.01)
             spec_out = (spec_out[0] * vad_gate, spec_out[1] * vad_gate)
 
             # --- iSTFT ---

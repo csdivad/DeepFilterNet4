@@ -721,7 +721,7 @@ class TestFullModel:
         assert out_real.shape == spec_real.shape
         assert not mx.any(mx.isnan(out_real))
         assert vad_prob.shape == (batch, time, 1)
-        assert mx.all(vad_prob >= 0.0) and mx.all(vad_prob <= 1.0)
+        assert mx.all(mx.isfinite(vad_prob))  # logits: any finite value is valid
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
     def test_model_batch_sizes(self, batch_size):
