@@ -47,7 +47,7 @@ prefetch_size = 16           # up from 12: better data pipeline overlap for bs=1
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_optimized"
+checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_optimized_vad_weighted"
 save_strategy = "epoch"
 save_total_limit = 3        # keep last 3 epoch/step checkpoints; best.safetensors is preserved separately
 validate_every = 1
@@ -64,7 +64,7 @@ variant = "full"
 dynamic_loss = "pipeline_awesome"
 
 [loss.awesome]
-loss_weight = 0.5
+loss_weight = 1.2
 mask_sharpness = 7.0
 warmup_steps = 2500
 proxy_enabled = false
@@ -103,10 +103,10 @@ eval_frequency = 6           # benchmarked sweet spot: EF=6 gives best samp/s
                              # Safe range: 4-10. Use 4 if graph accumulation causes OOM.
 
 [vad]
-loss_weight = 0.06
+loss_weight = 0.8
 threshold = 0.58
 margin = 0.05
-speech_loss_weight = 0.02
+speech_loss_weight = 0.6
 warmup_epochs = 5
 snr_gate_db = -12.0
 snr_gate_width = 6.0
