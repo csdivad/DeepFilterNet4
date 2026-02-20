@@ -122,17 +122,18 @@ Major innovations:
 │   │  └──────────────────────────────────────────────┘   │          │
 │   └────────────────────────┬────────────────────────────┘          │
 │                            │                                        │
-│              ┌─────────────┴─────────────┐                         │
-│              ▼                           ▼                         │
-│   ┌──────────────────┐        ┌──────────────────┐                 │
-│   │   ERB Decoder    │        │    DF Decoder    │                 │
-│   │  (Gain Masks)    │        │(Filter Coeffs)   │                 │
-│   └────────┬─────────┘        └────────┬─────────┘                 │
-│            │                           │                           │
-│            ▼                           ▼                           │
+│              ┌─────────────┼─────────────┐                         │
+│              ▼             ▼             ▼                         │
+│   ┌──────────────────┐┌──────────┐┌──────────────────┐             │
+│   │   ERB Decoder    ││ VAD Head ││    DF Decoder    │             │
+│   │  (Gain Masks)    ││(Speech P)││(Filter Coeffs)   │             │
+│   └────────┬─────────┘└────┬─────┘└────────┬─────────┘             │
+│            │               │               │                       │
+│            ▼               ▼               ▼                       │
 │   ┌──────────────────────────────────────────────────┐             │
 │   │              Apply Deep Filtering                 │             │
 │   │   enhanced = gains ⊙ input + DF(input, coeffs)   │             │
+│   │   output = max(vad_prob, 0.01) * enhanced        │             │
 │   └────────────────────────┬─────────────────────────┘             │
 │                            │                                        │
 │                            ▼                                        │
@@ -292,6 +293,26 @@ Linear (256 → nb_erb)
     │
     ▼
 Sigmoid → Gains (B, T, nb_erb) ∈ [0, 1]
+```
+
+#### VAD Head (Voice Activity Detection)
+
+Estimates the probability of speech presence in the current frame. This is used for soft-gating the output spectrum during inference to suppress non-speech regions.
+
+```python
+Mamba Output (B, T, d_model)
+    │
+    ▼
+Linear (d_model → 64)
+    │
+    ▼
+ReLU
+    │
+    ▼
+Linear (64 → 1)
+    │
+    ▼
+Sigmoid → VAD Probability (B, T, 1) ∈ [0, 1]
 ```
 
 #### DF Decoder (Filter Coefficient Estimation)
