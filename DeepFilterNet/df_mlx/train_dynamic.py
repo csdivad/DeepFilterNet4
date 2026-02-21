@@ -2748,8 +2748,13 @@ def train(
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
     train_mode: Literal["COMPILED", "EAGER"] | None = None
-    active_stage_name = "default"
-    active_stage_index = 0
+    
+    # Initialize active stage based on the last completed epoch to prevent
+    # incorrectly resetting best_valid_loss when resuming training
+    initial_stage = _resolve_pipeline_stage(max(0, last_completed_epoch), pipeline_stage_defs)
+    active_stage_name = str(initial_stage["name"])
+    active_stage_index = int(initial_stage["index"])
+    
     epoch_awesome_loss_weight = base_awesome_loss_weight
     epoch_vad_loss_weight = base_vad_loss_weight
     epoch_vad_speech_loss_weight = base_vad_speech_loss_weight
