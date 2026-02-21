@@ -2769,7 +2769,18 @@ def train(
         final_epoch = epoch
 
         active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
-        active_stage_index = int(active_stage["index"])
+        new_stage_index = int(active_stage["index"])
+
+        # Reset best_valid_loss when entering a new pipeline stage
+        # because higher auxiliary weights will artificially inflate the total loss
+        if new_stage_index != active_stage_index and epoch > 0:
+            print(
+                f"\n🔄 Pipeline stage changed ({active_stage_index} -> {new_stage_index}). Resetting best_valid_loss."
+            )
+            best_valid_loss = float("inf")
+            epochs_without_improvement = 0
+
+        active_stage_index = new_stage_index
         active_stage_name = str(active_stage["name"])
         epoch_awesome_loss_weight = float(
             active_stage["awesome_loss_weight"]
