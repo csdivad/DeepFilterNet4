@@ -1111,6 +1111,14 @@ def train(
             if ckpt_kind in _IN_PROGRESS_KINDS:
                 resume_batch_idx = resolve_resume_batch_count(state)
             best_valid_loss = state.get("best_valid_loss", float("inf"))
+
+            # Restore dynamic pipeline stages if present
+            ckpt_config = state.get("config", {})
+            if "pipeline_stages" in ckpt_config and ckpt_config["pipeline_stages"]:
+                pipeline_stage_defs.clear()
+                pipeline_stage_defs.extend(ckpt_config["pipeline_stages"])
+                print("  Restored dynamic pipeline stages from checkpoint.")
+
             print(
                 "  Resumed from: "
                 f"{resume_from} (epoch {start_epoch}, kind={ckpt_kind}, "
@@ -3192,8 +3200,7 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
-                                f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO
@@ -4232,6 +4239,20 @@ def train(
             if parts:
                 print("  Debug numerics: " + " | ".join(parts))
 
+        # ====== Early Stopping / Curriculum Advance ======
+        should_stop = False
+        if patience > 0 and epochs_without_improvement >= patience:
+            active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
+            active_idx = active_stage["index"]
+            if active_idx + 1 < len(pipeline_stage_defs):
+                next_stage = pipeline_stage_defs[active_idx + 1]
+                print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
+                print(f"Moving to next pipeline stage '{next_stage.get('name', f'stage_{active_idx+1}')}' early.")
+                next_stage["start_epoch"] = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                should_stop = True
+
         # ====== End-of-Epoch Checkpointing (authoritative completion) ======
         ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
         epoch_saved = save_checkpoint(
@@ -4270,8 +4291,7 @@ def train(
             else:
                 print("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
 
-        # ====== Early Stopping ======
-        if epochs_without_improvement >= patience:
+        if should_stop:
             print(f"\nEarly stopping after {patience} epochs without improvement")
             break
 
