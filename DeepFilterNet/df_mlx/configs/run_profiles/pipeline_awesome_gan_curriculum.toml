@@ -131,7 +131,7 @@ loss_weight = 0.8            # down from 1.2: reduces aux dominance
                              # pipeline sub-weights (speech=1.0, noise=1.0, smooth=0.3,
                              # music=1.5) are internal constants — 0.8 × 1.5 = 1.2
                              # music suppression still gets strong gradient
-mask_sharpness = 7.0         # sharp speech/noise boundary; consider 5.0 if gradient
+mask_sharpness = 5.0         # sharp speech/noise boundary; consider 5.0 if gradient
                              # oscillation observed near mask edges
 warmup_steps = 2500          # linear ramp 0→1 over ~10 epochs of global optimizer steps
 proxy_enabled = false        # uniform weighting (proxy adds complexity without clear gain)
@@ -196,7 +196,7 @@ eval_frequency = 6           # benchmarked EF=6 optimal
 loss_weight = 0.4            # down from 0.8: was 80% of spectral; now 30%
                              # still meaningful signal for VadHead training
                              # VAD accuracy target: >85% by epoch 75 (Stage 3)
-threshold = 0.58
+threshold = 0.2
 margin = 0.05
 speech_loss_weight = 0.35    # down from 0.6: 300-3400Hz band refinement loss
                              # complementary (not redundant) with full-spectrum spectral
@@ -216,7 +216,7 @@ max_seconds = 0.0
 silero_sample_rate = 16000
 
 [vad.train]
-prob = 0.05
+prob = 0.1
 every_steps = 2
 
 [metrics]
