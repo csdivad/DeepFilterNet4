@@ -478,6 +478,7 @@ def train(
         read_file_list,
     )
     from df_mlx.hardware import HardwareConfig
+    from df_mlx.hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
     from df_mlx.model import count_parameters, init_model
     from df_mlx.train import MultiResolutionSTFTLoss, WarmupCosineSchedule, spectral_loss
 
@@ -505,7 +506,8 @@ def train(
             from huggingface_hub import HfFileSystem
 
             fs = HfFileSystem()
-            hf_path = str(cache_dir)[5:]
+            normalized_cache_dir = normalize_hf_dataset_cache_dir(str(cache_dir))
+            hf_path = hf_dataset_fsspec_path(normalized_cache_dir)
             config_file = f"{hf_path}/config.json"
             if fs.exists(config_file):
                 with fs.open(config_file, "r") as f:
@@ -515,8 +517,8 @@ def train(
                 config = DatasetConfig(
                     **{k: v for k, v in data.items() if hasattr(DatasetConfig, k) or k == "cache_dir"}
                 )
-                config.cache_dir = cache_dir
-                print(f"Loaded config from HF cache: {cache_dir}")
+                config.cache_dir = normalized_cache_dir
+                print(f"Loaded config from HF cache: {normalized_cache_dir}")
             else:
                 raise ValueError(f"Cache config not found in HF repo: {config_file}")
         else:

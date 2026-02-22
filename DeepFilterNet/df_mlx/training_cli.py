@@ -6,6 +6,7 @@ import argparse
 import json
 from typing import Any
 
+from df_mlx.hf_paths import normalize_hf_dataset_cache_dir
 from df_mlx.run_config import RunConfig, set_by_path
 
 
@@ -311,7 +312,15 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
     if _flag_in_argv(["--no-vad-proxy"], argv):
         set_by_path(cfg, "loss.awesome.proxy_enabled", False)
     if _flag_in_argv(["--cache-hf"], argv):
-        set_by_path(cfg, "dataset.cache_dir", f"hf://{getattr(args, 'cache_hf')}")
+        set_by_path(
+            cfg,
+            "dataset.cache_dir",
+            (
+                normalize_hf_dataset_cache_dir(f"hf://{getattr(args, 'cache_hf')}")
+                if getattr(args, "cache_hf", None)
+                else None
+            ),
+        )
 
     for flags, path, value in overrides:
         if _flag_in_argv(flags, argv):

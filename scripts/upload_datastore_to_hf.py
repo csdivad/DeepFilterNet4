@@ -10,10 +10,15 @@ def main():
     parser.add_argument(
         "--local-dir",
         type=str,
-        default="/Users/andrew/DataDump/datasets/mlx_datastore",
+        default="./datasets/mlx_datastore",
         help="Path to the local datastore directory",
     )
-    parser.add_argument("--private", default=False, action="store_true", help="Make the HuggingFace repository private")
+    parser.add_argument(
+        "--private",
+        default=False,
+        action="store_true",
+        help="Make the HuggingFace repository private",
+    )
     args = parser.parse_args()
 
     local_path = Path(args.local_dir)

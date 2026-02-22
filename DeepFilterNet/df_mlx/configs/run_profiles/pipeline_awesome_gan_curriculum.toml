@@ -32,7 +32,7 @@
 #     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_curriculum.toml
 
 [dataset]
-cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
+cache_dir = "./datasets/mlx_datastore"
 
 [training]
 epochs = 200
@@ -56,7 +56,7 @@ prefetch_size = 16
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_curriculum"
+checkpoint_dir = "./checkpoints/gan_curriculum"
 save_strategy = "epoch"
 save_total_limit = 3
 validate_every = 1

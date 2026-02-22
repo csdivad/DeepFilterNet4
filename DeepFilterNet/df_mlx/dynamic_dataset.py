@@ -57,6 +57,7 @@ from .feature_ops import (
     create_erb_filterbank,
 )
 from .file_lists import read_file_list as _read_file_list
+from .hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
 
 # Optional mlx-data import (for MLXDataStream)
 try:
@@ -186,7 +187,7 @@ class ShardedAudioCache:
             cache_dir: Path to cache directory (containing index.json)
             category: 'speech', 'noise', or 'rir'
         """
-        self.cache_dir_str = str(cache_dir)
+        self.cache_dir_str = normalize_hf_dataset_cache_dir(str(cache_dir))
         self.is_hf = self.cache_dir_str.startswith("hf://")
         self.category = category
 
@@ -194,7 +195,7 @@ class ShardedAudioCache:
             from huggingface_hub import HfFileSystem
 
             self.fs = HfFileSystem()
-            self.hf_path = self.cache_dir_str[5:]
+            self.hf_path = hf_dataset_fsspec_path(self.cache_dir_str)
             index_path = f"{self.hf_path}/index.json"
             with self.fs.open(index_path, "r") as f:
                 all_indices = json.load(f)
@@ -221,7 +222,7 @@ class ShardedAudioCache:
     def __len__(self) -> int:
         return len(self.files)
 
-    def _get_shard(self, shard_rel_path: str) -> Any:  # Returns NpzFile
+    def _get_shard(self, shard_rel_path: str) -> Any:  # Returns npz wrapper
         """Get a shard NpzFile, loading from disk if needed.
 
         Uses lazy loading - the NpzFile object is kept open and arrays are
@@ -239,9 +240,7 @@ class ShardedAudioCache:
         # Open NpzFile lazily (arrays loaded on access, not upfront)
         if self.is_hf:
             shard_path = f"{self.hf_path}/{shard_rel_path}"
-            f = self.fs.open(shard_path, "rb")
-            npz_file = np.load(f)
-            npz_file._hf_file = f  # Keep file object alive
+            npz_file = _HFNpzShard(self.fs.open(shard_path, "rb"))
         else:
             shard_path = self.cache_dir / shard_rel_path
             npz_file = np.load(shard_path, mmap_mode="r")
@@ -252,8 +251,6 @@ class ShardedAudioCache:
                 oldest = next(iter(self._shard_access))
                 del self._shard_access[oldest]
                 old_npz = self._shard_cache.pop(oldest)
-                if hasattr(old_npz, "_hf_file"):
-                    old_npz._hf_file.close()
                 old_npz.close()
 
             self._shard_cache[shard_rel_path] = npz_file
@@ -279,8 +276,25 @@ class ShardedAudioCache:
     def clear(self) -> None:
         """Clear the shard cache."""
         with self._lock:
+            for shard in self._shard_cache.values():
+                shard.close()
             self._shard_cache.clear()
             self._shard_access.clear()
+
+
+class _HFNpzShard:
+    """Keep an HF file handle alive while lazily reading a NumPy NPZ archive."""
+
+    def __init__(self, file_obj: Any):
+        self._file_obj = file_obj
+        self._npz = np.load(file_obj)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._npz[key]
+
+    def close(self) -> None:
+        self._npz.close()
+        self._file_obj.close()
 
 
 class AudioCache:
@@ -850,6 +864,9 @@ class DynamicDataset:
 
         if self._use_cache:
             # Fast path: load from sharded NPZ cache
+            if str(config.cache_dir).startswith("hf://"):
+                config.cache_dir = normalize_hf_dataset_cache_dir(str(config.cache_dir))
+
             self.speech_cache = ShardedAudioCache(config.cache_dir, "speech")
             self.noise_cache = ShardedAudioCache(config.cache_dir, "noise")
 
@@ -858,7 +875,7 @@ class DynamicDataset:
                 from huggingface_hub import HfFileSystem
 
                 fs = HfFileSystem()
-                hf_path = str(config.cache_dir)[5:]
+                hf_path = hf_dataset_fsspec_path(str(config.cache_dir))
                 has_rir = fs.exists(f"{hf_path}/rir")
             else:
                 rir_cache_dir = Path(config.cache_dir) / "rir"
