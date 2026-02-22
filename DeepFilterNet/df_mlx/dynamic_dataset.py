@@ -50,7 +50,12 @@ from scipy import signal as scipy_signal
 from .augment_ext import biquad_filter as _ext_biquad_filter
 from .augment_ext import combine_noises as _ext_combine_noises
 from .augment_ext import mix_audio as _ext_mix_audio
-from .feature_ops import compute_df_features, compute_erb_features, compute_stft, create_erb_filterbank
+from .feature_ops import (
+    compute_df_features,
+    compute_erb_features,
+    compute_stft,
+    create_erb_filterbank,
+)
 from .file_lists import read_file_list as _read_file_list
 
 # Optional mlx-data import (for MLXDataStream)
@@ -131,7 +136,10 @@ class DatasetConfig:
     p_clipping: float = 0.0  # Probability of clipping distortion
     p_bandwidth_ext: float = 0.0  # Probability of bandwidth extension
     p_interfer_speech: float = 0.0  # Probability of interfering speaker
-    interfer_speech_snr_range: Tuple[float, float] = (-10.0, 10.0)  # dB, SNR of interferer vs target
+    interfer_speech_snr_range: Tuple[float, float] = (
+        -10.0,
+        10.0,
+    )  # dB, SNR of interferer vs target
 
     # Noise mixing
     n_noise_min: int = 2  # Minimum noises to combine
@@ -178,14 +186,24 @@ class ShardedAudioCache:
             cache_dir: Path to cache directory (containing index.json)
             category: 'speech', 'noise', or 'rir'
         """
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir_str = str(cache_dir)
+        self.is_hf = self.cache_dir_str.startswith("hf://")
         self.category = category
-        self.shard_dir = self.cache_dir / category
 
-        # Load index
-        index_path = self.cache_dir / "index.json"
-        with open(index_path) as f:
-            all_indices = json.load(f)
+        if self.is_hf:
+            from huggingface_hub import HfFileSystem
+
+            self.fs = HfFileSystem()
+            self.hf_path = self.cache_dir_str[5:]
+            index_path = f"{self.hf_path}/index.json"
+            with self.fs.open(index_path, "r") as f:
+                all_indices = json.load(f)
+        else:
+            self.cache_dir = Path(cache_dir)
+            self.shard_dir = self.cache_dir / category
+            index_path = self.cache_dir / "index.json"
+            with open(index_path) as f:
+                all_indices = json.load(f)
 
         self.index: Dict[str, Tuple[str, str]] = {}
         if category in all_indices:
@@ -219,8 +237,14 @@ class ShardedAudioCache:
                 return self._shard_cache[shard_rel_path]
 
         # Open NpzFile lazily (arrays loaded on access, not upfront)
-        shard_path = self.cache_dir / shard_rel_path
-        npz_file = np.load(shard_path, mmap_mode="r")
+        if self.is_hf:
+            shard_path = f"{self.hf_path}/{shard_rel_path}"
+            f = self.fs.open(shard_path, "rb")
+            npz_file = np.load(f)
+            npz_file._hf_file = f  # Keep file object alive
+        else:
+            shard_path = self.cache_dir / shard_rel_path
+            npz_file = np.load(shard_path, mmap_mode="r")
 
         with self._lock:
             # Evict oldest if at capacity
@@ -228,6 +252,8 @@ class ShardedAudioCache:
                 oldest = next(iter(self._shard_access))
                 del self._shard_access[oldest]
                 old_npz = self._shard_cache.pop(oldest)
+                if hasattr(old_npz, "_hf_file"):
+                    old_npz._hf_file.close()
                 old_npz.close()
 
             self._shard_cache[shard_rel_path] = npz_file
@@ -828,8 +854,17 @@ class DynamicDataset:
             self.noise_cache = ShardedAudioCache(config.cache_dir, "noise")
 
             # RIR cache is optional
-            rir_cache_dir = Path(config.cache_dir) / "rir"
-            if rir_cache_dir.exists():
+            if str(config.cache_dir).startswith("hf://"):
+                from huggingface_hub import HfFileSystem
+
+                fs = HfFileSystem()
+                hf_path = str(config.cache_dir)[5:]
+                has_rir = fs.exists(f"{hf_path}/rir")
+            else:
+                rir_cache_dir = Path(config.cache_dir) / "rir"
+                has_rir = rir_cache_dir.exists()
+
+            if has_rir:
                 self.rir_cache = ShardedAudioCache(config.cache_dir, "rir")
             else:
                 self.rir_cache = None
@@ -1000,7 +1035,8 @@ class DynamicDataset:
         # Use per-sample RNG so get_sample() remains thread-safe under prefetch workers.
         if idx < 0 or idx >= len(self._indices):
             raise IndexError(
-                f"Sample index {idx} out of range for split '{self._current_split}' " f"(size={len(self._indices)})."
+                f"Sample index {idx} out of range for split '{self._current_split}' "
+                f"(size={len(self._indices)})."
             )
 
         sample_seed = self.config.seed + self._epoch * 1000000 + idx
@@ -1016,7 +1052,9 @@ class DynamicDataset:
         if self.config.p_very_low_snr > 0 and r < self.config.p_very_low_snr:
             # Very low SNR: severely obscured speech (for whisper/distant mic training)
             snr = rng.uniform(*self.config.snr_range_very_low)
-        elif self.config.p_extreme_snr > 0 and r < (self.config.p_very_low_snr + self.config.p_extreme_snr):
+        elif self.config.p_extreme_snr > 0 and r < (
+            self.config.p_very_low_snr + self.config.p_extreme_snr
+        ):
             # Extreme SNR: near-obscured speech
             snr = rng.uniform(*self.config.snr_range_extreme)
         else:
@@ -1040,7 +1078,9 @@ class DynamicDataset:
         if self.config.rir_files and rng.random() < self.config.p_reverb:
             rir = self._load_rir(rng)
             if rir is not None:
-                speech_for_mix, combined_noise, _, _ = self.reverb.apply(speech, combined_noise, rir)
+                speech_for_mix, combined_noise, _, _ = self.reverb.apply(
+                    speech, combined_noise, rir
+                )
 
         # Apply augmentations to speech (training only)
         if self._current_split == "train":
@@ -1195,7 +1235,11 @@ class PrefetchDataLoader:
 
             def submit_pending(executor: ThreadPoolExecutor) -> None:
                 nonlocal next_submit
-                while next_submit < n_samples and len(pending) < max_pending and not stop_event.is_set():
+                while (
+                    next_submit < n_samples
+                    and len(pending) < max_pending
+                    and not stop_event.is_set()
+                ):
                     pending[next_submit] = executor.submit(self.dataset.get_sample, next_submit)
                     next_submit += 1
 
@@ -1220,7 +1264,8 @@ class PrefetchDataLoader:
                             if self.strict_failures:
                                 worker_errors.append(
                                     RuntimeError(
-                                        f"PrefetchDataLoader failed while loading sample index " f"{sample_idx}: {exc}"
+                                        f"PrefetchDataLoader failed while loading sample index "
+                                        f"{sample_idx}: {exc}"
                                     )
                                 )
                                 return
@@ -1249,7 +1294,9 @@ class PrefetchDataLoader:
 
         try:
             if self.shuffle_buffer_size > 0:
-                buf_rng = random.Random(getattr(self.dataset.config, "seed", 0) + getattr(self.dataset, "_epoch", 0))
+                buf_rng = random.Random(
+                    getattr(self.dataset.config, "seed", 0) + getattr(self.dataset, "_epoch", 0)
+                )
                 buffer: List[Dict[str, mx.array]] = []
                 while True:
                     batch = prefetch_queue.get()
@@ -1433,7 +1480,9 @@ class MLXDataStream:
             checkpoint: Optional checkpoint state for resuming
         """
         if not HAS_MLX_DATA:
-            raise ImportError("mlx-data is required for MLXDataStream. " "Install with: pip install mlx-data")
+            raise ImportError(
+                "mlx-data is required for MLXDataStream. " "Install with: pip install mlx-data"
+            )
 
         self.dataset = dataset
         self.batch_size = batch_size

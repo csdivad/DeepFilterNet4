@@ -43,6 +43,11 @@ def main():
         help="Path to pre-built audio cache (from build_audio_cache.py)",
     )
     parser.add_argument(
+        "--cache-hf",
+        type=str,
+        help="HuggingFace dataset repo ID to stream from (e.g., 'my-org/mlx_datastore')",
+    )
+    parser.add_argument(
         "--speech-list",
         type=str,
         help="Path to file containing speech file paths (one per line)",
@@ -826,7 +831,9 @@ def main():
         print(f"Warning: resume-data requested but {data_ckpt} not found")
         return None
 
-    resume_from = _resolve_resume(run_cfg.checkpoint.resume, run_cfg.checkpoint.checkpoint_dir, "resume")
+    resume_from = _resolve_resume(
+        run_cfg.checkpoint.resume, run_cfg.checkpoint.checkpoint_dir, "resume"
+    )
     resume_data_from = _resolve_resume(
         run_cfg.checkpoint.resume_data,
         run_cfg.checkpoint.checkpoint_dir,

@@ -310,6 +310,8 @@ def _apply_cli_overrides(cfg: RunConfig, args: argparse.Namespace, argv: list[st
         set_by_path(cfg, "dataloader.use_mlx_data", False)
     if _flag_in_argv(["--no-vad-proxy"], argv):
         set_by_path(cfg, "loss.awesome.proxy_enabled", False)
+    if _flag_in_argv(["--cache-hf"], argv):
+        set_by_path(cfg, "dataset.cache_dir", f"hf://{getattr(args, 'cache_hf')}")
 
     for flags, path, value in overrides:
         if _flag_in_argv(flags, argv):

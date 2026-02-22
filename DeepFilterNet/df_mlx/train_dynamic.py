@@ -510,15 +510,40 @@ def train(
 
     # Load or create config
     if cache_dir:
-        # Load config from pre-built audio cache
-        cache_path = Path(cache_dir)
-        config_file = cache_path / "config.json"
-        if config_file.exists():
-            config = DatasetConfig.from_json(str(config_file))
-            config.cache_dir = cache_dir
-            print(f"Loaded config from cache: {cache_dir}")
+        if str(cache_dir).startswith("hf://"):
+            import json
+
+            from huggingface_hub import HfFileSystem
+
+            fs = HfFileSystem()
+            hf_path = str(cache_dir)[5:]
+            config_file = f"{hf_path}/config.json"
+            if fs.exists(config_file):
+                with fs.open(config_file, "r") as f:
+                    data = json.load(f)
+                if "cache_dir" in data:
+                    data["cache_dir"] = data["cache_dir"]
+                config = DatasetConfig(
+                    **{
+                        k: v
+                        for k, v in data.items()
+                        if hasattr(DatasetConfig, k) or k == "cache_dir"
+                    }
+                )
+                config.cache_dir = cache_dir
+                print(f"Loaded config from HF cache: {cache_dir}")
+            else:
+                raise ValueError(f"Cache config not found in HF repo: {config_file}")
         else:
-            raise ValueError(f"Cache config not found: {config_file}")
+            # Load config from pre-built audio cache
+            cache_path = Path(cache_dir)
+            config_file = cache_path / "config.json"
+            if config_file.exists():
+                config = DatasetConfig.from_json(str(config_file))
+                config.cache_dir = cache_dir
+                print(f"Loaded config from cache: {cache_dir}")
+            else:
+                raise ValueError(f"Cache config not found: {config_file}")
     elif config_path:
         config = DatasetConfig.from_json(config_path)
         print(f"Loaded config from: {config_path}")
@@ -605,7 +630,9 @@ def train(
 
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
-    pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
+    pipeline_stage_defs = sorted(
+        (pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0))
+    )
     base_awesome_loss_weight = awesome_loss_weight
     base_vad_loss_weight = vad_loss_weight
     base_vad_speech_loss_weight = vad_speech_loss_weight
@@ -645,7 +672,9 @@ def train(
             from df_mlx.ops import istft
 
             mrstft_istft = partial(istft)
-            mrstft_hop_sizes = tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
+            mrstft_hop_sizes = (
+                tuple(mrstft_cfg.hop_sizes) if mrstft_cfg.hop_sizes is not None else None
+            )
             mrstft_loss_fn = MultiResolutionSTFTLoss(
                 fft_sizes=tuple(mrstft_cfg.fft_sizes),
                 hop_sizes=mrstft_hop_sizes,
@@ -688,7 +717,9 @@ def train(
         if gan_disc_type == "mpd":
             discriminator = MultiPeriodDiscriminator(periods=mpd_periods, channels=gan_mpd_channels)
         elif gan_disc_type == "msd":
-            discriminator = MultiScaleDiscriminator(num_scales=gan_msd_scales, channels=gan_msd_channels)
+            discriminator = MultiScaleDiscriminator(
+                num_scales=gan_msd_scales, channels=gan_msd_channels
+            )
         else:
             discriminator = CombinedDiscriminator(
                 mpd_periods=mpd_periods,
@@ -724,7 +755,11 @@ def train(
     use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
 
     need_band_mask = (
-        use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
+        use_vad_loss
+        or use_awesome_loss
+        or use_pipeline_awesome_loss
+        or vad_eval_enabled
+        or use_vad_train_reg
     )
     if need_band_mask:
         n_freqs = config.fft_size // 2 + 1
@@ -795,7 +830,9 @@ def train(
         print(f"  VAD SNR gate:  {vad_snr_gate_db} dB (width {vad_snr_gate_width} dB)")
         print(f"  VAD band:      {vad_band_low_hz:.0f}-{vad_band_high_hz:.0f} Hz")
     if vad_eval_enabled:
-        print(f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}")
+        print(
+            f"  VAD eval:      mode={vad_eval_mode} every={vad_eval_every} epochs batches={vad_eval_batches}"
+        )
         if vad_eval_mode == "silero":
             max_sec = vad_eval_max_seconds if vad_eval_max_seconds > 0 else "full"
             print(
@@ -805,7 +842,8 @@ def train(
             )
     if use_vad_train_reg:
         print(
-            "  VAD train:     " f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
+            "  VAD train:     "
+            f"prob={vad_train_prob} every_steps={vad_train_every_steps} (weight={vad_loss_weight})"
         )
     if pipeline_stage_defs:
         print("  Pipeline stages:")
@@ -860,7 +898,9 @@ def train(
         "mrstft_gamma": mrstft_cfg.gamma if mrstft_cfg is not None else 1.0,
         "mrstft_f_complex": mrstft_cfg.f_complex if mrstft_cfg is not None else None,
         "mrstft_fft_sizes": list(mrstft_cfg.fft_sizes) if mrstft_cfg is not None else None,
-        "mrstft_hop_sizes": (list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None),
+        "mrstft_hop_sizes": (
+            list(mrstft_cfg.hop_sizes) if (mrstft_cfg and mrstft_cfg.hop_sizes) else None
+        ),
         "gan_enabled": gan_enabled,
         "gan_start_epoch": gan_start_epoch,
         "gan_ramp_epochs": gan_ramp_epochs,
@@ -928,7 +968,11 @@ def train(
 
     debug_dump_dir = None
     if debug_numerics:
-        debug_dump_dir = Path(debug_numerics_dump_dir) if debug_numerics_dump_dir else ckpt_dir / "debug_numerics"
+        debug_dump_dir = (
+            Path(debug_numerics_dump_dir)
+            if debug_numerics_dump_dir
+            else ckpt_dir / "debug_numerics"
+        )
         debug_cfg = NumericDebugConfig(
             enabled=True,
             fail_fast=debug_numerics_fail_fast and not nan_skip_batch,
@@ -994,7 +1038,8 @@ def train(
             data_resume_progress = train_stream.get_progress()
             data_resume_source = resume_data_from
             print(
-                f"  Data checkpoint: epoch {data_resume_progress['epoch']}, " f"batch {data_resume_progress['batch']}"
+                f"  Data checkpoint: epoch {data_resume_progress['epoch']}, "
+                f"batch {data_resume_progress['batch']}"
             )
         elif data_checkpoint_path.exists():
             # Auto-resume from last data checkpoint
@@ -1063,7 +1108,9 @@ def train(
     total_steps = epochs * optimizer_steps_per_epoch
     warmup_steps = warmup_epochs * optimizer_steps_per_epoch
     vad_warmup_steps = vad_warmup_epochs * optimizer_steps_per_epoch if use_vad_loss else 0
-    awesome_warmup_steps = max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
+    awesome_warmup_steps = (
+        max(int(awesome_warmup_steps), 0) if (use_awesome_loss or use_pipeline_awesome_loss) else 0
+    )
 
     schedule = WarmupCosineSchedule(
         base_lr=learning_rate,
@@ -1147,7 +1194,9 @@ def train(
                 f"source={data_resume_source}, progress={data_resume_progress}"
             )
 
-        resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
+        resume_requires_mid_epoch = (
+            resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
+        )
         if resume_requires_mid_epoch:
             if data_epoch != start_epoch or data_batch != resume_batch_idx:
                 # The model checkpoint is authoritative for how many micro-batches
@@ -1184,7 +1233,11 @@ def train(
                 data_resume_progress = None
 
     if resume_from:
-        lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
+        lc_display = (
+            f"{last_completed_epoch + 1} (idx {last_completed_epoch})"
+            if last_completed_epoch >= 0
+            else "none"
+        )
         print(f"  last_completed_epoch: {lc_display}")
 
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
@@ -1256,11 +1309,21 @@ def train(
                 force_fp32=use_mrstft_loss,
             )
 
-        if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
+        if (
+            use_mrstft_loss
+            and mrstft_loss_fn is not None
+            and out_wav is not None
+            and clean_wav is not None
+        ):
             mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
             total_loss = total_loss + mrstft_loss
 
-        if gan_active and gan_loss_fns is not None and discriminator is not None and out_wav is not None:
+        if (
+            gan_active
+            and gan_loss_fns is not None
+            and discriminator is not None
+            and out_wav is not None
+        ):
             gen_loss_fn, _ = gan_loss_fns
             gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
             gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
@@ -1277,7 +1340,9 @@ def train(
                 else:
                     _disc_fn = discriminator
                 disc_fake, fake_feats = _disc_fn(gan_out_wav, return_features=_need_feats)
-                disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav), return_features=_need_feats)
+                disc_real, real_feats = _disc_fn(
+                    mx.stop_gradient(gan_clean_wav), return_features=_need_feats
+                )
             gan_g_loss = gen_loss_fn(disc_fake)
             total_loss = total_loss + gan_weight * gan_g_loss
             if feature_match_loss is not None and gan_fm_weight > 0:
@@ -1305,22 +1370,24 @@ def train(
             total_loss = total_loss + awesome_weight * awesome_loss
 
         if use_pipeline_awesome_loss:
-            pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_pipeline_awesome_losses(
-                noisy_real,
-                noisy_imag,
-                clean_real,
-                clean_imag,
-                spec_out[0],
-                spec_out[1],
-                snr,
-                vad_band_mask,
-                vad_band_bins,
-                awesome_mask_sharpness,
-                vad_z_threshold,
-                vad_z_slope,
-                vad_snr_gate_db,
-                vad_snr_gate_width,
-                vad_proxy_enabled,
+            pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = (
+                _compute_pipeline_awesome_losses(
+                    noisy_real,
+                    noisy_imag,
+                    clean_real,
+                    clean_imag,
+                    spec_out[0],
+                    spec_out[1],
+                    snr,
+                    vad_band_mask,
+                    vad_band_bins,
+                    awesome_mask_sharpness,
+                    vad_z_threshold,
+                    vad_z_slope,
+                    vad_snr_gate_db,
+                    vad_snr_gate_width,
+                    vad_proxy_enabled,
+                )
             )
             total_loss = total_loss + awesome_weight * pipeline_loss
 
@@ -1453,7 +1520,12 @@ def train(
                     force_fp32=use_mrstft_loss,
                 )
 
-            if use_mrstft_loss and mrstft_loss_fn is not None and out_wav is not None and clean_wav is not None:
+            if (
+                use_mrstft_loss
+                and mrstft_loss_fn is not None
+                and out_wav is not None
+                and clean_wav is not None
+            ):
                 mrstft_loss = mrstft_loss_fn(out_wav, clean_wav)
                 total_loss = total_loss + mrstft_loss
 
@@ -1463,7 +1535,9 @@ def train(
                 gan_out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
                 gan_clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
                 gan_out_wav, crop_start = _disc_crop_waveform(gan_out_wav, gan_disc_max_samples)
-                gan_clean_wav, _ = _disc_crop_waveform(gan_clean_wav, gan_disc_max_samples, crop_start)
+                gan_clean_wav, _ = _disc_crop_waveform(
+                    gan_clean_wav, gan_disc_max_samples, crop_start
+                )
                 if _compiled_disc_infer_holder[0] is not None and not gan_disc_gradient_checkpoint:
                     disc_fake, fake_feats, disc_real, real_feats = _compiled_disc_infer_holder[0](
                         gan_out_wav, gan_clean_wav
@@ -1475,7 +1549,9 @@ def train(
                     else:
                         _disc_fn = discriminator
                     disc_fake, fake_feats = _disc_fn(gan_out_wav, return_features=_need_feats)
-                    disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav), return_features=_need_feats)
+                    disc_real, real_feats = _disc_fn(
+                        mx.stop_gradient(gan_clean_wav), return_features=_need_feats
+                    )
                 gan_g_loss = gen_loss_fn(disc_fake)
                 total_loss = total_loss + gan_weight * gan_g_loss
                 if feature_match_loss is not None and gan_fm_weight > 0:
@@ -1503,22 +1579,24 @@ def train(
                 total_loss = total_loss + awesome_weight * awesome_loss
 
             if use_pipeline_awesome_loss:
-                pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = _compute_pipeline_awesome_losses(
-                    noisy_real,
-                    noisy_imag,
-                    clean_real,
-                    clean_imag,
-                    spec_out[0],
-                    spec_out[1],
-                    snr,
-                    vad_band_mask,
-                    vad_band_bins,
-                    awesome_mask_sharpness,
-                    vad_z_threshold,
-                    vad_z_slope,
-                    vad_snr_gate_db,
-                    vad_snr_gate_width,
-                    vad_proxy_enabled,
+                pipeline_loss, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = (
+                    _compute_pipeline_awesome_losses(
+                        noisy_real,
+                        noisy_imag,
+                        clean_real,
+                        clean_imag,
+                        spec_out[0],
+                        spec_out[1],
+                        snr,
+                        vad_band_mask,
+                        vad_band_bins,
+                        awesome_mask_sharpness,
+                        vad_z_threshold,
+                        vad_z_slope,
+                        vad_snr_gate_db,
+                        vad_snr_gate_width,
+                        vad_proxy_enabled,
+                    )
                 )
                 total_loss = total_loss + awesome_weight * pipeline_loss
 
@@ -1639,7 +1717,12 @@ def train(
                 force_fp32=True,
             )
             _diag_check("mrstft_loss", mrstft_loss)
-        if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
+        if (
+            gan_active
+            and gan_loss_fns is not None
+            and discriminator is not None
+            and gan_istft is not None
+        ):
             out_wav, clean_wav = specs_to_wavs(
                 spec_out,
                 (clean_real, clean_imag),
@@ -1752,7 +1835,9 @@ def train(
         if findings:
             tqdm.write(f"  [diagnose] Non-finite in: {', '.join(findings)}")
         else:
-            tqdm.write("  [diagnose] All individual components finite — NaN likely in backward pass")
+            tqdm.write(
+                "  [diagnose] All individual components finite — NaN likely in backward pass"
+            )
 
     # -- Compile-boundary shape guardrails ----------------------------------
     def _assert_compile_boundary_shapes(
@@ -1775,9 +1860,13 @@ def train(
                 f"expected={expected_batch_size}. This would trigger an expensive retrace."
             )
         if noisy.shape != clean.shape:
-            raise ValueError(f"Compile boundary shape mismatch: noisy={noisy.shape}, clean={clean.shape}")
+            raise ValueError(
+                f"Compile boundary shape mismatch: noisy={noisy.shape}, clean={clean.shape}"
+            )
         if check_dtype and noisy.dtype != expected_dtype:
-            raise ValueError(f"Compile boundary dtype mismatch: got {noisy.dtype}, " f"expected {expected_dtype}")
+            raise ValueError(
+                f"Compile boundary dtype mismatch: got {noisy.dtype}, " f"expected {expected_dtype}"
+            )
 
     _compile_retrace_count: int = 0
 
@@ -1789,7 +1878,10 @@ def train(
         """
         nonlocal _compile_retrace_count
         _compile_retrace_count += 1
-        msg = f"[RETRACE WARNING #{_compile_retrace_count}] " f"Compiled function retrace detected. {context}"
+        msg = (
+            f"[RETRACE WARNING #{_compile_retrace_count}] "
+            f"Compiled function retrace detected. {context}"
+        )
         tqdm.write(msg)
 
     # Compiled training step for performance optimization
@@ -2313,7 +2405,9 @@ def train(
 
             awesome_weight_val = epoch_awesome_loss_weight
             if (use_awesome_loss or use_pipeline_awesome_loss) and awesome_warmup_steps > 0:
-                awesome_weight_val = epoch_awesome_loss_weight * min(1.0, global_step / max(awesome_warmup_steps, 1))
+                awesome_weight_val = epoch_awesome_loss_weight * min(
+                    1.0, global_step / max(awesome_warmup_steps, 1)
+                )
 
             loss = spec_loss
             if use_mrstft_loss:
@@ -2321,7 +2415,11 @@ def train(
             if use_awesome_loss or use_pipeline_awesome_loss:
                 loss = loss + awesome_weight_val * awesome_loss
             if use_vad_loss:
-                loss = loss + epoch_vad_loss_weight * vad_loss + epoch_vad_speech_loss_weight * speech_loss
+                loss = (
+                    loss
+                    + epoch_vad_loss_weight * vad_loss
+                    + epoch_vad_speech_loss_weight * speech_loss
+                )
 
                 # Option C: Multi-task VAD head BCE loss (logits path)
                 if vad_logits is not None:
@@ -2332,7 +2430,9 @@ def train(
                     loss = loss + epoch_vad_loss_weight * vad_head_loss
 
             residual = mx.mean((spec_out[0] - clean_real) ** 2 + (spec_out[1] - clean_imag) ** 2)
-            residual_by_sample = mx.mean((spec_out[0] - clean_real) ** 2 + (spec_out[1] - clean_imag) ** 2, axis=(1, 2))
+            residual_by_sample = mx.mean(
+                (spec_out[0] - clean_real) ** 2 + (spec_out[1] - clean_imag) ** 2, axis=(1, 2)
+            )
 
             (
                 loss_val,
@@ -2404,7 +2504,9 @@ def train(
                     else:
                         musicness_np = np.zeros_like(snr_np, dtype=np.float32)
                     if musicness_np.shape[0] != snr_np.shape[0]:
-                        musicness_np = np.full_like(snr_np, float(np.mean(musicness_np)), dtype=np.float32)
+                        musicness_np = np.full_like(
+                            snr_np, float(np.mean(musicness_np)), dtype=np.float32
+                        )
                 else:
                     musicness_np = np.zeros_like(snr_np, dtype=np.float32)
 
@@ -2497,8 +2599,12 @@ def train(
                     if silero_vad is None or silero_istft is None:
                         raise RuntimeError("Silero VAD requested but not initialized")
                     vad_start = time.perf_counter()
-                    clean_wav = silero_istft(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
-                    out_wav = silero_istft(spec_out, n_fft=config.fft_size, hop_length=config.hop_size)
+                    clean_wav = silero_istft(
+                        target_spec, n_fft=config.fft_size, hop_length=config.hop_size
+                    )
+                    out_wav = silero_istft(
+                        spec_out, n_fft=config.fft_size, hop_length=config.hop_size
+                    )
                     mx.eval(clean_wav, out_wav)
                     clean_np = np.asarray(clean_wav, dtype=np.float32)
                     out_np = np.asarray(out_wav, dtype=np.float32)
@@ -2506,7 +2612,9 @@ def train(
                     p_out_batch = silero_vad.mean_probs(out_np, config.sample_rate)
                     vad_eval_p_ref += float(np.mean(p_ref_batch))
                     vad_eval_p_out += float(np.mean(p_out_batch))
-                    vad_eval_delta += float(np.mean(np.maximum(p_ref_batch - p_out_batch - vad_margin, 0.0)))
+                    vad_eval_delta += float(
+                        np.mean(np.maximum(p_ref_batch - p_out_batch - vad_margin, 0.0))
+                    )
                     vad_eval_batches_done += 1
                     vad_eval_clips += int(len(p_ref_batch))
                     vad_eval_seconds += time.perf_counter() - vad_start
@@ -2553,20 +2661,30 @@ def train(
             avg_mask_high = valid_mask_high / num_valid_batches if use_awesome_metrics else 0.0
             avg_mask_low = valid_mask_low / num_valid_batches if use_awesome_metrics else 0.0
             avg_proxy = valid_proxy_mean / num_valid_batches if use_awesome_metrics else 0.0
-            avg_speech_ratio = valid_speech_ratio / num_valid_batches if use_awesome_metrics else 0.0
+            avg_speech_ratio = (
+                valid_speech_ratio / num_valid_batches if use_awesome_metrics else 0.0
+            )
             avg_music_gate = valid_music_gate / num_valid_batches if use_awesome_metrics else 0.0
             avg_musicness = valid_musicness / num_valid_batches if use_awesome_metrics else 0.0
             avg_mod = valid_mod_energy / num_valid_batches if use_awesome_metrics else 0.0
-            avg_energy_boost = valid_energy_boost / num_valid_batches if use_awesome_metrics else 0.0
+            avg_energy_boost = (
+                valid_energy_boost / num_valid_batches if use_awesome_metrics else 0.0
+            )
             avg_snr_boost = valid_snr_boost / num_valid_batches if use_awesome_metrics else 0.0
             avg_vad_eval_p_ref = (
-                vad_eval_p_ref / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
+                vad_eval_p_ref / vad_eval_batches_done
+                if do_vad_eval and vad_eval_batches_done > 0
+                else 0.0
             )
             avg_vad_eval_p_out = (
-                vad_eval_p_out / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
+                vad_eval_p_out / vad_eval_batches_done
+                if do_vad_eval and vad_eval_batches_done > 0
+                else 0.0
             )
             avg_vad_eval_delta = (
-                vad_eval_delta / vad_eval_batches_done if do_vad_eval and vad_eval_batches_done > 0 else 0.0
+                vad_eval_delta / vad_eval_batches_done
+                if do_vad_eval and vad_eval_batches_done > 0
+                else 0.0
             )
             vad_eval_time = vad_eval_seconds
             vad_eval_clips_total = vad_eval_clips
@@ -2689,7 +2807,9 @@ def train(
         if gan_enabled and gan_start_epoch <= 0 and not experimental_compiled_gan:
             print("  GAN starts at epoch 1: training will run eager from the first epoch")
         elif gan_enabled and gan_start_epoch <= 0 and experimental_compiled_gan:
-            print("  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode")
+            print(
+                "  [EXPERIMENTAL] GAN starts at epoch 1: compiled-GAN experiment keeps compiled mode"
+            )
         elif gan_enabled and not experimental_compiled_gan:
             print(
                 "  GAN delayed start: training will use compiled mode until GAN activation "
@@ -2713,7 +2833,9 @@ def train(
             f"  Gradient accumulation: {grad_accumulation_steps} steps (effective batch = {batch_size * grad_accumulation_steps})"
         )
         if base_compiled_step_enabled:
-            print("  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated")
+            print(
+                "  Gradient accumulation: compiled forward/backward enabled; optimizer updates remain accumulated"
+            )
         else:
             print("  Gradient accumulation: compiled training step disabled")
     if nan_skip_batch:
@@ -2748,13 +2870,13 @@ def train(
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
     train_mode: Literal["COMPILED", "EAGER"] | None = None
-    
+
     # Initialize active stage based on the last completed epoch to prevent
     # incorrectly resetting best_valid_loss when resuming training
     initial_stage = _resolve_pipeline_stage(max(0, last_completed_epoch), pipeline_stage_defs)
     active_stage_name = str(initial_stage["name"])
     active_stage_index = int(initial_stage["index"])
-    
+
     epoch_awesome_loss_weight = base_awesome_loss_weight
     epoch_vad_loss_weight = base_vad_loss_weight
     epoch_vad_speech_loss_weight = base_vad_speech_loss_weight
@@ -2766,7 +2888,11 @@ def train(
     _gan_disc_grad_clip_mx = mx.array(float(gan_disc_grad_clip), dtype=mx.float32)
 
     start_display = f"{start_epoch + 1}/{epochs} (idx {start_epoch})"
-    lc_display = f"{last_completed_epoch + 1} (idx {last_completed_epoch})" if last_completed_epoch >= 0 else "none"
+    lc_display = (
+        f"{last_completed_epoch + 1} (idx {last_completed_epoch})"
+        if last_completed_epoch >= 0
+        else "none"
+    )
     print(f"Starting training at epoch {start_display} | last_completed_epoch={lc_display}")
 
     for epoch in range(start_epoch, epochs):
@@ -2793,7 +2919,9 @@ def train(
             else base_awesome_loss_weight
         )
         epoch_vad_loss_weight = float(
-            active_stage["vad_loss_weight"] if active_stage["vad_loss_weight"] is not None else base_vad_loss_weight
+            active_stage["vad_loss_weight"]
+            if active_stage["vad_loss_weight"] is not None
+            else base_vad_loss_weight
         )
         epoch_vad_speech_loss_weight = float(
             active_stage["vad_speech_loss_weight"]
@@ -2822,8 +2950,12 @@ def train(
         # ====== Curriculum Learning Schedule ======
         if curriculum_warmup_epochs > 0:
             target_p_extreme = p_extreme_snr if p_extreme_snr is not None else config.p_extreme_snr
-            target_p_very_low = p_very_low_snr if p_very_low_snr is not None else config.p_very_low_snr
-            target_p_interfer = p_interfer_speech if p_interfer_speech is not None else config.p_interfer_speech
+            target_p_very_low = (
+                p_very_low_snr if p_very_low_snr is not None else config.p_very_low_snr
+            )
+            target_p_interfer = (
+                p_interfer_speech if p_interfer_speech is not None else config.p_interfer_speech
+            )
             cur_p_extreme, cur_p_very_low, cur_p_interfer = curriculum_schedule(
                 epoch=epoch,
                 total_epochs=epochs,
@@ -2889,7 +3021,10 @@ def train(
 
         # Determine whether we're using the GAN-specific compiled step for this epoch
         use_compiled_gan_step = (
-            experimental_compiled_gan and gan_active and epoch_use_compiled_step and compiled_gan_step is not None
+            experimental_compiled_gan
+            and gan_active
+            and epoch_use_compiled_step
+            and compiled_gan_step is not None
         )
 
         if train_mode != prev_train_mode:
@@ -2903,7 +3038,10 @@ def train(
                 mode_reason = "gan_inactive"
             print(f"  TRAIN_MODE={train_mode} (epoch {epoch + 1}/{epochs}, reason={mode_reason})")
             if use_compiled_gan_step:
-                print(f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) " f"epoch={epoch + 1}")
+                print(
+                    f"  [EXPERIMENTAL] Using compiled-GAN step (gen compiled, disc eager) "
+                    f"epoch={epoch + 1}"
+                )
 
         if gan_enabled and verbose:
             print(
@@ -3019,7 +3157,9 @@ def train(
                     print(f"  Resuming epoch {epoch + 1} from micro-batch {progress['batch']}")
                 data_resume_progress = None
             elif resume_batches_for_epoch > 0:
-                train_stream.set_resume_position(epoch=epoch, batch_idx=resume_batches_for_epoch, split="train")
+                train_stream.set_resume_position(
+                    epoch=epoch, batch_idx=resume_batches_for_epoch, split="train"
+                )
                 data_iterator = train_stream
                 print(f"  Resuming epoch {epoch + 1} from micro-batch {resume_batches_for_epoch}")
             else:
@@ -3149,7 +3289,9 @@ def train(
             model_out = None
             cached_out_wav = None
             cached_clean_wav = None
-            use_compiled_step_for_batch = epoch_use_compiled_step and current_batch_size == batch_size
+            use_compiled_step_for_batch = (
+                epoch_use_compiled_step and current_batch_size == batch_size
+            )
             if epoch_use_compiled_step:
                 if not use_compiled_step_for_batch:
                     partial_batch_fallbacks += 1
@@ -3179,7 +3321,9 @@ def train(
                 # graph always includes generator adversarial loss paths.
                 active_compiled_step = compiled_gan_step if use_compiled_gan_step else compiled_step
                 active_compiled_lag = (
-                    compiled_gan_loss_and_grad_step if use_compiled_gan_step else compiled_loss_and_grad_step
+                    compiled_gan_loss_and_grad_step
+                    if use_compiled_gan_step
+                    else compiled_loss_and_grad_step
                 )
 
                 if grad_accumulation_steps > 1:
@@ -3216,7 +3360,8 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO
@@ -3354,7 +3499,8 @@ def train(
                     else:
                         did_optimizer_update = False
                         tqdm.write(
-                            "⚠️  Non-finite grads in eager path; skipping optimizer update " f"(step={global_step})"
+                            "⚠️  Non-finite grads in eager path; skipping optimizer update "
+                            f"(step={global_step})"
                         )
 
                     # Reset accumulator for next window
@@ -3384,7 +3530,8 @@ def train(
                     loss_finite = bool(loss_finite_arr)
                     if not loss_finite:
                         tqdm.write(
-                            f"⚠️  Non-finite loss detected (step={global_step}); " "grads were zeroed by clip_grad_norm"
+                            f"⚠️  Non-finite loss detected (step={global_step}); "
+                            "grads were zeroed by clip_grad_norm"
                         )
                         if debugger is not None:
                             _diagnose_nonfinite(
@@ -3411,8 +3558,15 @@ def train(
                 del model_out
 
             gan_d_loss_val = 0.0
-            if gan_active and discriminator is not None and disc_optimizer is not None and gan_loss_fns is not None:
-                do_disc_update = did_optimizer_update and ((global_step % gan_disc_update_freq) == 0)
+            if (
+                gan_active
+                and discriminator is not None
+                and disc_optimizer is not None
+                and gan_loss_fns is not None
+            ):
+                do_disc_update = did_optimizer_update and (
+                    (global_step % gan_disc_update_freq) == 0
+                )
                 if do_disc_update:
                     _, disc_loss_fn = gan_loss_fns
 
@@ -3427,7 +3581,11 @@ def train(
                         pred_spec = pred_spec_for_logging
                     pred_spec_for_logging = pred_spec
                     if gan_istft is not None:
-                        if gan_cache_gen_waveforms and cached_out_wav is not None and cached_clean_wav is not None:
+                        if (
+                            gan_cache_gen_waveforms
+                            and cached_out_wav is not None
+                            and cached_clean_wav is not None
+                        ):
                             pred_wav = cached_out_wav
                             clean_wav = cached_clean_wav
                         else:
@@ -3446,7 +3604,9 @@ def train(
 
                         # Crop to disc_max_samples (same offset for real/fake alignment)
                         clean_wav_d, d_crop = _disc_crop_waveform(clean_wav, gan_disc_max_samples)
-                        pred_wav_d, _ = _disc_crop_waveform(pred_wav, gan_disc_max_samples, crop_start=d_crop)
+                        pred_wav_d, _ = _disc_crop_waveform(
+                            pred_wav, gan_disc_max_samples, crop_start=d_crop
+                        )
 
                         if compiled_disc_update_step is not None:
                             disc_loss = compiled_disc_update_step(
@@ -3462,7 +3622,9 @@ def train(
                                 total_loss, _, _ = disc_loss_fn(real_out, fake_out)
                                 return total_loss
 
-                            disc_loss, disc_grads = nn.value_and_grad(discriminator, disc_loss_wrapper)(discriminator)
+                            disc_loss, disc_grads = nn.value_and_grad(
+                                discriminator, disc_loss_wrapper
+                            )(discriminator)
 
                             if gan_disc_grad_clip > 0:
                                 disc_grads, _ = clip_grad_norm(disc_grads, gan_disc_grad_clip)
@@ -3520,7 +3682,10 @@ def train(
 
                 # Debug mode: log per-step gradient norm for full observability
                 if sync_mode == "debug" and math.isfinite(grad_norm):
-                    tqdm.write(f"  [debug] step={global_step} grad_norm={grad_norm:.4f} " f"loss={loss_val:.6f}")
+                    tqdm.write(
+                        f"  [debug] step={global_step} grad_norm={grad_norm:.4f} "
+                        f"loss={loss_val:.6f}"
+                    )
 
                 # Profile mode: log step-level timing breakdown
                 if sync_mode == "profile":
@@ -3637,7 +3802,12 @@ def train(
                             )
                         )
                         train_mrstft_loss += mrstft_loss_val * epoch_eval_frequency
-                    if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
+                    if (
+                        gan_active
+                        and gan_loss_fns is not None
+                        and discriminator is not None
+                        and gan_istft is not None
+                    ):
                         out_wav, clean_wav = specs_to_wavs(
                             spec_out,
                             (clean_real, clean_imag),
@@ -3709,17 +3879,32 @@ def train(
                     num_vad_logs += 1
 
                     if debug_numerics:
-                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
-                        out_power_dbg = spec_out[0].astype(mx.float32) ** 2 + spec_out[1].astype(mx.float32) ** 2
-                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
-                        out_band_dbg = mx.sum(out_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        clean_power_dbg = (
+                            clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
+                        )
+                        out_power_dbg = (
+                            spec_out[0].astype(mx.float32) ** 2
+                            + spec_out[1].astype(mx.float32) ** 2
+                        )
+                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (
+                            vad_band_bins + _EPS
+                        )
+                        out_band_dbg = mx.sum(out_power_dbg * vad_band_mask, axis=-1) / (
+                            vad_band_bins + _EPS
+                        )
                         log_clean_dbg = mx.log10(clean_band_dbg + _EPS)
                         mu_dbg = mx.mean(log_clean_dbg, axis=1, keepdims=True)
-                        sigma_dbg = mx.sqrt(mx.mean((log_clean_dbg - mu_dbg) ** 2, axis=1, keepdims=True) + _EPS)
+                        sigma_dbg = mx.sqrt(
+                            mx.mean((log_clean_dbg - mu_dbg) ** 2, axis=1, keepdims=True) + _EPS
+                        )
                         z_ref_dbg = (log_clean_dbg - mu_dbg) / (sigma_dbg + _EPS)
                         z_out_dbg = (mx.log10(out_band_dbg + _EPS) - mu_dbg) / (sigma_dbg + _EPS)
-                        clip_ref = 100.0 * float(mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
-                        clip_out = 100.0 * float(mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0)))
+                        clip_ref = 100.0 * float(
+                            mx.mean(mx.where(mx.abs(z_ref_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0))
+                        )
+                        clip_out = 100.0 * float(
+                            mx.mean(mx.where(mx.abs(z_out_dbg) > _VAD_LOGIT_CLAMP, 1.0, 0.0))
+                        )
                         train_vad_clip_ref += clip_ref
                         train_vad_clip_out += clip_out
 
@@ -3817,22 +4002,41 @@ def train(
                     num_awesome_logs += 1
 
                     if debug_numerics:
-                        clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
-                        noise_real_dbg = noisy_real.astype(mx.float32) - clean_real.astype(mx.float32)
-                        noise_imag_dbg = noisy_imag.astype(mx.float32) - clean_imag.astype(mx.float32)
+                        clean_power_dbg = (
+                            clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
+                        )
+                        noise_real_dbg = noisy_real.astype(mx.float32) - clean_real.astype(
+                            mx.float32
+                        )
+                        noise_imag_dbg = noisy_imag.astype(mx.float32) - clean_imag.astype(
+                            mx.float32
+                        )
                         noise_power_dbg = noise_real_dbg**2 + noise_imag_dbg**2
-                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
-                        noise_band_dbg = mx.sum(noise_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
+                        clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (
+                            vad_band_bins + _EPS
+                        )
+                        noise_band_dbg = mx.sum(noise_power_dbg * vad_band_mask, axis=-1) / (
+                            vad_band_bins + _EPS
+                        )
                         mask_logits_raw = awesome_mask_sharpness * (
-                            _log1p_mag(clean_real, clean_imag) - _log1p_mag(noise_real_dbg, noise_imag_dbg)
+                            _log1p_mag(clean_real, clean_imag)
+                            - _log1p_mag(noise_real_dbg, noise_imag_dbg)
                         )
                         mask_logit_min = float(mx.min(mask_logits_raw))
                         mask_logit_max = float(mx.max(mask_logits_raw))
                         mask_clip_rate = 100.0 * float(
-                            mx.mean(mx.where(mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0))
+                            mx.mean(
+                                mx.where(
+                                    mx.abs(mask_logits_raw) > _AWESOME_MASK_LOGIT_CLAMP, 1.0, 0.0
+                                )
+                            )
                         )
-                        clean_eps_rate = 100.0 * float(mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0)))
-                        noise_eps_rate = 100.0 * float(mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0)))
+                        clean_eps_rate = 100.0 * float(
+                            mx.mean(mx.where(clean_band_dbg <= _EPS, 1.0, 0.0))
+                        )
+                        noise_eps_rate = 100.0 * float(
+                            mx.mean(mx.where(noise_band_dbg <= _EPS, 1.0, 0.0))
+                        )
                         train_mask_logit_min = min(train_mask_logit_min, mask_logit_min)
                         train_mask_logit_max = max(train_mask_logit_max, mask_logit_max)
                         train_mask_clip_rate += mask_clip_rate
@@ -3971,7 +4175,12 @@ def train(
                         loss=f"{loss_val:.4f}",
                         spec=(
                             f"{spec_loss_val:.4f}"
-                            if (use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or use_vad_train_reg)
+                            if (
+                                use_vad_loss
+                                or use_awesome_loss
+                                or use_pipeline_awesome_loss
+                                or use_vad_train_reg
+                            )
                             else f"{loss_val:.4f}"
                         ),
                         mrstft=f"{mrstft_loss_val:.4f}" if use_mrstft_loss else "0.0000",
@@ -3981,9 +4190,15 @@ def train(
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         awesome=(
-                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
+                            f"{awesome_loss_val:.4f}"
+                            if (use_awesome_loss or use_pipeline_awesome_loss)
+                            else "0.0000"
                         ),
-                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
+                        mask=(
+                            f"{mask_mean:.2f}"
+                            if (use_awesome_loss or use_pipeline_awesome_loss)
+                            else "0.00"
+                        ),
                         lr=f"{lr:.1e}",
                         data=f"{data_time * 1000:.0f}ms",
                         fwd=f"{fwd_time * 1000:.0f}ms",
@@ -4001,9 +4216,15 @@ def train(
                         vad=f"{vad_loss_val:.4f}" if use_vad_loss else "0.0000",
                         speech=f"{speech_loss_val:.4f}" if use_vad_loss else "0.0000",
                         awesome=(
-                            f"{awesome_loss_val:.4f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.0000"
+                            f"{awesome_loss_val:.4f}"
+                            if (use_awesome_loss or use_pipeline_awesome_loss)
+                            else "0.0000"
                         ),
-                        mask=(f"{mask_mean:.2f}" if (use_awesome_loss or use_pipeline_awesome_loss) else "0.00"),
+                        mask=(
+                            f"{mask_mean:.2f}"
+                            if (use_awesome_loss or use_pipeline_awesome_loss)
+                            else "0.00"
+                        ),
                         p_ref=f"{p_ref_mean:.2f}" if use_vad_loss else "0.00",
                         p_out=f"{p_out_mean:.2f}" if use_vad_loss else "0.00",
                         gate=f"{gate_pct:.0f}%" if use_vad_loss else "0%",
@@ -4044,7 +4265,9 @@ def train(
                 if step_saved:
                     tqdm.write(f"  📦 Checkpoint saved: {ckpt_path.name} (step {global_step})")
                 else:
-                    tqdm.write(f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})")
+                    tqdm.write(
+                        f"  ⚠️  Checkpoint save failed: {ckpt_path.name} (step {global_step})"
+                    )
 
                 # Cleanup old checkpoints if limit is set
                 if save_total_limit is not None:
@@ -4095,14 +4318,18 @@ def train(
         if verbose and num_train_batches > 0:
             total_time = total_data_time + total_forward_time
             print(f"\n  [Timing Breakdown - Epoch {epoch + 1}]")
-            print(f"    Data loading:       {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)")
+            print(
+                f"    Data loading:       {total_data_time:6.1f}s ({100 * total_data_time / total_time:5.1f}%)"
+            )
             print(
                 f"    Train step (fwd+bwd+upd): {total_forward_time:6.1f}s ({100 * total_forward_time / total_time:5.1f}%)"
             )
             print(f"    TOTAL:              {total_time:6.1f}s")
             print(f"    Compiled training:  {'enabled' if epoch_use_compiled_step else 'disabled'}")
             if total_data_time > total_forward_time:
-                print("    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage")
+                print(
+                    "    ⚠️  DATA LOADING IS BOTTLENECK - consider more workers or faster storage"
+                )
 
         if partial_batch_fallbacks > 0:
             print(
@@ -4114,7 +4341,9 @@ def train(
         avg_valid_loss = float("inf")
         best_saved = False
         if (epoch + 1) % validate_every == 0:
-            do_vad_eval = vad_eval_enabled and (vad_eval_every > 0) and ((epoch + 1) % vad_eval_every == 0)
+            do_vad_eval = (
+                vad_eval_enabled and (vad_eval_every > 0) and ((epoch + 1) % vad_eval_every == 0)
+            )
             avg_valid_loss = run_validation("  Validating", do_vad_eval=do_vad_eval)
             last_valid_loss = avg_valid_loss
             last_valid_epoch = epoch
@@ -4251,7 +4480,9 @@ def train(
             if use_vad_loss and num_vad_logs > 0:
                 avg_vad_clip_ref = train_vad_clip_ref / num_vad_logs
                 avg_vad_clip_out = train_vad_clip_out / num_vad_logs
-                parts.append(f"vad_clip_ref={avg_vad_clip_ref:.1f}% vad_clip_out={avg_vad_clip_out:.1f}%")
+                parts.append(
+                    f"vad_clip_ref={avg_vad_clip_ref:.1f}% vad_clip_out={avg_vad_clip_out:.1f}%"
+                )
             if parts:
                 print("  Debug numerics: " + " | ".join(parts))
 
@@ -4263,7 +4494,9 @@ def train(
             if active_idx + 1 < len(pipeline_stage_defs):
                 next_stage = pipeline_stage_defs[active_idx + 1]
                 print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
-                print(f"Moving to next pipeline stage '{next_stage.get('name', f'stage_{active_idx+1}')}' early.")
+                print(
+                    f"Moving to next pipeline stage '{next_stage.get('name', f'stage_{active_idx+1}')}' early."
+                )
                 next_stage["start_epoch"] = epoch + 1
                 epochs_without_improvement = 0
             else:
@@ -4303,7 +4536,9 @@ def train(
                 cleanup_checkpoints(ckpt_dir, save_total_limit)
         else:
             if epoch_completed:
-                print("⚠️  End-of-epoch checkpoint failed; relying on best checkpoint for completion.")
+                print(
+                    "⚠️  End-of-epoch checkpoint failed; relying on best checkpoint for completion."
+                )
             else:
                 print("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
 
