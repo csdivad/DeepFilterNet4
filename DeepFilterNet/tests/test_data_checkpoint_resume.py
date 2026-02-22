@@ -57,6 +57,19 @@ class TestCheckpointStateRoundtrip:
         assert raw["batch_idx"] == 42
         assert raw["epoch"] == 5
 
+    def test_roundtrip_preserves_pipeline_stage_metadata(self, tmp_path):
+        cs = CheckpointState()
+        cs.epoch = 7
+        cs.batch_idx = 9
+        cs.pipeline_stage_index = 3
+        cs.pipeline_stage_name = "curriculum_stage_3"
+        path = tmp_path / "data_checkpoint.json"
+        cs.save(path)
+
+        loaded = CheckpointState.load(path)
+        assert loaded.pipeline_stage_index == 3
+        assert loaded.pipeline_stage_name == "curriculum_stage_3"
+
 
 class TestMLXDataStreamProgressAfterResume:
     """Verify get_progress() returns correct batch after from_checkpoint()."""
@@ -159,6 +172,19 @@ class TestMLXDataStreamProgressAfterResume:
         progress = stream.get_progress()
         assert progress["epoch"] == 10
         assert progress["batch"] == 50
+
+    def test_progress_includes_pipeline_stage_metadata(self, mock_dataset):
+        try:
+            from df_mlx.dynamic_dataset import MLXDataStream
+        except ImportError:
+            pytest.skip("mlx-data not available")
+
+        stream = MLXDataStream(dataset=mock_dataset, batch_size=24)
+        stream._checkpoint.pipeline_stage_index = 2
+        stream._checkpoint.pipeline_stage_name = "gan_focus"
+        progress = stream.get_progress()
+        assert progress["pipeline_stage_index"] == 2
+        assert progress["pipeline_stage_name"] == "gan_focus"
 
 
 class TestResumeValidationLogic:

@@ -165,3 +165,10 @@ def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
     assert "def compiled_loss_and_grad_step(" in source
     assert "if grad_accumulation_steps > 1:" in source
     assert "loss, model_out, cached_out_wav, cached_clean_wav, grads = active_compiled_lag(" in source
+
+
+def test_pipeline_stage_progression_is_monotonic_and_non_mutating():
+    source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
+    assert "next_stage_index = max(active_stage_index, scheduled_stage_index)" in source
+    assert "active_stage_index += 1" in source
+    assert 'next_stage["start_epoch"] = epoch + 1' not in source

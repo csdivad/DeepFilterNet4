@@ -1377,6 +1377,8 @@ class CheckpointState:
     samples_processed: int = 0
     seed: int = 42
     split: str = "train"
+    pipeline_stage_index: int = 0
+    pipeline_stage_name: str = "default"
     timestamp: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1387,6 +1389,8 @@ class CheckpointState:
             "samples_processed": self.samples_processed,
             "seed": self.seed,
             "split": self.split,
+            "pipeline_stage_index": self.pipeline_stage_index,
+            "pipeline_stage_name": self.pipeline_stage_name,
             "timestamp": self.timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -1399,6 +1403,8 @@ class CheckpointState:
             samples_processed=data.get("samples_processed", 0),
             seed=data.get("seed", 42),
             split=data.get("split", "train"),
+            pipeline_stage_index=data.get("pipeline_stage_index", 0),
+            pipeline_stage_name=data.get("pipeline_stage_name", "default"),
             timestamp=data.get("timestamp", ""),
         )
 
@@ -1758,5 +1764,7 @@ class MLXDataStream:
             "batch": batch,
             "total_batches": total_batches,
             "samples_processed": self._checkpoint.samples_processed,
+            "pipeline_stage_index": self._checkpoint.pipeline_stage_index,
+            "pipeline_stage_name": self._checkpoint.pipeline_stage_name,
             "progress_pct": 100.0 * batch / max(total_batches, 1),
         }

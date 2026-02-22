@@ -25,6 +25,8 @@ _interrupt_state = {
     "train_stream": None,
     "data_checkpoint_path": None,
     "last_completed_epoch": -1,
+    "pipeline_stage_index": 0,
+    "pipeline_stage_name": "default",
 }
 
 
@@ -77,6 +79,8 @@ def _handle_sigint(signum, frame):
                 discriminator=_interrupt_state.get("discriminator"),
                 disc_optimizer=_interrupt_state.get("disc_optimizer"),
                 last_completed_epoch=last_completed,
+                pipeline_stage_index=_interrupt_state.get("pipeline_stage_index"),
+                pipeline_stage_name=_interrupt_state.get("pipeline_stage_name"),
                 kind="interrupted",
             )
             if saved:
@@ -96,6 +100,10 @@ def _handle_sigint(signum, frame):
                     # fully-processed micro-batches.
                     train_stream._checkpoint.epoch = epoch_idx
                     train_stream._checkpoint.batch_idx = batch_idx
+                    train_stream._checkpoint.pipeline_stage_index = int(_interrupt_state.get("pipeline_stage_index", 0))
+                    train_stream._checkpoint.pipeline_stage_name = str(
+                        _interrupt_state.get("pipeline_stage_name", "default")
+                    )
                     train_stream._batch_count = batch_idx
                     train_stream.save_checkpoint(data_ckpt_path)
                     print(f"✅ Data checkpoint saved to {data_ckpt_path}")
@@ -117,6 +125,8 @@ def _register_sigint_handler(
     discriminator=None,
     disc_optimizer=None,
     last_completed_epoch: int = -1,
+    pipeline_stage_index: int = 0,
+    pipeline_stage_name: str = "default",
 ):
     """Register SIGINT handler for graceful training shutdown.
 
@@ -134,11 +144,23 @@ def _register_sigint_handler(
     _interrupt_state["checkpoint_dir"] = checkpoint_dir
     _interrupt_state["config"] = config
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
+    _interrupt_state["pipeline_stage_index"] = pipeline_stage_index
+    _interrupt_state["pipeline_stage_name"] = pipeline_stage_name
     signal.signal(signal.SIGINT, _handle_sigint)
     signal.signal(signal.SIGTERM, _handle_sigint)
 
 
-def _update_interrupt_state(epoch, loss, best_valid_loss, *, batch_idx=0, global_step=0, last_completed_epoch=-1):
+def _update_interrupt_state(
+    epoch,
+    loss,
+    best_valid_loss,
+    *,
+    batch_idx=0,
+    global_step=0,
+    last_completed_epoch=-1,
+    pipeline_stage_index: int | None = None,
+    pipeline_stage_name: str | None = None,
+):
     """Update global state for interrupt handler.
 
     Args:
@@ -155,3 +177,7 @@ def _update_interrupt_state(epoch, loss, best_valid_loss, *, batch_idx=0, global
     _interrupt_state["loss"] = loss
     _interrupt_state["best_valid_loss"] = best_valid_loss
     _interrupt_state["last_completed_epoch"] = last_completed_epoch
+    if pipeline_stage_index is not None:
+        _interrupt_state["pipeline_stage_index"] = pipeline_stage_index
+    if pipeline_stage_name is not None:
+        _interrupt_state["pipeline_stage_name"] = pipeline_stage_name

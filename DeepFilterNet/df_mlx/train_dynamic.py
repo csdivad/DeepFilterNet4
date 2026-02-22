@@ -616,6 +616,23 @@ def train(
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
     pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
+
+    def _resolve_pipeline_stage_by_index(stage_index: int) -> dict[str, Any]:
+        """Return stage metadata for a fixed stage index."""
+        if not pipeline_stage_defs:
+            return _resolve_pipeline_stage(0, pipeline_stage_defs)
+
+        bounded_index = min(max(int(stage_index), 0), len(pipeline_stage_defs) - 1)
+        stage = pipeline_stage_defs[bounded_index]
+        return {
+            "index": bounded_index,
+            "name": str(stage.get("name", f"stage_{bounded_index}")),
+            "start_epoch": int(stage.get("start_epoch", 0)),
+            "awesome_loss_weight": stage.get("awesome_loss_weight"),
+            "vad_loss_weight": stage.get("vad_loss_weight"),
+            "vad_speech_loss_weight": stage.get("vad_speech_loss_weight"),
+        }
+
     base_awesome_loss_weight = awesome_loss_weight
     base_vad_loss_weight = vad_loss_weight
     base_vad_speech_loss_weight = vad_speech_loss_weight
@@ -1095,6 +1112,8 @@ def train(
     resume_global_step = 0
     resume_batch_idx = 0
     resume_checkpoint_kind = "epoch_end"
+    resume_stage_index: int | None = None
+    resume_stage_name: str | None = None
 
     if resume_from:
         state = load_checkpoint(
@@ -1121,6 +1140,12 @@ def train(
             if ckpt_kind in _IN_PROGRESS_KINDS:
                 resume_batch_idx = resolve_resume_batch_count(state)
             best_valid_loss = state.get("best_valid_loss", float("inf"))
+            ckpt_stage_index = state.get("pipeline_stage_index")
+            ckpt_stage_name = state.get("pipeline_stage_name")
+            if isinstance(ckpt_stage_index, int) and ckpt_stage_index >= 0:
+                resume_stage_index = ckpt_stage_index
+            if isinstance(ckpt_stage_name, str):
+                resume_stage_name = ckpt_stage_name
 
             # Restore dynamic pipeline stages if present
             ckpt_config = state.get("config", {})
@@ -1151,11 +1176,41 @@ def train(
     if train_stream is not None and data_resume_progress is not None:
         data_epoch = data_resume_progress.get("epoch")
         data_batch = data_resume_progress.get("batch")
+        data_stage_index = data_resume_progress.get("pipeline_stage_index")
+        data_stage_name = data_resume_progress.get("pipeline_stage_name")
         if not isinstance(data_epoch, int) or not isinstance(data_batch, int):
             raise RuntimeError(
                 "Data checkpoint progress is malformed. "
                 f"source={data_resume_source}, progress={data_resume_progress}"
             )
+        if data_stage_index is not None and (not isinstance(data_stage_index, int) or data_stage_index < 0):
+            raise RuntimeError(
+                "Data checkpoint stage is malformed. " f"source={data_resume_source}, stage={data_stage_index}"
+            )
+        if data_stage_name is not None and not isinstance(data_stage_name, str):
+            raise RuntimeError(
+                "Data checkpoint stage name is malformed. " f"source={data_resume_source}, stage_name={data_stage_name}"
+            )
+
+        if resume_from is not None and isinstance(data_stage_index, int):
+            if resume_stage_index is None:
+                resume_stage_index = data_stage_index
+                if isinstance(data_stage_name, str):
+                    resume_stage_name = data_stage_name
+            elif data_stage_index > resume_stage_index:
+                raise RuntimeError(
+                    "Model checkpoint and data checkpoint disagree on curriculum stage. "
+                    f"model_stage={resume_stage_index}, data_stage={data_stage_index} from {data_resume_source}. "
+                    "Remediation: remove stale checkpoint artifacts and resume from a consistent pair."
+                )
+            elif data_stage_index < resume_stage_index:
+                print(
+                    "ℹ️  Auto-correcting data checkpoint stage: "
+                    f"data={data_stage_index} → model={resume_stage_index}."
+                )
+                train_stream._checkpoint.pipeline_stage_index = resume_stage_index
+                if resume_stage_name is not None:
+                    train_stream._checkpoint.pipeline_stage_name = resume_stage_name
 
         resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
         if resume_requires_mid_epoch:
@@ -2729,6 +2784,24 @@ def train(
     if nan_skip_batch:
         print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
+    scheduled_start_stage = _resolve_pipeline_stage(start_epoch, pipeline_stage_defs)
+    scheduled_start_stage_index = int(scheduled_start_stage["index"])
+    if resume_stage_index is None:
+        initial_stage_index = scheduled_start_stage_index
+    else:
+        if resume_stage_index < scheduled_start_stage_index:
+            print(
+                "ℹ️  Clamping resume stage to scheduled stage floor: "
+                f"resume_stage={resume_stage_index} → scheduled_stage={scheduled_start_stage_index}."
+            )
+        initial_stage_index = max(resume_stage_index, scheduled_start_stage_index)
+    initial_stage = _resolve_pipeline_stage_by_index(initial_stage_index)
+    initial_stage_name = str(initial_stage["name"])
+    if resume_stage_name and resume_stage_name != initial_stage_name:
+        print(
+            "ℹ️  Resume stage name normalized from checkpoint metadata: " f"{resume_stage_name} → {initial_stage_name}."
+        )
+
     # Register SIGINT handler for graceful shutdown
     _register_sigint_handler(
         model,
@@ -2738,6 +2811,8 @@ def train(
         discriminator=discriminator,
         disc_optimizer=disc_optimizer,
         last_completed_epoch=last_completed_epoch,
+        pipeline_stage_index=initial_stage_index,
+        pipeline_stage_name=initial_stage_name,
     )
     print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
@@ -2759,11 +2834,14 @@ def train(
     last_valid_epoch: int | None = None
     train_mode: Literal["COMPILED", "EAGER"] | None = None
 
-    # Initialize active stage based on the last completed epoch to prevent
-    # incorrectly resetting best_valid_loss when resuming training
-    initial_stage = _resolve_pipeline_stage(max(0, last_completed_epoch), pipeline_stage_defs)
-    active_stage_name = str(initial_stage["name"])
-    active_stage_index = int(initial_stage["index"])
+    active_stage_name = initial_stage_name
+    active_stage_index = initial_stage_index
+
+    def _sync_data_stream_stage(stage_index: int, stage_name: str) -> None:
+        if train_stream is None:
+            return
+        train_stream._checkpoint.pipeline_stage_index = int(stage_index)
+        train_stream._checkpoint.pipeline_stage_name = str(stage_name)
 
     epoch_awesome_loss_weight = base_awesome_loss_weight
     epoch_vad_loss_weight = base_vad_loss_weight
@@ -2783,19 +2861,20 @@ def train(
         epoch_start = time.perf_counter()
         final_epoch = epoch
 
-        active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
-        new_stage_index = int(active_stage["index"])
+        scheduled_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
+        scheduled_stage_index = int(scheduled_stage["index"])
+        next_stage_index = max(active_stage_index, scheduled_stage_index)
 
-        # Reset best_valid_loss when entering a new pipeline stage
-        # because higher auxiliary weights will artificially inflate the total loss
-        if new_stage_index != active_stage_index and epoch > 0:
+        if next_stage_index != active_stage_index:
             print(
-                f"\n🔄 Pipeline stage changed ({active_stage_index} -> {new_stage_index}). Resetting best_valid_loss."
+                "\n🔄 Pipeline stage advanced "
+                f"({active_stage_index} -> {next_stage_index}) by schedule. Resetting best_valid_loss."
             )
             best_valid_loss = float("inf")
             epochs_without_improvement = 0
 
-        active_stage_index = new_stage_index
+        active_stage_index = next_stage_index
+        active_stage = _resolve_pipeline_stage_by_index(active_stage_index)
         active_stage_name = str(active_stage["name"])
         epoch_awesome_loss_weight = float(
             active_stage["awesome_loss_weight"]
@@ -2824,6 +2903,7 @@ def train(
             f"awesome_w={epoch_awesome_loss_weight:.4f} "
             f"vad_w={epoch_vad_loss_weight:.4f} speech_w={epoch_vad_speech_loss_weight:.4f}"
         )
+        _sync_data_stream_stage(active_stage_index, active_stage_name)
 
         # Set epoch for reproducible shuffling
         dataset.set_split("train")
@@ -2977,6 +3057,8 @@ def train(
             batch_idx=0,
             global_step=global_step,
             last_completed_epoch=last_completed_epoch,
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
         )
 
         # Timing accumulators for verbose diagnostics
@@ -3557,6 +3639,8 @@ def train(
                 batch_idx=num_train_batches,
                 global_step=global_step,
                 last_completed_epoch=last_completed_epoch,
+                pipeline_stage_index=active_stage_index,
+                pipeline_stage_name=active_stage_name,
             )
 
             # Stop early for benchmarking if requested
@@ -4028,6 +4112,7 @@ def train(
             # Save data checkpoint periodically (for resume capability)
             if checkpoint_batches > 0 and use_mlx_stream and train_stream is not None:
                 if (batch_idx + 1) % checkpoint_batches == 0:
+                    _sync_data_stream_stage(active_stage_index, active_stage_name)
                     train_stream.save_checkpoint(data_checkpoint_path)
 
             # Save model checkpoint by steps (HuggingFace-style)
@@ -4050,6 +4135,8 @@ def train(
                     discriminator=discriminator,
                     disc_optimizer=disc_optimizer,
                     last_completed_epoch=last_completed_epoch,
+                    pipeline_stage_index=active_stage_index,
+                    pipeline_stage_name=active_stage_name,
                     kind="step",
                 )
                 if step_saved:
@@ -4071,6 +4158,7 @@ def train(
 
         # Save data checkpoint at end of epoch (for clean resume at epoch boundary)
         if use_mlx_stream and train_stream is not None:
+            _sync_data_stream_stage(active_stage_index, active_stage_name)
             train_stream.save_checkpoint(data_checkpoint_path)
 
         avg_train_loss = train_loss / max(num_train_batches, 1)
@@ -4150,6 +4238,8 @@ def train(
                     discriminator=discriminator,
                     disc_optimizer=disc_optimizer,
                     last_completed_epoch=epoch,
+                    pipeline_stage_index=active_stage_index,
+                    pipeline_stage_name=active_stage_name,
                     kind="best",
                 )
                 if best_saved:
@@ -4161,6 +4251,8 @@ def train(
                         batch_idx=num_train_batches,
                         global_step=global_step,
                         last_completed_epoch=last_completed_epoch,
+                        pipeline_stage_index=active_stage_index,
+                        pipeline_stage_name=active_stage_name,
                     )
                 else:
                     print("⚠️  Best checkpoint save failed; epoch completion not updated.")
@@ -4179,6 +4271,8 @@ def train(
             batch_idx=num_train_batches,
             global_step=global_step,
             last_completed_epoch=last_completed_epoch,
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
         )
 
         # Improved epoch summary with throughput
@@ -4269,14 +4363,49 @@ def train(
         # ====== Early Stopping / Curriculum Advance ======
         should_stop = False
         if patience > 0 and epochs_without_improvement >= patience:
-            active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
-            active_idx = active_stage["index"]
-            if active_idx + 1 < len(pipeline_stage_defs):
-                next_stage = pipeline_stage_defs[active_idx + 1]
+            if active_stage_index + 1 < len(pipeline_stage_defs):
+                prev_stage_index = active_stage_index
+                active_stage_index += 1
+                next_stage = _resolve_pipeline_stage_by_index(active_stage_index)
+                active_stage_name = str(next_stage["name"])
                 print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
-                print(f"Moving to next pipeline stage '{next_stage.get('name', f'stage_{active_idx + 1}')}' early.")
-                next_stage["start_epoch"] = epoch + 1
+                print(
+                    "Moving to next pipeline stage "
+                    f"'{active_stage_name}' early ({prev_stage_index} -> {active_stage_index})."
+                )
+                best_valid_loss = float("inf")
                 epochs_without_improvement = 0
+                train_config["pipeline_stage_active"] = {
+                    "index": active_stage_index,
+                    "name": active_stage_name,
+                    "start_epoch": int(next_stage["start_epoch"]),
+                    "awesome_loss_weight": (
+                        float(next_stage["awesome_loss_weight"])
+                        if next_stage["awesome_loss_weight"] is not None
+                        else base_awesome_loss_weight
+                    ),
+                    "vad_loss_weight": (
+                        float(next_stage["vad_loss_weight"])
+                        if next_stage["vad_loss_weight"] is not None
+                        else base_vad_loss_weight
+                    ),
+                    "vad_speech_loss_weight": (
+                        float(next_stage["vad_speech_loss_weight"])
+                        if next_stage["vad_speech_loss_weight"] is not None
+                        else base_vad_speech_loss_weight
+                    ),
+                }
+                _sync_data_stream_stage(active_stage_index, active_stage_name)
+                _update_interrupt_state(
+                    epoch,
+                    avg_train_loss,
+                    best_valid_loss,
+                    batch_idx=num_train_batches,
+                    global_step=global_step,
+                    last_completed_epoch=last_completed_epoch,
+                    pipeline_stage_index=active_stage_index,
+                    pipeline_stage_name=active_stage_name,
+                )
             else:
                 should_stop = True
 
@@ -4295,6 +4424,8 @@ def train(
             discriminator=discriminator,
             disc_optimizer=disc_optimizer,
             last_completed_epoch=epoch,
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
             kind="epoch_end",
         )
         epoch_completed = epoch_saved or best_saved
@@ -4307,6 +4438,8 @@ def train(
                 batch_idx=num_train_batches,
                 global_step=global_step,
                 last_completed_epoch=last_completed_epoch,
+                pipeline_stage_index=active_stage_index,
+                pipeline_stage_name=active_stage_name,
             )
             _write_epoch_complete_marker(ckpt_dir, epoch, ckpt_path)
             print(f"  📦 Checkpoint saved: {ckpt_path.name}")
@@ -4351,6 +4484,8 @@ def train(
             discriminator=discriminator,
             disc_optimizer=disc_optimizer,
             last_completed_epoch=max(last_completed_epoch, final_epoch),
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
             kind="best_final",
         )
         if best_final_saved:
@@ -4374,6 +4509,8 @@ def train(
         discriminator=discriminator,
         disc_optimizer=disc_optimizer,
         last_completed_epoch=max(last_completed_epoch, final_epoch),
+        pipeline_stage_index=active_stage_index,
+        pipeline_stage_name=active_stage_name,
         kind="final",
     )
     if final_saved:
