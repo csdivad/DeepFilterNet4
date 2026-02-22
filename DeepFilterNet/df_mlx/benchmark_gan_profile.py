@@ -754,15 +754,9 @@ def _print_phase_table(result: ProfileRunResult) -> None:
             (i for i, a in enumerate(result.aggregated) if a.name == ag.name),
             -1,
         )
-        mem_bef_vals = [
-            sp.phases[idx].memory_before_mb for sp in result.step_profiles if idx < len(sp.phases)
-        ]
-        mem_aft_vals = [
-            sp.phases[idx].memory_after_mb for sp in result.step_profiles if idx < len(sp.phases)
-        ]
-        peak_vals = [
-            sp.phases[idx].peak_memory_mb for sp in result.step_profiles if idx < len(sp.phases)
-        ]
+        mem_bef_vals = [sp.phases[idx].memory_before_mb for sp in result.step_profiles if idx < len(sp.phases)]
+        mem_aft_vals = [sp.phases[idx].memory_after_mb for sp in result.step_profiles if idx < len(sp.phases)]
+        peak_vals = [sp.phases[idx].peak_memory_mb for sp in result.step_profiles if idx < len(sp.phases)]
 
         mem_bef = float(np.mean(mem_bef_vals)) if mem_bef_vals else 0.0
         mem_aft = float(np.mean(mem_aft_vals)) if mem_aft_vals else 0.0
@@ -834,9 +828,7 @@ def _print_breakdown_summary(result: ProfileRunResult) -> None:
     print("-" * 40)
     for ag in result.aggregated:
         idx = next((i for i, a in enumerate(result.aggregated) if a.name == ag.name), -1)
-        deltas = [
-            sp.phases[idx].memory_delta_mb for sp in result.step_profiles if idx < len(sp.phases)
-        ]
+        deltas = [sp.phases[idx].memory_delta_mb for sp in result.step_profiles if idx < len(sp.phases)]
         mean_delta = float(np.mean(deltas)) if deltas else 0.0
         if abs(mean_delta) > 10:
             direction = "+" if mean_delta > 0 else ""
@@ -869,8 +861,7 @@ def _print_breakdown_summary(result: ProfileRunResult) -> None:
         disc_compute = sum(
             ag.wall_mean_ms
             for ag in result.aggregated
-            if ag.name
-            in ("disc_forward_backward", "disc_grad_clip", "disc_optimizer_update", "disc_eval")
+            if ag.name in ("disc_forward_backward", "disc_grad_clip", "disc_optimizer_update", "disc_eval")
         )
         gen_compute_pct = gen_compute / total_wall * 100 if total_wall > 0 else 0
         disc_compute_pct = disc_compute / total_wall * 100 if total_wall > 0 else 0
@@ -950,9 +941,7 @@ def _print_side_by_side(
 
     iso_by_name = {a.name: a for a in iso.aggregated}
     e2e_by_name = {a.name: a for a in e2e.aggregated}
-    all_names = list(
-        dict.fromkeys([a.name for a in iso.aggregated] + [a.name for a in e2e.aggregated])
-    )
+    all_names = list(dict.fromkeys([a.name for a in iso.aggregated] + [a.name for a in e2e.aggregated]))
 
     for name in all_names:
         ia = iso_by_name.get(name)
@@ -963,14 +952,7 @@ def _print_side_by_side(
         ee = ea.eval_mean_ms if ea else 0.0
         delta = ew - iw
 
-        print(
-            f"{name:<26} "
-            f"{iw:>9.1f} "
-            f"{ie:>9.1f} "
-            f"{ew:>9.1f} "
-            f"{ee:>9.1f} "
-            f"{delta:>+8.1f}"
-        )
+        print(f"{name:<26} " f"{iw:>9.1f} " f"{ie:>9.1f} " f"{ew:>9.1f} " f"{ee:>9.1f} " f"{delta:>+8.1f}")
 
     print(_DIVIDER * 110)
     iso_total = iso.total_mean_ms

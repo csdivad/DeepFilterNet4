@@ -1,7 +1,7 @@
 # DeepFilterNet
 
 
-> [!NOTE] 
+> [!NOTE]
 > All config options are also override-able on the CLI
 
 ```bash

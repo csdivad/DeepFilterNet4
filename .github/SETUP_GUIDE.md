@@ -194,7 +194,7 @@ Contributors should:
    black .
    isort .
    flake8
-   
+
    # Rust
    cargo fmt
    cargo clippy --all-features -- -D warnings

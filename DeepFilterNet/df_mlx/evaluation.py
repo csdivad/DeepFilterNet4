@@ -141,9 +141,7 @@ def segmental_snr(
     indices = starts[:, None] + offsets[None, :]  # (n_frames, frame_length)
 
     # Gather frames for entire batch at once: (batch, n_frames, frame_length)
-    ref_frames = mx.take(reference, indices.flatten(), axis=1).reshape(
-        batch, n_frames, frame_length
-    )
+    ref_frames = mx.take(reference, indices.flatten(), axis=1).reshape(batch, n_frames, frame_length)
     noise_frames = mx.take(noise, indices.flatten(), axis=1).reshape(batch, n_frames, frame_length)
 
     ref_energy = mx.sum(ref_frames**2, axis=-1)  # (batch, n_frames)
@@ -593,9 +591,7 @@ class ValidationMetrics:
 
     def reset(self):
         """Reset metrics for new epoch."""
-        self.metrics = {
-            name: self.factory[name]() for name in self.metric_names if name in self.factory
-        }
+        self.metrics = {name: self.factory[name]() for name in self.metric_names if name in self.factory}
         self.n_samples = 0
 
     def update(
@@ -712,7 +708,4 @@ def log_improvement(
         noisy_val = comparison["noisy"][metric_name]
         enh_val = comparison["enhanced"][metric_name]
         imp_val = comparison["improvement"][metric_name]
-        logger.info(
-            f"{prefix}{metric_name}: noisy={noisy_val:.2f} → enhanced={enh_val:.2f} "
-            f"(Δ={imp_val:+.2f})"
-        )
+        logger.info(f"{prefix}{metric_name}: noisy={noisy_val:.2f} → enhanced={enh_val:.2f} " f"(Δ={imp_val:+.2f})")

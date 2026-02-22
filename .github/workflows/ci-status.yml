@@ -31,6 +31,6 @@ jobs:
           echo "- PR Validation" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "All workflows are configured and ready! ✨" >> $GITHUB_STEP_SUMMARY
-          
+
       - name: Success
         run: echo "CI configuration check passed!"

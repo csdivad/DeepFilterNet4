@@ -168,9 +168,7 @@ def save_audio(
             out_path = os.path.join(output_dir, f"{name}{ext}")
         else:
             out_path = os.path.join(os.path.dirname(path), f"{name}{ext}")
-        logger.warning(
-            f"Output path would overwrite input; using '{os.path.basename(out_path)}' instead"
-        )
+        logger.warning(f"Output path would overwrite input; using '{os.path.basename(out_path)}' instead")
 
     sf.write(out_path, audio, sr)
     return out_path
@@ -639,10 +637,7 @@ def enhance_file(
         suffix=suffix,
     )
 
-    logger.info(
-        f"Enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s "
-        f"(RT factor: {rtf:.3f})"
-    )
+    logger.info(f"Enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s " f"(RT factor: {rtf:.3f})")
 
     return out_path
 
@@ -785,8 +780,7 @@ def enhance_file_streaming(
         suffix=suffix,
     )
     logger.info(
-        f"Streaming-enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s "
-        f"(RT factor: {rtf:.3f})"
+        f"Streaming-enhanced '{os.path.basename(input_path)}' in {processing_time:.2f}s " f"(RT factor: {rtf:.3f})"
     )
     return out_path
 
