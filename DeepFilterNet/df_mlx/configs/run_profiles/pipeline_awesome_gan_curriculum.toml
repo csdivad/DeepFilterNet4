@@ -97,7 +97,7 @@ vad_loss_weight = 0.08
 vad_speech_loss_weight = 0.05
 
 [[loss.pipeline_stages]]
-start_epoch = 30
+start_epoch = 14
 name = "ramp"
 # Introduce speech-aware supervision at moderate strength
 # aux = 0.45 + 0.20 + 0.15 = 0.80 vs reconstruction 1.35 → 1.7:1 ratio
@@ -107,14 +107,14 @@ vad_loss_weight = 0.20
 vad_speech_loss_weight = 0.15
 
 [[loss.pipeline_stages]]
-start_epoch = 75
+start_epoch = 60
 name = "full_multitask"
 # All non-GAN losses at target strength — model converges on pre-GAN optimum
 # aux = 0.80 + 0.40 + 0.35 = 1.55 vs reconstruction 1.35 → 1:1.15 (balanced)
 # 55 epochs of stable multi-task training before GAN phase
 awesome_loss_weight = 0.80
 vad_loss_weight = 0.40
-vad_speech_loss_weight = 0.35
+vad_speech_loss_weight = 0.45
 
 [[loss.pipeline_stages]]
 start_epoch = 130
