@@ -1,3 +1,16 @@
+> [!CAUTION]
+> This repo is a fork of the original [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) trying to do some VAD-gated changes to very specifically target speech and low quality/volume source.
+> It's doing this while _also_ porting the whole thing to MLX for first-class Apple Silicon support.
+> 
+> It is not ready for prime-time yet. Please peruse at your own risk. A lot of the documentation has not yet been updated.
+>
+> If you want to get started on Apple Silicon, use the helper script:
+> ```sh
+> # Omit `--venv` if you want to install in the current virtual environment.
+> # Use `-h/--help` for help
+> ./setup.sh --all [--venv /path/to/venv]
+> ```
+
 # DeepFilterNet
 
 This file is a pointer to the canonical README at the repository root.
