@@ -1035,8 +1035,7 @@ class DynamicDataset:
         # Use per-sample RNG so get_sample() remains thread-safe under prefetch workers.
         if idx < 0 or idx >= len(self._indices):
             raise IndexError(
-                f"Sample index {idx} out of range for split '{self._current_split}' "
-                f"(size={len(self._indices)})."
+                f"Sample index {idx} out of range for split '{self._current_split}' " f"(size={len(self._indices)})."
             )
 
         sample_seed = self.config.seed + self._epoch * 1000000 + idx
@@ -1052,9 +1051,7 @@ class DynamicDataset:
         if self.config.p_very_low_snr > 0 and r < self.config.p_very_low_snr:
             # Very low SNR: severely obscured speech (for whisper/distant mic training)
             snr = rng.uniform(*self.config.snr_range_very_low)
-        elif self.config.p_extreme_snr > 0 and r < (
-            self.config.p_very_low_snr + self.config.p_extreme_snr
-        ):
+        elif self.config.p_extreme_snr > 0 and r < (self.config.p_very_low_snr + self.config.p_extreme_snr):
             # Extreme SNR: near-obscured speech
             snr = rng.uniform(*self.config.snr_range_extreme)
         else:
@@ -1078,9 +1075,7 @@ class DynamicDataset:
         if self.config.rir_files and rng.random() < self.config.p_reverb:
             rir = self._load_rir(rng)
             if rir is not None:
-                speech_for_mix, combined_noise, _, _ = self.reverb.apply(
-                    speech, combined_noise, rir
-                )
+                speech_for_mix, combined_noise, _, _ = self.reverb.apply(speech, combined_noise, rir)
 
         # Apply augmentations to speech (training only)
         if self._current_split == "train":
@@ -1235,11 +1230,7 @@ class PrefetchDataLoader:
 
             def submit_pending(executor: ThreadPoolExecutor) -> None:
                 nonlocal next_submit
-                while (
-                    next_submit < n_samples
-                    and len(pending) < max_pending
-                    and not stop_event.is_set()
-                ):
+                while next_submit < n_samples and len(pending) < max_pending and not stop_event.is_set():
                     pending[next_submit] = executor.submit(self.dataset.get_sample, next_submit)
                     next_submit += 1
 
@@ -1264,8 +1255,7 @@ class PrefetchDataLoader:
                             if self.strict_failures:
                                 worker_errors.append(
                                     RuntimeError(
-                                        f"PrefetchDataLoader failed while loading sample index "
-                                        f"{sample_idx}: {exc}"
+                                        f"PrefetchDataLoader failed while loading sample index " f"{sample_idx}: {exc}"
                                     )
                                 )
                                 return
@@ -1294,9 +1284,7 @@ class PrefetchDataLoader:
 
         try:
             if self.shuffle_buffer_size > 0:
-                buf_rng = random.Random(
-                    getattr(self.dataset.config, "seed", 0) + getattr(self.dataset, "_epoch", 0)
-                )
+                buf_rng = random.Random(getattr(self.dataset.config, "seed", 0) + getattr(self.dataset, "_epoch", 0))
                 buffer: List[Dict[str, mx.array]] = []
                 while True:
                     batch = prefetch_queue.get()
@@ -1480,9 +1468,7 @@ class MLXDataStream:
             checkpoint: Optional checkpoint state for resuming
         """
         if not HAS_MLX_DATA:
-            raise ImportError(
-                "mlx-data is required for MLXDataStream. " "Install with: pip install mlx-data"
-            )
+            raise ImportError("mlx-data is required for MLXDataStream. " "Install with: pip install mlx-data")
 
         self.dataset = dataset
         self.batch_size = batch_size

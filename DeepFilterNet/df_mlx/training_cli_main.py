@@ -831,9 +831,7 @@ def main():
         print(f"Warning: resume-data requested but {data_ckpt} not found")
         return None
 
-    resume_from = _resolve_resume(
-        run_cfg.checkpoint.resume, run_cfg.checkpoint.checkpoint_dir, "resume"
-    )
+    resume_from = _resolve_resume(run_cfg.checkpoint.resume, run_cfg.checkpoint.checkpoint_dir, "resume")
     resume_data_from = _resolve_resume(
         run_cfg.checkpoint.resume_data,
         run_cfg.checkpoint.checkpoint_dir,
