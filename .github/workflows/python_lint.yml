@@ -17,18 +17,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {command: flake8, args: ""}
-          - {command: black, args: "--check --diff ."}
-          - {command: isort, args: ". --check --diff"}
+        hook: [flake8, black, isort]
     steps:
      - uses: actions/checkout@v4
      - uses: actions/setup-python@v5
        with:
-         python-version: "3.9"
+         python-version: "3.10"
          cache: 'pip'
-         cache-dependency-path: '**/pyproject.toml'
-     - name: Install
-       run: pip install ${{matrix.command}}
-     - name: Run ${{matrix.command}}
-       run: ${{matrix.command}} ${{matrix.args}}
+         cache-dependency-path: |
+           **/pyproject.toml
+           .pre-commit-config.yaml
+     - name: Install pre-commit
+       run: pip install pre-commit
+     - name: Run pre-commit ${{ matrix.hook }}
+       run: pre-commit run ${{ matrix.hook }} --all-files
