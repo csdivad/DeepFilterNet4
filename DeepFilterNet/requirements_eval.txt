@@ -8,5 +8,5 @@ ptflops==0.7.5
 requests
 packaging
 pystoi
-pesq
+pesq; platform_system != "Windows"
 scipy
