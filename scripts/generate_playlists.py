@@ -74,7 +74,7 @@ def generate_vlc_playlist(
     output_path.write_text("\n".join(lines) + "\n")
     print(f"✅ VLC playlist created: {output_path}")
     print(f"   Videos: {len(manifest['videos'])}")
-    print(f"   Usage: Open in VLC → Audio → Audio Track → Select enhanced track")
+    print("   Usage: Open in VLC → Audio → Audio Track → Select enhanced track")
 
 
 def generate_mpv_playlist(
@@ -103,7 +103,7 @@ def generate_mpv_playlist(
     output_path.write_text("\n".join(lines) + "\n")
     print(f"✅ MPV playlist created: {output_path}")
     print(f"   Videos: {len(manifest['videos'])}")
-    print(f"   Note: MPV #AUDIOFILE directive support may vary by version")
+    print("   Note: MPV #AUDIOFILE directive support may vary by version")
 
 
 def generate_mpv_script(
@@ -180,7 +180,7 @@ def generate_mpv_script(
     print(f"✅ MPV script created: {output_path}")
     print(f"   Videos: {len(manifest['videos'])}")
     print(f"   Usage: {output_path} [video_index]")
-    print(f"   Press # during playback to switch audio tracks")
+    print("   Press # during playback to switch audio tracks")
 
 
 def generate_mixed_audio(
@@ -232,7 +232,7 @@ def generate_mixed_audio(
         enhanced_wav = output_dir / f"{video_path.stem}_enhanced.wav"
         if not enhanced_wav.exists():
             if enhanced_audio_path.suffix.lower() in [".m4a", ".aac"]:
-                print(f"  Converting enhanced audio to WAV...")
+                print("  Converting enhanced audio to WAV...")
                 cmd = [
                     "ffmpeg",
                     "-i",

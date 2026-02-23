@@ -14,13 +14,13 @@ from pathlib import Path
 # Add DeepFilterNet to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "DeepFilterNet"))
 
-import json
+import json  # noqa: E402
 
-import mlx.core as mx
-import mlx.nn as nn
-import mlx.optimizers as optim
+import mlx.core as mx  # noqa: E402
+import mlx.nn as nn  # noqa: E402
+import mlx.optimizers as optim  # noqa: E402
 
-from df_mlx.train_dynamic import (
+from df_mlx.train_dynamic import (  # noqa: E402
     _register_sigint_handler,
     _validate_checkpoint_pair,
     load_checkpoint,
@@ -93,8 +93,6 @@ def test_optimizer_state_persistence():
 
         # Initialize optimizer state by running one step
         x = mx.random.normal((4, 10))
-        y = model(x)
-        loss = mx.mean(y * y)
         loss_and_grad = nn.value_and_grad(model, lambda m, x: mx.mean(m(x) * m(x)))
         _, grads = loss_and_grad(model, x)
         optimizer.update(model, grads)

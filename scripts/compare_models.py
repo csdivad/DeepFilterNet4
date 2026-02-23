@@ -440,7 +440,7 @@ class DeepFilterNet4MLXEnhancer:
             # Load training config from state file to match model architecture
             train_cfg = self._load_config_from_state(self.checkpoint_path)
             if train_cfg:
-                print(f"  [DFNet4-MLX] Loaded config from state file")
+                print("  [DFNet4-MLX] Loaded config from state file")
                 if "nb_df" in train_cfg:
                     config.df.nb_df = train_cfg["nb_df"]
                 if "nb_erb" in train_cfg:
