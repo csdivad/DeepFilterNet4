@@ -172,7 +172,7 @@ jobs:
         working-directory: DeepFilterNet
         run: |
           poetry --version
-          POETRY_INSTALLER_PARALLEL=false poetry install -vvv --no-ansi --no-root --no-interaction -E eval -E dnsmos-local -E soundfile
+          PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu POETRY_INSTALLER_PARALLEL=false poetry install -vvv --no-ansi --no-interaction -E eval -E dnsmos-local -E soundfile
           echo "Installing pytorch"
           poetry run poe install-torch-cpu
           poetry run poe install-dnsmos-utils
@@ -181,7 +181,7 @@ jobs:
         working-directory: DeepFilterNet
         run: |
           poetry --version
-          POETRY_INSTALLER_PARALLEL=false poetry install -vvv --no-ansi --no-root --no-interaction -E dnsmos-local -E soundfile
+          PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu POETRY_INSTALLER_PARALLEL=false poetry install -vvv --no-ansi --no-interaction -E dnsmos-local -E soundfile
           echo "Installing pytorch"
           poetry run poe install-torch-cpu
           echo "Installing eval-utils"
