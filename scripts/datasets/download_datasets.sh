@@ -13,7 +13,7 @@ trap on_interrupt INT
 # - Optional download mode (opt-in) for datasets with direct download URLs.
 # - Generates file lists for prepare_data.py.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/data}"
 LIST_DIR="${LIST_DIR:-${DATA_DIR}/lists}"
 
@@ -154,6 +154,11 @@ is_github_url() {
   [[ "${url}" == *"github.com"* || "${url}" == *"githubusercontent.com"* || "${url}" == *"raw.githubusercontent.com"* ]]
 }
 
+is_fsd50k_url() {
+  local url="$1"
+  [[ "${url}" == *"FSD50K."* ]]
+}
+
 cache_lookup() {
   local path="$1"
   local size
@@ -233,10 +238,14 @@ need_cmd() {
 download_file() {
   local url="$1"
   local out="$2"
+  local force_curl="${3:-0}"
   local aria2_conn="${ARIA2_CONN}"
   local aria2_split="${ARIA2_SPLIT}"
   local aria2_file_alloc="${ARIA2_FILE_ALLOC:-prealloc}"
   local aria2_continue="1"
+  if is_fsd50k_url "${url}"; then
+    force_curl=1
+  fi
   if [[ -f "${out}" ]]; then
     if [[ "${RESUME}" != "1" ]]; then
       echo "[skip] exists: ${out}"
@@ -252,7 +261,7 @@ download_file() {
       echo "[warn] existing file failed verification, attempting resume: ${out}"
     fi
   fi
-  if [[ "${USE_ARIA2}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
+  if [[ "${force_curl}" != "1" && "${USE_ARIA2}" == "1" ]] && command -v aria2c >/dev/null 2>&1; then
     # Some hosts do not handle multi-range requests well (hardcoded fallbacks).
     if [[ "${url}" == *"datashare.ed.ac.uk"* || "${url}" == *"datashare.is.ed.ac.uk"* ]]; then
       aria2_conn=1
@@ -311,7 +320,7 @@ download_file() {
       USE_ARIA2=0
     fi
   fi
-  if [[ "${USE_ARIA2}" != "1" ]]; then
+  if [[ "${force_curl}" == "1" || "${USE_ARIA2}" != "1" ]]; then
     # NOTE: Token is passed via command line, which is visible via `ps` on multi-user systems.
     # For shared environments, consider using `gh release download` directly for GitHub releases.
     local auth_header=""
@@ -342,6 +351,9 @@ download_file() {
           curl -L --fail -o "${out}" "${url}"
         fi
       fi
+    elif [[ "${force_curl}" == "1" ]]; then
+      echo "Need curl to download FSD50K files: ${url}" >&2
+      exit 1
     elif command -v wget >/dev/null 2>&1; then
       if [[ "${RESUME}" == "1" ]]; then
         if [[ -n "${auth_header}" ]]; then
@@ -606,21 +618,25 @@ process_fsd50k_merge_queue() {
 download_and_extract() {
   local url="$1"
   local dest="$2"
+  local force_curl=0
   local filename
   filename="$(basename "${url}")"
   filename="${filename%%\?*}"
+  if is_fsd50k_url "${url}"; then
+    force_curl=1
+  fi
   mkdir -p "${DOWNLOAD_DIR}"
-  if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" ]]; then
+  if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" && "${force_curl}" != "1" ]]; then
     local archive_path="${DOWNLOAD_DIR}/${filename}"
     queue_download "${url}" "${archive_path}"
     queue_extract "${archive_path}" "${dest}" "${url}"
     return 0
   fi
-  download_file "${url}" "${DOWNLOAD_DIR}/${filename}"
+  download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
   if ! verify_archive "${DOWNLOAD_DIR}/${filename}"; then
     echo "[warn] archive failed verification, retrying: ${filename}" >&2
     rm -f "${DOWNLOAD_DIR:?}/${filename}"
-    download_file "${url}" "${DOWNLOAD_DIR}/${filename}"
+    download_file "${url}" "${DOWNLOAD_DIR}/${filename}" "${force_curl}"
     verify_archive "${DOWNLOAD_DIR}/${filename}"
   fi
   extract_archive "${DOWNLOAD_DIR}/${filename}" "${dest}"
@@ -650,25 +666,14 @@ download_fsd50k_split() {
     parts=(z01 zip)
   fi
   mkdir -p "${DOWNLOAD_DIR}"
-  if [[ "${ARIA2_PARALLEL_ACTIVE}" == "1" ]]; then
-    for part in "${parts[@]}"; do
-      local url="${base_url}/${prefix}.${part}"
-      if [[ "${url}" == *"zenodo.org"* && "${url}" != *"download="* ]]; then
-        url="${url}?download=1"
-      fi
-      queue_download "${url}" "${DOWNLOAD_DIR}/${prefix}.${part}"
-    done
-    echo "${prefix}.zip|${out_dir}" >> "${FSD50K_MERGE_QUEUE_FILE}"
-  else
-    for part in "${parts[@]}"; do
-      local url="${base_url}/${prefix}.${part}"
-      if [[ "${url}" == *"zenodo.org"* && "${url}" != *"download="* ]]; then
-        url="${url}?download=1"
-      fi
-      download_file "${url}" "${DOWNLOAD_DIR}/${prefix}.${part}"
-    done
-    fsd50k_merge_and_unzip "${prefix}.zip" "${out_dir}"
-  fi
+  for part in "${parts[@]}"; do
+    local url="${base_url}/${prefix}.${part}"
+    if [[ "${url}" == *"zenodo.org"* && "${url}" != *"download="* ]]; then
+      url="${url}?download=1"
+    fi
+    download_file "${url}" "${DOWNLOAD_DIR}/${prefix}.${part}" "1"
+  done
+  fsd50k_merge_and_unzip "${prefix}.zip" "${out_dir}"
 }
 
 maybe_install_audb() {
@@ -758,6 +763,7 @@ if [[ "${DOWNLOAD}" == "1" ]]; then
     need_cmd zip
     mkdir -p "${FSD50K_DIR}"
     FSD50K_BASE_URL="${FSD50K_BASE_URL:-https://zenodo.org/records/4060432/files}"
+    # FSD50K downloads are forced through curl (never aria2/wget).
     # Metadata + ground truth + docs
     download_and_extract "${FSD50K_BASE_URL}/FSD50K.metadata.zip?download=1" "${FSD50K_DIR}"
     download_and_extract "${FSD50K_BASE_URL}/FSD50K.ground_truth.zip?download=1" "${FSD50K_DIR}"

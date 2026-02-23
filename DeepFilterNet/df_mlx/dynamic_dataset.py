@@ -200,7 +200,7 @@ class ShardedAudioCache:
             with self.fs.open(index_path, "r") as f:
                 all_indices = json.load(f)
         else:
-            self.cache_dir = Path(cache_dir)
+            self.cache_dir = Path(cache_dir).expanduser().resolve()
             self.shard_dir = self.cache_dir / category
             index_path = self.cache_dir / "index.json"
             with open(index_path) as f:

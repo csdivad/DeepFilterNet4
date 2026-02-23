@@ -523,7 +523,7 @@ def train(
                 raise ValueError(f"Cache config not found in HF repo: {config_file}")
         else:
             # Load config from pre-built audio cache
-            cache_path = Path(cache_dir)
+            cache_path = Path(cache_dir).expanduser().resolve()
             config_file = cache_path / "config.json"
             if config_file.exists():
                 config = DatasetConfig.from_json(str(config_file))

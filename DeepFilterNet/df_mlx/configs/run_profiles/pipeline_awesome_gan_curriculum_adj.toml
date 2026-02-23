@@ -35,9 +35,9 @@
 cache_dir = "~/DataDump/datasets/mlx_datastore"
 
 [training]
-epochs = 200
+epochs = 220
 batch_size = 24
-learning_rate = 1e-6
+learning_rate = 1e-4
 learning_rate_min = 1e-7     # 10x higher floor than implicit default (1e-8)
                              # keeps model responsive during GAN phase (epochs 130-200)
                              # cosine decays to ~2.5e-7 at epoch 130; floor prevents stall
@@ -97,7 +97,7 @@ vad_loss_weight = 0.08
 vad_speech_loss_weight = 0.05
 
 [[loss.pipeline_stages]]
-start_epoch = 14
+start_epoch = 60
 name = "ramp"
 # Introduce speech-aware supervision at moderate strength
 # aux = 0.45 + 0.20 + 0.15 = 0.80 vs reconstruction 1.35 → 1.7:1 ratio
@@ -107,17 +107,17 @@ vad_loss_weight = 0.20
 vad_speech_loss_weight = 0.15
 
 [[loss.pipeline_stages]]
-start_epoch = 60
+start_epoch = 100
 name = "full_multitask"
 # All non-GAN losses at target strength — model converges on pre-GAN optimum
-# aux = 0.80 + 0.40 + 0.45 = 1.65 vs reconstruction 1.35 → 1:1.22 (balanced)
+# aux = 0.80 + 0.40 + 0.35 = 1.55 vs reconstruction 1.35 → 1:1.15 (balanced)
 # 55 epochs of stable multi-task training before GAN phase
 awesome_loss_weight = 0.80
 vad_loss_weight = 0.40
 vad_speech_loss_weight = 0.45
 
 [[loss.pipeline_stages]]
-start_epoch = 130
+start_epoch = 150
 name = "gan_integration"
 # Auxiliary eased ~20% to absorb incoming GAN gradient budget
 # aux = 0.65 + 0.32 + 0.28 = 1.25; GAN = 0→0.58 over 20 epochs
