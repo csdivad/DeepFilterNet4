@@ -24,14 +24,62 @@ set -euo pipefail
 #   LIST_DIR      - Directory containing file lists
 #   PROFILE       - Build profile: prototype | production | apple (default: apple)
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+usage_helptext() {
+  echo "Usage:"
+  echo "  ./build_mlx_datastore.sh [-h|--help]"
+  echo ""
+  echo "This script builds a pre-processed audio cache for MLX training."
+  echo "It processes all audio files (resampling, normalization) and saves"
+  echo "them in sharded NPZ format for efficient loading during training."
+  echo ""
+  echo "The actual mixing (speech + noise + RIR @ random SNR) happens"
+  echo "dynamically during training - giving full diversity each epoch."
+  echo ""
+  echo "Arguments:"
+  echo "  -h, --help    Show this help message and exit"
+  echo ""
+  echo "Environment variables (optional):"
+  echo "  DATA_DIR      - Base data directory (default: /Volumes/TrainingData/datasets)"
+  echo "  OUTPUT_DIR    - Output directory for audio cache"
+  echo "  LIST_DIR      - Directory containing file lists"
+  echo "  PROFILE       - Build profile: prototype | production | apple (default: apple)"
+  echo "  SR            - Sample rate (default: 48000)"
+  echo "  SEGMENT_LENGTH - Segment length in seconds (default: 5.0)"
+  echo "  SNR_MIN       - Minimum SNR in dB (default: -5)"
+  echo "  SNR_MAX       - Maximum SNR in dB (default: 40)"
+  echo "  RIR_PROB      - Probability of applying RIR augmentation (default: 0.5)"
+  echo "  NUM_WORKERS   - Number of parallel workers (default depends on profile)"
+  echo "  SHARD_SIZE    - Number of samples per shard (default depends on profile)"
+  echo "  MIN_DURATION  - Minimum duration for speech files in seconds (default: same as segment length)"
+  echo "  MERGE_SHORT   - Whether to merge short speech files (default: false)"
+  echo "  MAX_PENDING_BYTES - Max pending bytes for sharding (default: 8 GB)"
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage_helptext
+    exit 0
+    ;;
+esac
+
+echo "=============================================="
+echo "DeepFilterNet MLX Audio Cache Builder"
+echo "=============================================="
+echo "This script builds a pre-processed audio cache for MLX training."
+echo "It processes all audio files (resampling, normalization) and saves"
+echo "them in sharded NPZ format for efficient loading during training."
+echo ""
+echo "The actual mixing (speech + noise + RIR @ random SNR) happens"
+echo "dynamically during training - giving full diversity each epoch."
+echo "=============================================="
+echo ""
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
 # Data paths
-DATA_DIR="${DATA_DIR:-/Volumes/TrainingData/datasets}"
+DATA_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${DATA_DIR}/mlx_audio_cache}"
 LIST_DIR="${LIST_DIR:-${DATA_DIR}/lists}"
 
