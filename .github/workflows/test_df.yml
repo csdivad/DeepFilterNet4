@@ -181,7 +181,7 @@ jobs:
         working-directory: DeepFilterNet
         run: |
           poetry --version
-          PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu POETRY_INSTALLER_PARALLEL=false poetry install -vvv --no-ansi --no-interaction -E dnsmos-local -E soundfile
+          PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu POETRY_INSTALLER_PARALLEL=false poetry install -vvv --no-ansi --no-root --no-interaction -E dnsmos-local -E soundfile
           echo "Installing pytorch"
           poetry run poe install-torch-cpu
           echo "Installing eval-utils"
@@ -192,7 +192,7 @@ jobs:
       - name: Run DF Test
         working-directory: DeepFilterNet
         run: |
-          poetry run python df/scripts/test_df.py
+          poetry run python -m df.scripts.test_df
 
       - name: Test python deepFilter script
         working-directory: DeepFilterNet
