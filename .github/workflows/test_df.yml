@@ -23,10 +23,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: "ubuntu-latest"
-          # - os: "macos-latest"  # Fails to install hdf5 from git
-          - os: "windows-latest"
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"os":"ubuntu-latest"}]' || '[{"os":"ubuntu-latest"},{"os":"windows-latest"}]') }}
+        # - os: "macos-latest"  # Fails to install hdf5 from git
     defaults:
       run:
         shell: bash
