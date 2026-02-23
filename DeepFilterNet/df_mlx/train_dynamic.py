@@ -40,7 +40,6 @@ Features:
 from __future__ import annotations
 
 import gc
-import json
 import math
 import os
 import random
@@ -56,21 +55,8 @@ import mlx.optimizers as optim
 import numpy as np
 from tqdm.auto import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from df_mlx.hardware import print_hardware_diagnostics  # noqa: E402, F401
-from df_mlx.run_config import (  # noqa: E402, F401
-    RunConfig,
-    SyncMode,
-    generate_run_config_example,
-    load_preset_config,
-    load_run_config,
-    validate_run_config,
-)
-from df_mlx.train_dynamic_config import (  # noqa: E402, F401
-    apply_train_ini_config,
-    apply_train_ini_tables,
-)
+from df_mlx.run_config import SyncMode
 from df_mlx.training_checkpoints import (  # noqa: E402, F401
     _CHECKPOINT_KINDS,
     _COMPLETED_KINDS,
@@ -171,6 +157,9 @@ from df_mlx.training_waveform import (  # noqa: E402, F401
     compute_mrstft_loss,
     specs_to_wavs,
 )
+
+# sys.path.insert(0, str(Path(__file__).parent.parent))
+
 
 if TYPE_CHECKING:
     from df_mlx.config import ModelParams4
@@ -489,6 +478,7 @@ def train(
         read_file_list,
     )
     from df_mlx.hardware import HardwareConfig
+    from df_mlx.hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
     from df_mlx.model import count_parameters, init_model
     from df_mlx.train import MultiResolutionSTFTLoss, WarmupCosineSchedule, spectral_loss
 
@@ -510,15 +500,37 @@ def train(
 
     # Load or create config
     if cache_dir:
-        # Load config from pre-built audio cache
-        cache_path = Path(cache_dir)
-        config_file = cache_path / "config.json"
-        if config_file.exists():
-            config = DatasetConfig.from_json(str(config_file))
-            config.cache_dir = cache_dir
-            print(f"Loaded config from cache: {cache_dir}")
+        if str(cache_dir).startswith("hf://"):
+            import json
+
+            from huggingface_hub import HfFileSystem
+
+            fs = HfFileSystem()
+            normalized_cache_dir = normalize_hf_dataset_cache_dir(str(cache_dir))
+            hf_path = hf_dataset_fsspec_path(normalized_cache_dir)
+            config_file = f"{hf_path}/config.json"
+            if fs.exists(config_file):
+                with fs.open(config_file, "r") as f:
+                    data = json.load(f)
+                if "cache_dir" in data:
+                    data["cache_dir"] = data["cache_dir"]
+                config = DatasetConfig(
+                    **{k: v for k, v in data.items() if hasattr(DatasetConfig, k) or k == "cache_dir"}
+                )
+                config.cache_dir = normalized_cache_dir
+                print(f"Loaded config from HF cache: {normalized_cache_dir}")
+            else:
+                raise ValueError(f"Cache config not found in HF repo: {config_file}")
         else:
-            raise ValueError(f"Cache config not found: {config_file}")
+            # Load config from pre-built audio cache
+            cache_path = Path(cache_dir)
+            config_file = cache_path / "config.json"
+            if config_file.exists():
+                config = DatasetConfig.from_json(str(config_file))
+                config.cache_dir = cache_dir
+                print(f"Loaded config from cache: {cache_dir}")
+            else:
+                raise ValueError(f"Cache config not found: {config_file}")
     elif config_path:
         config = DatasetConfig.from_json(config_path)
         print(f"Loaded config from: {config_path}")
@@ -606,6 +618,23 @@ def train(
     use_awesome_loss = dynamic_loss == "awesome"
     use_pipeline_awesome_loss = dynamic_loss == "pipeline_awesome"
     pipeline_stage_defs = sorted((pipeline_stages or []), key=lambda s: int(s.get("start_epoch", 0)))
+
+    def _resolve_pipeline_stage_by_index(stage_index: int) -> dict[str, Any]:
+        """Return stage metadata for a fixed stage index."""
+        if not pipeline_stage_defs:
+            return _resolve_pipeline_stage(0, pipeline_stage_defs)
+
+        bounded_index = min(max(int(stage_index), 0), len(pipeline_stage_defs) - 1)
+        stage = pipeline_stage_defs[bounded_index]
+        return {
+            "index": bounded_index,
+            "name": str(stage.get("name", f"stage_{bounded_index}")),
+            "start_epoch": int(stage.get("start_epoch", 0)),
+            "awesome_loss_weight": stage.get("awesome_loss_weight"),
+            "vad_loss_weight": stage.get("vad_loss_weight"),
+            "vad_speech_loss_weight": stage.get("vad_speech_loss_weight"),
+        }
+
     base_awesome_loss_weight = awesome_loss_weight
     base_vad_loss_weight = vad_loss_weight
     base_vad_speech_loss_weight = vad_speech_loss_weight
@@ -1085,6 +1114,8 @@ def train(
     resume_global_step = 0
     resume_batch_idx = 0
     resume_checkpoint_kind = "epoch_end"
+    resume_stage_index: int | None = None
+    resume_stage_name: str | None = None
 
     if resume_from:
         state = load_checkpoint(
@@ -1111,6 +1142,20 @@ def train(
             if ckpt_kind in _IN_PROGRESS_KINDS:
                 resume_batch_idx = resolve_resume_batch_count(state)
             best_valid_loss = state.get("best_valid_loss", float("inf"))
+            ckpt_stage_index = state.get("pipeline_stage_index")
+            ckpt_stage_name = state.get("pipeline_stage_name")
+            if isinstance(ckpt_stage_index, int) and ckpt_stage_index >= 0:
+                resume_stage_index = ckpt_stage_index
+            if isinstance(ckpt_stage_name, str):
+                resume_stage_name = ckpt_stage_name
+
+            # Restore dynamic pipeline stages if present
+            ckpt_config = state.get("config", {})
+            if "pipeline_stages" in ckpt_config and ckpt_config["pipeline_stages"]:
+                pipeline_stage_defs.clear()
+                pipeline_stage_defs.extend(ckpt_config["pipeline_stages"])
+                print("  Restored dynamic pipeline stages from checkpoint.")
+
             print(
                 "  Resumed from: "
                 f"{resume_from} (epoch {start_epoch}, kind={ckpt_kind}, "
@@ -1133,11 +1178,41 @@ def train(
     if train_stream is not None and data_resume_progress is not None:
         data_epoch = data_resume_progress.get("epoch")
         data_batch = data_resume_progress.get("batch")
+        data_stage_index = data_resume_progress.get("pipeline_stage_index")
+        data_stage_name = data_resume_progress.get("pipeline_stage_name")
         if not isinstance(data_epoch, int) or not isinstance(data_batch, int):
             raise RuntimeError(
                 "Data checkpoint progress is malformed. "
                 f"source={data_resume_source}, progress={data_resume_progress}"
             )
+        if data_stage_index is not None and (not isinstance(data_stage_index, int) or data_stage_index < 0):
+            raise RuntimeError(
+                "Data checkpoint stage is malformed. " f"source={data_resume_source}, stage={data_stage_index}"
+            )
+        if data_stage_name is not None and not isinstance(data_stage_name, str):
+            raise RuntimeError(
+                "Data checkpoint stage name is malformed. " f"source={data_resume_source}, stage_name={data_stage_name}"
+            )
+
+        if resume_from is not None and isinstance(data_stage_index, int):
+            if resume_stage_index is None:
+                resume_stage_index = data_stage_index
+                if isinstance(data_stage_name, str):
+                    resume_stage_name = data_stage_name
+            elif data_stage_index > resume_stage_index:
+                raise RuntimeError(
+                    "Model checkpoint and data checkpoint disagree on curriculum stage. "
+                    f"model_stage={resume_stage_index}, data_stage={data_stage_index} from {data_resume_source}. "
+                    "Remediation: remove stale checkpoint artifacts and resume from a consistent pair."
+                )
+            elif data_stage_index < resume_stage_index:
+                print(
+                    "ℹ️  Auto-correcting data checkpoint stage: "
+                    f"data={data_stage_index} → model={resume_stage_index}."
+                )
+                train_stream._checkpoint.pipeline_stage_index = resume_stage_index
+                if resume_stage_name is not None:
+                    train_stream._checkpoint.pipeline_stage_name = resume_stage_name
 
         resume_requires_mid_epoch = resume_from is not None and resume_checkpoint_kind in _IN_PROGRESS_KINDS
         if resume_requires_mid_epoch:
@@ -1223,15 +1298,23 @@ def train(
             _gen_fn = mx.checkpoint(model)
         else:
             _gen_fn = model
-        out = _gen_fn(noisy_spec, feat_erb, feat_spec)
-        spec_loss = spectral_loss(out, target_spec)
+        out = _gen_fn(noisy_spec, feat_erb, feat_spec, return_vad=True)
+
+        # Unpack model output (Option C: Multi-task VAD head)
+        if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
+            spec_out, vad_logits = out
+        else:
+            spec_out = out
+            vad_logits = None
+
+        spec_loss = spectral_loss(spec_out, target_spec)
         total_loss = spec_loss
 
         out_wav = None
         clean_wav = None
         if (use_mrstft_loss or gan_active) and gan_istft is not None:
             out_wav, clean_wav = specs_to_wavs(
-                out,
+                spec_out,
                 target_spec,
                 istft_fn=gan_istft,
                 n_fft=config.fft_size,
@@ -1274,8 +1357,8 @@ def train(
                 noisy_imag,
                 clean_real,
                 clean_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1294,8 +1377,8 @@ def train(
                 noisy_imag,
                 clean_real,
                 clean_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1309,11 +1392,11 @@ def train(
             total_loss = total_loss + awesome_weight * pipeline_loss
 
         if use_vad_loss:
-            vad_loss, _, _, gate = _compute_vad_loss(
+            vad_loss, p_ref, _, gate = _compute_vad_loss(
                 clean_real,
                 clean_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1329,13 +1412,21 @@ def train(
                 speech_loss = _compute_speech_band_logmag_loss(
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     vad_band_mask,
                     vad_band_bins,
                     gate,
                 )
             total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
+
+            # Option C: Multi-task VAD head BCE loss (logits path)
+            if vad_logits is not None:
+                p_ref_expanded = mx.expand_dims(p_ref, axis=-1)
+                vad_head_loss = nn.losses.binary_cross_entropy(
+                    vad_logits, p_ref_expanded, with_logits=True, reduction="mean"
+                )
+                total_loss = total_loss + vad_weight * vad_head_loss
 
         if use_vad_train_reg:
             vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
@@ -1343,8 +1434,8 @@ def train(
                 clean_imag,
                 noisy_real,
                 noisy_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1361,7 +1452,7 @@ def train(
         # logging/discriminator updates without triggering a second forward.
         # out_wav/clean_wav are the raw ISTFT outputs (possibly fp32); callers
         # apply _gan_waveform_view / stop_gradient / crop independently.
-        return total_loss, out, out_wav, clean_wav
+        return total_loss, spec_out, out_wav, clean_wav
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
 
@@ -1403,8 +1494,16 @@ def train(
                 _gen_fn = mx.checkpoint(model)
             else:
                 _gen_fn = model
-            out = _gen_fn(noisy_spec, feat_erb, feat_spec)
-            spec_loss = spectral_loss(out, target_spec)
+            out = _gen_fn(noisy_spec, feat_erb, feat_spec, return_vad=True)
+
+            # Unpack model output (Option C: Multi-task VAD head)
+            if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
+                spec_out, vad_logits = out
+            else:
+                spec_out = out
+                vad_logits = None
+
+            spec_loss = spectral_loss(spec_out, target_spec)
             total_loss = spec_loss
 
             out_wav = None
@@ -1412,7 +1511,7 @@ def train(
             # GAN always active: always compute waveforms
             if gan_istft is not None:
                 out_wav, clean_wav = specs_to_wavs(
-                    out,
+                    spec_out,
                     target_spec,
                     istft_fn=gan_istft,
                     n_fft=config.fft_size,
@@ -1456,8 +1555,8 @@ def train(
                     noisy_imag,
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -1476,8 +1575,8 @@ def train(
                     noisy_imag,
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -1491,11 +1590,11 @@ def train(
                 total_loss = total_loss + awesome_weight * pipeline_loss
 
             if use_vad_loss:
-                vad_loss, _, _, gate = _compute_vad_loss(
+                vad_loss, p_ref, _, gate = _compute_vad_loss(
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -1511,13 +1610,21 @@ def train(
                     speech_loss = _compute_speech_band_logmag_loss(
                         clean_real,
                         clean_imag,
-                        out[0],
-                        out[1],
+                        spec_out[0],
+                        spec_out[1],
                         vad_band_mask,
                         vad_band_bins,
                         gate,
                     )
                 total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
+
+                # Option C: Multi-task VAD head BCE loss (logits path)
+                if vad_logits is not None:
+                    p_ref_expanded = mx.expand_dims(p_ref, axis=-1)
+                    vad_head_loss = nn.losses.binary_cross_entropy(
+                        vad_logits, p_ref_expanded, with_logits=True, reduction="mean"
+                    )
+                    total_loss = total_loss + vad_weight * vad_head_loss
 
             if use_vad_train_reg:
                 vad_reg_loss, _, _, _, _, _, _ = _compute_vad_reg_loss(
@@ -1525,8 +1632,8 @@ def train(
                     clean_imag,
                     noisy_real,
                     noisy_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -1539,7 +1646,7 @@ def train(
                 )
                 total_loss = total_loss + vad_reg_weight * vad_reg_loss
 
-            return total_loss, out, out_wav, clean_wav
+            return total_loss, spec_out, out_wav, clean_wav
 
         loss_and_grad_gan = nn.value_and_grad(model, loss_fn_gan)
 
@@ -1573,14 +1680,23 @@ def train(
             if not diag.check(name, tensor, debug_ctx):
                 findings.append(name)
 
-        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
-        _diag_check("model.out_real", out[0])
-        _diag_check("model.out_imag", out[1])
-        spec_loss = spectral_loss(out, (clean_real, clean_imag))
+        out = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
+        if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
+            spec_out, vad_logits = out
+        else:
+            spec_out = out
+            vad_logits = None
+
+        _diag_check("model.out_real", spec_out[0])
+        _diag_check("model.out_imag", spec_out[1])
+        if vad_logits is not None:
+            _diag_check("model.vad_logits", vad_logits)
+
+        spec_loss = spectral_loss(spec_out, (clean_real, clean_imag))
         _diag_check("spec_loss", spec_loss)
         if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
             mrstft_loss = compute_mrstft_loss(
-                out,
+                spec_out,
                 (clean_real, clean_imag),
                 istft_fn=mrstft_istft,
                 loss_fn=mrstft_loss_fn,
@@ -1592,7 +1708,7 @@ def train(
             _diag_check("mrstft_loss", mrstft_loss)
         if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
             out_wav, clean_wav = specs_to_wavs(
-                out,
+                spec_out,
                 (clean_real, clean_imag),
                 istft_fn=gan_istft,
                 n_fft=config.fft_size,
@@ -1614,8 +1730,8 @@ def train(
                 noisy_imag,
                 clean_real,
                 clean_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1634,8 +1750,8 @@ def train(
                 noisy_imag,
                 clean_real,
                 clean_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1652,8 +1768,8 @@ def train(
             _compute_vad_loss(
                 clean_real,
                 clean_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -1671,8 +1787,8 @@ def train(
                 _compute_speech_band_logmag_loss(
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     vad_band_mask,
                     vad_band_bins,
                     gate,
@@ -1685,8 +1801,8 @@ def train(
                 clean_imag,
                 noisy_real,
                 noisy_imag,
-                out[0],
-                out[1],
+                spec_out[0],
+                spec_out[1],
                 snr,
                 vad_band_mask,
                 vad_band_bins,
@@ -2089,15 +2205,23 @@ def train(
             noisy_spec = (noisy_real, noisy_imag)
             target_spec = (clean_real, clean_imag)
 
-            out = model(noisy_spec, feat_erb, feat_spec)
+            out = model(noisy_spec, feat_erb, feat_spec, return_vad=True)
+            if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
+                spec_out, vad_logits = out
+            else:
+                spec_out = out
+                vad_logits = None
+
             if debugger is not None:
-                debugger.check("model.out_real", out[0], debug_ctx)
-                debugger.check("model.out_imag", out[1], debug_ctx)
-            spec_loss = spectral_loss(out, target_spec)
+                debugger.check("model.out_real", spec_out[0], debug_ctx)
+                debugger.check("model.out_imag", spec_out[1], debug_ctx)
+                if vad_logits is not None:
+                    debugger.check("model.vad_logits", vad_logits, debug_ctx)
+            spec_loss = spectral_loss(spec_out, target_spec)
             mrstft_loss = _SCALAR_ZERO
             if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
                 mrstft_loss = compute_mrstft_loss(
-                    out,
+                    spec_out,
                     target_spec,
                     istft_fn=mrstft_istft,
                     loss_fn=mrstft_loss_fn,
@@ -2141,8 +2265,8 @@ def train(
                     noisy_imag,
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -2179,8 +2303,8 @@ def train(
                     noisy_imag,
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -2198,8 +2322,8 @@ def train(
                 vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                     clean_real,
                     clean_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -2217,8 +2341,8 @@ def train(
                     speech_loss = _compute_speech_band_logmag_loss(
                         clean_real,
                         clean_imag,
-                        out[0],
-                        out[1],
+                        spec_out[0],
+                        spec_out[1],
                         vad_band_mask,
                         vad_band_bins,
                         gate,
@@ -2239,8 +2363,8 @@ def train(
                     clean_imag,
                     noisy_real,
                     noisy_imag,
-                    out[0],
-                    out[1],
+                    spec_out[0],
+                    spec_out[1],
                     snr,
                     vad_band_mask,
                     vad_band_bins,
@@ -2266,8 +2390,16 @@ def train(
             if use_vad_loss:
                 loss = loss + epoch_vad_loss_weight * vad_loss + epoch_vad_speech_loss_weight * speech_loss
 
-            residual = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2)
-            residual_by_sample = mx.mean((out[0] - clean_real) ** 2 + (out[1] - clean_imag) ** 2, axis=(1, 2))
+                # Option C: Multi-task VAD head BCE loss (logits path)
+                if vad_logits is not None:
+                    p_ref_expanded = mx.expand_dims(p_ref, axis=-1)
+                    vad_head_loss = nn.losses.binary_cross_entropy(
+                        vad_logits, p_ref_expanded, with_logits=True, reduction="mean"
+                    )
+                    loss = loss + epoch_vad_loss_weight * vad_head_loss
+
+            residual = mx.mean((spec_out[0] - clean_real) ** 2 + (spec_out[1] - clean_imag) ** 2)
+            residual_by_sample = mx.mean((spec_out[0] - clean_real) ** 2 + (spec_out[1] - clean_imag) ** 2, axis=(1, 2))
 
             (
                 loss_val,
@@ -2412,8 +2544,8 @@ def train(
                     p_ref_eval, p_out_eval = _compute_vad_probs(
                         clean_real.astype(mx.float32),
                         clean_imag.astype(mx.float32),
-                        out[0].astype(mx.float32),
-                        out[1].astype(mx.float32),
+                        spec_out[0].astype(mx.float32),
+                        spec_out[1].astype(mx.float32),
                         vad_band_mask,
                         vad_band_bins,
                         vad_z_threshold,
@@ -2433,7 +2565,7 @@ def train(
                         raise RuntimeError("Silero VAD requested but not initialized")
                     vad_start = time.perf_counter()
                     clean_wav = silero_istft(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
-                    out_wav = silero_istft(out, n_fft=config.fft_size, hop_length=config.hop_size)
+                    out_wav = silero_istft(spec_out, n_fft=config.fft_size, hop_length=config.hop_size)
                     mx.eval(clean_wav, out_wav)
                     clean_np = np.asarray(clean_wav, dtype=np.float32)
                     out_np = np.asarray(out_wav, dtype=np.float32)
@@ -2449,7 +2581,7 @@ def train(
             if sisdr_fn is not None:
                 si_sdr_fn, istft_fn = sisdr_fn
                 clean_wav = istft_fn(target_spec, n_fft=config.fft_size, hop_length=config.hop_size)
-                out_wav = istft_fn(out, n_fft=config.fft_size, hop_length=config.hop_size)
+                out_wav = istft_fn(spec_out, n_fft=config.fft_size, hop_length=config.hop_size)
                 sisdr_val = float(si_sdr_fn(out_wav, clean_wav))
                 if math.isfinite(sisdr_val):
                     valid_sisdr += sisdr_val
@@ -2654,6 +2786,24 @@ def train(
     if nan_skip_batch:
         print("  nan-skip-batch: enabled (will skip updates on non-finite loss/grads)")
 
+    scheduled_start_stage = _resolve_pipeline_stage(start_epoch, pipeline_stage_defs)
+    scheduled_start_stage_index = int(scheduled_start_stage["index"])
+    if resume_stage_index is None:
+        initial_stage_index = scheduled_start_stage_index
+    else:
+        if resume_stage_index < scheduled_start_stage_index:
+            print(
+                "ℹ️  Clamping resume stage to scheduled stage floor: "
+                f"resume_stage={resume_stage_index} → scheduled_stage={scheduled_start_stage_index}."
+            )
+        initial_stage_index = max(resume_stage_index, scheduled_start_stage_index)
+    initial_stage = _resolve_pipeline_stage_by_index(initial_stage_index)
+    initial_stage_name = str(initial_stage["name"])
+    if resume_stage_name and resume_stage_name != initial_stage_name:
+        print(
+            "ℹ️  Resume stage name normalized from checkpoint metadata: " f"{resume_stage_name} → {initial_stage_name}."
+        )
+
     # Register SIGINT handler for graceful shutdown
     _register_sigint_handler(
         model,
@@ -2663,6 +2813,8 @@ def train(
         discriminator=discriminator,
         disc_optimizer=disc_optimizer,
         last_completed_epoch=last_completed_epoch,
+        pipeline_stage_index=initial_stage_index,
+        pipeline_stage_name=initial_stage_name,
     )
     print("  SIGINT handler registered (CTRL+C will save checkpoint before exit)")
 
@@ -2683,8 +2835,16 @@ def train(
     last_valid_loss: float | None = None
     last_valid_epoch: int | None = None
     train_mode: Literal["COMPILED", "EAGER"] | None = None
-    active_stage_name = "default"
-    active_stage_index = 0
+
+    active_stage_name = initial_stage_name
+    active_stage_index = initial_stage_index
+
+    def _sync_data_stream_stage(stage_index: int, stage_name: str) -> None:
+        if train_stream is None:
+            return
+        train_stream._checkpoint.pipeline_stage_index = int(stage_index)
+        train_stream._checkpoint.pipeline_stage_name = str(stage_name)
+
     epoch_awesome_loss_weight = base_awesome_loss_weight
     epoch_vad_loss_weight = base_vad_loss_weight
     epoch_vad_speech_loss_weight = base_vad_speech_loss_weight
@@ -2703,8 +2863,20 @@ def train(
         epoch_start = time.perf_counter()
         final_epoch = epoch
 
-        active_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
-        active_stage_index = int(active_stage["index"])
+        scheduled_stage = _resolve_pipeline_stage(epoch, pipeline_stage_defs)
+        scheduled_stage_index = int(scheduled_stage["index"])
+        next_stage_index = max(active_stage_index, scheduled_stage_index)
+
+        if next_stage_index != active_stage_index:
+            print(
+                "\n🔄 Pipeline stage advanced "
+                f"({active_stage_index} -> {next_stage_index}) by schedule. Resetting best_valid_loss."
+            )
+            best_valid_loss = float("inf")
+            epochs_without_improvement = 0
+
+        active_stage_index = next_stage_index
+        active_stage = _resolve_pipeline_stage_by_index(active_stage_index)
         active_stage_name = str(active_stage["name"])
         epoch_awesome_loss_weight = float(
             active_stage["awesome_loss_weight"]
@@ -2733,6 +2905,7 @@ def train(
             f"awesome_w={epoch_awesome_loss_weight:.4f} "
             f"vad_w={epoch_vad_loss_weight:.4f} speech_w={epoch_vad_speech_loss_weight:.4f}"
         )
+        _sync_data_stream_stage(active_stage_index, active_stage_name)
 
         # Set epoch for reproducible shuffling
         dataset.set_split("train")
@@ -2886,6 +3059,8 @@ def train(
             batch_idx=0,
             global_step=global_step,
             last_completed_epoch=last_completed_epoch,
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
         )
 
         # Timing accumulators for verbose diagnostics
@@ -3135,7 +3310,8 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO
@@ -3337,6 +3513,7 @@ def train(
 
                     if pred_spec_for_logging is None:
                         pred_spec = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        # pred_spec is (real, imag) — no return_vad needed here
                         pred_spec = (
                             mx.stop_gradient(pred_spec[0]),
                             mx.stop_gradient(pred_spec[1]),
@@ -3464,6 +3641,8 @@ def train(
                 batch_idx=num_train_batches,
                 global_step=global_step,
                 last_completed_epoch=last_completed_epoch,
+                pipeline_stage_index=active_stage_index,
+                pipeline_stage_name=active_stage_name,
             )
 
             # Stop early for benchmarking if requested
@@ -3522,23 +3701,29 @@ def train(
                 if needs_model_out:
                     out = pred_spec_for_logging
                     if out is None:
-                        out = model((noisy_real, noisy_imag), feat_erb, feat_spec)
+                        out = model((noisy_real, noisy_imag), feat_erb, feat_spec, return_vad=True)
+                        if isinstance(out, tuple) and len(out) == 2 and isinstance(out[0], tuple):
+                            spec_out, _vad_logits = out
+                        else:
+                            spec_out = out
                         out = (
-                            mx.stop_gradient(out[0]),
-                            mx.stop_gradient(out[1]),
+                            mx.stop_gradient(spec_out[0]),
+                            mx.stop_gradient(spec_out[1]),
                         )
+                    else:
+                        spec_out = out
                     if debugger is not None:
-                        debugger.check("model.out_real", out[0], debug_ctx)
-                        debugger.check("model.out_imag", out[1], debug_ctx)
+                        debugger.check("model.out_real", spec_out[0], debug_ctx)
+                        debugger.check("model.out_imag", spec_out[1], debug_ctx)
 
                 if emit_detailed_metrics and needs_model_out:
-                    spec_loss = spectral_loss(out, (clean_real, clean_imag))
+                    spec_loss = spectral_loss(spec_out, (clean_real, clean_imag))
                     spec_loss_val = float(spec_loss)
                     train_spec_loss += spec_loss_val * epoch_eval_frequency
                     if use_mrstft_loss and mrstft_loss_fn is not None and mrstft_istft is not None:
                         mrstft_loss_val = float(
                             compute_mrstft_loss(
-                                out,
+                                spec_out,
                                 (clean_real, clean_imag),
                                 istft_fn=mrstft_istft,
                                 loss_fn=mrstft_loss_fn,
@@ -3551,7 +3736,7 @@ def train(
                         train_mrstft_loss += mrstft_loss_val * epoch_eval_frequency
                     if gan_active and gan_loss_fns is not None and discriminator is not None and gan_istft is not None:
                         out_wav, clean_wav = specs_to_wavs(
-                            out,
+                            spec_out,
                             (clean_real, clean_imag),
                             istft_fn=gan_istft,
                             n_fft=config.fft_size,
@@ -3574,8 +3759,8 @@ def train(
                     vad_loss, p_ref, p_out, gate = _compute_vad_loss(
                         clean_real,
                         clean_imag,
-                        out[0],
-                        out[1],
+                        spec_out[0],
+                        spec_out[1],
                         snr,
                         vad_band_mask,
                         vad_band_bins,
@@ -3593,8 +3778,8 @@ def train(
                         speech_loss = _compute_speech_band_logmag_loss(
                             clean_real,
                             clean_imag,
-                            out[0],
-                            out[1],
+                            spec_out[0],
+                            spec_out[1],
                             vad_band_mask,
                             vad_band_bins,
                             gate,
@@ -3622,7 +3807,7 @@ def train(
 
                     if debug_numerics:
                         clean_power_dbg = clean_real.astype(mx.float32) ** 2 + clean_imag.astype(mx.float32) ** 2
-                        out_power_dbg = out[0].astype(mx.float32) ** 2 + out[1].astype(mx.float32) ** 2
+                        out_power_dbg = spec_out[0].astype(mx.float32) ** 2 + spec_out[1].astype(mx.float32) ** 2
                         clean_band_dbg = mx.sum(clean_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
                         out_band_dbg = mx.sum(out_power_dbg * vad_band_mask, axis=-1) / (vad_band_bins + _EPS)
                         log_clean_dbg = mx.log10(clean_band_dbg + _EPS)
@@ -3654,8 +3839,8 @@ def train(
                         noisy_imag,
                         clean_real,
                         clean_imag,
-                        out[0],
-                        out[1],
+                        spec_out[0],
+                        spec_out[1],
                         snr,
                         vad_band_mask,
                         vad_band_bins,
@@ -3929,6 +4114,7 @@ def train(
             # Save data checkpoint periodically (for resume capability)
             if checkpoint_batches > 0 and use_mlx_stream and train_stream is not None:
                 if (batch_idx + 1) % checkpoint_batches == 0:
+                    _sync_data_stream_stage(active_stage_index, active_stage_name)
                     train_stream.save_checkpoint(data_checkpoint_path)
 
             # Save model checkpoint by steps (HuggingFace-style)
@@ -3951,6 +4137,8 @@ def train(
                     discriminator=discriminator,
                     disc_optimizer=disc_optimizer,
                     last_completed_epoch=last_completed_epoch,
+                    pipeline_stage_index=active_stage_index,
+                    pipeline_stage_name=active_stage_name,
                     kind="step",
                 )
                 if step_saved:
@@ -3972,6 +4160,7 @@ def train(
 
         # Save data checkpoint at end of epoch (for clean resume at epoch boundary)
         if use_mlx_stream and train_stream is not None:
+            _sync_data_stream_stage(active_stage_index, active_stage_name)
             train_stream.save_checkpoint(data_checkpoint_path)
 
         avg_train_loss = train_loss / max(num_train_batches, 1)
@@ -4051,6 +4240,8 @@ def train(
                     discriminator=discriminator,
                     disc_optimizer=disc_optimizer,
                     last_completed_epoch=epoch,
+                    pipeline_stage_index=active_stage_index,
+                    pipeline_stage_name=active_stage_name,
                     kind="best",
                 )
                 if best_saved:
@@ -4062,6 +4253,8 @@ def train(
                         batch_idx=num_train_batches,
                         global_step=global_step,
                         last_completed_epoch=last_completed_epoch,
+                        pipeline_stage_index=active_stage_index,
+                        pipeline_stage_name=active_stage_name,
                     )
                 else:
                     print("⚠️  Best checkpoint save failed; epoch completion not updated.")
@@ -4080,6 +4273,8 @@ def train(
             batch_idx=num_train_batches,
             global_step=global_step,
             last_completed_epoch=last_completed_epoch,
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
         )
 
         # Improved epoch summary with throughput
@@ -4167,6 +4362,55 @@ def train(
             if parts:
                 print("  Debug numerics: " + " | ".join(parts))
 
+        # ====== Early Stopping / Curriculum Advance ======
+        should_stop = False
+        if patience > 0 and epochs_without_improvement >= patience:
+            if active_stage_index + 1 < len(pipeline_stage_defs):
+                prev_stage_index = active_stage_index
+                active_stage_index += 1
+                next_stage = _resolve_pipeline_stage_by_index(active_stage_index)
+                active_stage_name = str(next_stage["name"])
+                print(f"\nEarly stopping triggered after {patience} epochs without improvement.")
+                print(
+                    "Moving to next pipeline stage "
+                    f"'{active_stage_name}' early ({prev_stage_index} -> {active_stage_index})."
+                )
+                best_valid_loss = float("inf")
+                epochs_without_improvement = 0
+                train_config["pipeline_stage_active"] = {
+                    "index": active_stage_index,
+                    "name": active_stage_name,
+                    "start_epoch": int(next_stage["start_epoch"]),
+                    "awesome_loss_weight": (
+                        float(next_stage["awesome_loss_weight"])
+                        if next_stage["awesome_loss_weight"] is not None
+                        else base_awesome_loss_weight
+                    ),
+                    "vad_loss_weight": (
+                        float(next_stage["vad_loss_weight"])
+                        if next_stage["vad_loss_weight"] is not None
+                        else base_vad_loss_weight
+                    ),
+                    "vad_speech_loss_weight": (
+                        float(next_stage["vad_speech_loss_weight"])
+                        if next_stage["vad_speech_loss_weight"] is not None
+                        else base_vad_speech_loss_weight
+                    ),
+                }
+                _sync_data_stream_stage(active_stage_index, active_stage_name)
+                _update_interrupt_state(
+                    epoch,
+                    avg_train_loss,
+                    best_valid_loss,
+                    batch_idx=num_train_batches,
+                    global_step=global_step,
+                    last_completed_epoch=last_completed_epoch,
+                    pipeline_stage_index=active_stage_index,
+                    pipeline_stage_name=active_stage_name,
+                )
+            else:
+                should_stop = True
+
         # ====== End-of-Epoch Checkpointing (authoritative completion) ======
         ckpt_path = ckpt_dir / f"epoch_{epoch + 1:03d}.safetensors"
         epoch_saved = save_checkpoint(
@@ -4182,6 +4426,8 @@ def train(
             discriminator=discriminator,
             disc_optimizer=disc_optimizer,
             last_completed_epoch=epoch,
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
             kind="epoch_end",
         )
         epoch_completed = epoch_saved or best_saved
@@ -4194,6 +4440,8 @@ def train(
                 batch_idx=num_train_batches,
                 global_step=global_step,
                 last_completed_epoch=last_completed_epoch,
+                pipeline_stage_index=active_stage_index,
+                pipeline_stage_name=active_stage_name,
             )
             _write_epoch_complete_marker(ckpt_dir, epoch, ckpt_path)
             print(f"  📦 Checkpoint saved: {ckpt_path.name}")
@@ -4205,8 +4453,7 @@ def train(
             else:
                 print("⚠️  End-of-epoch checkpoint failed; epoch not marked as complete.")
 
-        # ====== Early Stopping ======
-        if epochs_without_improvement >= patience:
+        if should_stop:
             print(f"\nEarly stopping after {patience} epochs without improvement")
             break
 
@@ -4239,6 +4486,8 @@ def train(
             discriminator=discriminator,
             disc_optimizer=disc_optimizer,
             last_completed_epoch=max(last_completed_epoch, final_epoch),
+            pipeline_stage_index=active_stage_index,
+            pipeline_stage_name=active_stage_name,
             kind="best_final",
         )
         if best_final_saved:
@@ -4262,6 +4511,8 @@ def train(
         discriminator=discriminator,
         disc_optimizer=disc_optimizer,
         last_completed_epoch=max(last_completed_epoch, final_epoch),
+        pipeline_stage_index=active_stage_index,
+        pipeline_stage_name=active_stage_name,
         kind="final",
     )
     if final_saved:

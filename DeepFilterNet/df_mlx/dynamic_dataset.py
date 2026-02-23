@@ -50,8 +50,14 @@ from scipy import signal as scipy_signal
 from .augment_ext import biquad_filter as _ext_biquad_filter
 from .augment_ext import combine_noises as _ext_combine_noises
 from .augment_ext import mix_audio as _ext_mix_audio
-from .feature_ops import compute_df_features, compute_erb_features, compute_stft, create_erb_filterbank
+from .feature_ops import (
+    compute_df_features,
+    compute_erb_features,
+    compute_stft,
+    create_erb_filterbank,
+)
 from .file_lists import read_file_list as _read_file_list
+from .hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
 
 # Optional mlx-data import (for MLXDataStream)
 try:
@@ -131,7 +137,10 @@ class DatasetConfig:
     p_clipping: float = 0.0  # Probability of clipping distortion
     p_bandwidth_ext: float = 0.0  # Probability of bandwidth extension
     p_interfer_speech: float = 0.0  # Probability of interfering speaker
-    interfer_speech_snr_range: Tuple[float, float] = (-10.0, 10.0)  # dB, SNR of interferer vs target
+    interfer_speech_snr_range: Tuple[float, float] = (
+        -10.0,
+        10.0,
+    )  # dB, SNR of interferer vs target
 
     # Noise mixing
     n_noise_min: int = 2  # Minimum noises to combine
@@ -178,14 +187,24 @@ class ShardedAudioCache:
             cache_dir: Path to cache directory (containing index.json)
             category: 'speech', 'noise', or 'rir'
         """
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir_str = normalize_hf_dataset_cache_dir(str(cache_dir))
+        self.is_hf = self.cache_dir_str.startswith("hf://")
         self.category = category
-        self.shard_dir = self.cache_dir / category
 
-        # Load index
-        index_path = self.cache_dir / "index.json"
-        with open(index_path) as f:
-            all_indices = json.load(f)
+        if self.is_hf:
+            from huggingface_hub import HfFileSystem
+
+            self.fs = HfFileSystem()
+            self.hf_path = hf_dataset_fsspec_path(self.cache_dir_str)
+            index_path = f"{self.hf_path}/index.json"
+            with self.fs.open(index_path, "r") as f:
+                all_indices = json.load(f)
+        else:
+            self.cache_dir = Path(cache_dir)
+            self.shard_dir = self.cache_dir / category
+            index_path = self.cache_dir / "index.json"
+            with open(index_path) as f:
+                all_indices = json.load(f)
 
         self.index: Dict[str, Tuple[str, str]] = {}
         if category in all_indices:
@@ -203,7 +222,7 @@ class ShardedAudioCache:
     def __len__(self) -> int:
         return len(self.files)
 
-    def _get_shard(self, shard_rel_path: str) -> Any:  # Returns NpzFile
+    def _get_shard(self, shard_rel_path: str) -> Any:  # Returns npz wrapper
         """Get a shard NpzFile, loading from disk if needed.
 
         Uses lazy loading - the NpzFile object is kept open and arrays are
@@ -219,8 +238,12 @@ class ShardedAudioCache:
                 return self._shard_cache[shard_rel_path]
 
         # Open NpzFile lazily (arrays loaded on access, not upfront)
-        shard_path = self.cache_dir / shard_rel_path
-        npz_file = np.load(shard_path, mmap_mode="r")
+        if self.is_hf:
+            shard_path = f"{self.hf_path}/{shard_rel_path}"
+            npz_file = _HFNpzShard(self.fs.open(shard_path, "rb"))
+        else:
+            shard_path = self.cache_dir / shard_rel_path
+            npz_file = np.load(shard_path, mmap_mode="r")
 
         with self._lock:
             # Evict oldest if at capacity
@@ -253,8 +276,25 @@ class ShardedAudioCache:
     def clear(self) -> None:
         """Clear the shard cache."""
         with self._lock:
+            for shard in self._shard_cache.values():
+                shard.close()
             self._shard_cache.clear()
             self._shard_access.clear()
+
+
+class _HFNpzShard:
+    """Keep an HF file handle alive while lazily reading a NumPy NPZ archive."""
+
+    def __init__(self, file_obj: Any):
+        self._file_obj = file_obj
+        self._npz = np.load(file_obj)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._npz[key]
+
+    def close(self) -> None:
+        self._npz.close()
+        self._file_obj.close()
 
 
 class AudioCache:
@@ -824,12 +864,24 @@ class DynamicDataset:
 
         if self._use_cache:
             # Fast path: load from sharded NPZ cache
+            if str(config.cache_dir).startswith("hf://"):
+                config.cache_dir = normalize_hf_dataset_cache_dir(str(config.cache_dir))
+
             self.speech_cache = ShardedAudioCache(config.cache_dir, "speech")
             self.noise_cache = ShardedAudioCache(config.cache_dir, "noise")
 
             # RIR cache is optional
-            rir_cache_dir = Path(config.cache_dir) / "rir"
-            if rir_cache_dir.exists():
+            if str(config.cache_dir).startswith("hf://"):
+                from huggingface_hub import HfFileSystem
+
+                fs = HfFileSystem()
+                hf_path = hf_dataset_fsspec_path(str(config.cache_dir))
+                has_rir = fs.exists(f"{hf_path}/rir")
+            else:
+                rir_cache_dir = Path(config.cache_dir) / "rir"
+                has_rir = rir_cache_dir.exists()
+
+            if has_rir:
                 self.rir_cache = ShardedAudioCache(config.cache_dir, "rir")
             else:
                 self.rir_cache = None
@@ -1342,6 +1394,8 @@ class CheckpointState:
     samples_processed: int = 0
     seed: int = 42
     split: str = "train"
+    pipeline_stage_index: int = 0
+    pipeline_stage_name: str = "default"
     timestamp: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1352,6 +1406,8 @@ class CheckpointState:
             "samples_processed": self.samples_processed,
             "seed": self.seed,
             "split": self.split,
+            "pipeline_stage_index": self.pipeline_stage_index,
+            "pipeline_stage_name": self.pipeline_stage_name,
             "timestamp": self.timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -1364,6 +1420,8 @@ class CheckpointState:
             samples_processed=data.get("samples_processed", 0),
             seed=data.get("seed", 42),
             split=data.get("split", "train"),
+            pipeline_stage_index=data.get("pipeline_stage_index", 0),
+            pipeline_stage_name=data.get("pipeline_stage_name", "default"),
             timestamp=data.get("timestamp", ""),
         )
 
@@ -1723,5 +1781,7 @@ class MLXDataStream:
             "batch": batch,
             "total_batches": total_batches,
             "samples_processed": self._checkpoint.samples_processed,
+            "pipeline_stage_index": self._checkpoint.pipeline_stage_index,
+            "pipeline_stage_name": self._checkpoint.pipeline_stage_name,
             "progress_pct": 100.0 * batch / max(total_batches, 1),
         }

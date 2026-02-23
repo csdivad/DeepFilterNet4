@@ -13,7 +13,7 @@ The model processes noisy speech spectrograms and outputs enhanced speech
 by applying learned masks and deep filtering operations.
 """
 
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -184,6 +184,40 @@ class Encoder4(nn.Module):
 # ============================================================================
 # ERB Decoder
 # ============================================================================
+
+
+class VadHead(nn.Module):
+    """VAD prediction head.
+
+    Predicts speech presence probability from the backbone embedding.
+
+    Args:
+        p: Model parameters
+    """
+
+    def __init__(self, p: ModelParams4):
+        super().__init__()
+        self.p = p
+
+        # Simple MLP for VAD prediction — returns raw logits.
+        # Sigmoid is applied downstream: in inference gating and via
+        # binary_cross_entropy(with_logits=True) during training.
+        self.mlp = nn.Sequential(
+            nn.Linear(p.emb_hidden_dim, p.emb_hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(p.emb_hidden_dim // 2, 1),
+        )
+
+    def __call__(self, emb: mx.array) -> mx.array:
+        """Forward pass.
+
+        Args:
+            emb: Backbone embedding (batch, time, emb_hidden_dim)
+
+        Returns:
+            VAD logits (batch, time, 1) — apply sigmoid for probabilities
+        """
+        return self.mlp(emb)
 
 
 class ErbDecoder4(nn.Module):
@@ -999,6 +1033,7 @@ class DfNet4(nn.Module):
         # Decoders
         self.erb_decoder = ErbDecoder4(p)
         self.df_decoder = DfDecoder4(p)  # Uses p.df_output_mode
+        self.vad_head = VadHead(p)
 
         # Deep filtering operation (only needed for coefficients mode)
         if self.df_output_mode == "coefficients":
@@ -1142,7 +1177,8 @@ class DfNet4(nn.Module):
         feat_erb: mx.array,
         feat_spec: mx.array,
         training: bool = False,
-    ) -> Tuple[mx.array, mx.array]:
+        return_vad: bool = False,
+    ) -> Union[Tuple[mx.array, mx.array], Tuple[Tuple[mx.array, mx.array], mx.array]]:
         """Forward pass.
 
         Args:
@@ -1150,9 +1186,10 @@ class DfNet4(nn.Module):
             feat_erb: ERB features (batch, time, erb_bands)
             feat_spec: DF features (batch, time, df_bins, 2)
             training: Whether in training mode (enables LSNR dropout)
+            return_vad: Whether to return the VAD logits
 
         Returns:
-            Enhanced spectrum as (real, imag)
+            Enhanced spectrum as (real, imag), or tuple of (spectrum, vad_logits) if return_vad=True
         """
         spec_real, spec_imag = spec
         # Shape is (batch, time, freq) - used implicitly in operations below
@@ -1179,6 +1216,9 @@ class DfNet4(nn.Module):
 
         # Mamba backbone
         emb, _ = self.backbone(emb)
+
+        # VAD prediction (logits — sigmoid deferred to where needed)
+        vad_logits = self.vad_head(emb)
 
         # Decode ERB mask
         erb_mask = self.erb_decoder(emb)  # (batch, time, nb_erb)
@@ -1208,6 +1248,13 @@ class DfNet4(nn.Module):
         # Apply post-filter (optional, reduces musical noise)
         spec_out = self._apply_post_filter(spec_out, spec)
 
+        # Apply VAD gating during inference
+        if not training:
+            # Soft gate with a -40dB floor (0.01)
+            vad_gate = mx.maximum(mx.sigmoid(vad_logits), 0.01)
+            spec_out_real, spec_out_imag = spec_out
+            spec_out = (spec_out_real * vad_gate, spec_out_imag * vad_gate)
+
         # Apply LSNR dropout masking
         if self.lsnr_dropout and training and active_mask is not None:
             spec_out_real, spec_out_imag = spec_out
@@ -1217,6 +1264,8 @@ class DfNet4(nn.Module):
             spec_out_imag = mx.where(active_mask_expanded, spec_out_imag, spec_imag)
             spec_out = (spec_out_real, spec_out_imag)
 
+        if return_vad:
+            return spec_out, vad_logits
         return spec_out
 
     def forward_with_lsnr(
@@ -1617,6 +1666,12 @@ class StreamingDfNet4(nn.Module):
         # Apply post-filter
         spec_out = model._apply_post_filter(spec_out, spec)
 
+        # Apply VAD gating (inference-only, matches DfNet4.__call__ behavior)
+        vad_logits = model.vad_head(emb)
+        vad_gate = mx.maximum(mx.sigmoid(vad_logits), 0.01)
+        spec_out_real, spec_out_imag = spec_out
+        spec_out = (spec_out_real * vad_gate, spec_out_imag * vad_gate)
+
         return spec_out, new_state
 
     def _backbone_with_state(
@@ -1678,6 +1733,7 @@ class StreamingDfNet4(nn.Module):
         backbone = model.backbone
         erb_decoder = model.erb_decoder
         df_decoder = model.df_decoder
+        vad_head = model.vad_head
 
         @mx.compile
         def compiled_frame(audio_frame, input_buffer, output_buffer, window_sum, mamba_states):
@@ -1739,6 +1795,11 @@ class StreamingDfNet4(nn.Module):
                 spec_out = model._apply_complex_gain((masked_real, masked_imag), df_out)
 
             spec_out = model._apply_post_filter(spec_out, (spec_real, spec_imag))
+
+            # --- VAD gating (matches DfNet4.__call__ inference behavior) ---
+            vad_logits = vad_head(emb_out)
+            vad_gate = mx.maximum(mx.sigmoid(vad_logits), 0.01)
+            spec_out = (spec_out[0] * vad_gate, spec_out[1] * vad_gate)
 
             # --- iSTFT ---
             sr = mx.squeeze(spec_out[0], axis=1)

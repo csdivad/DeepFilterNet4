@@ -50,7 +50,7 @@ Feature requests are welcome! Please use the [Feature Request template](.github/
 ### Prerequisites
 
 - Rust (via [rustup](https://rustup.rs/))
-- Python 3.8+ 
+- Python 3.8+
 - Poetry for Python dependency management
 - Maturin for building Python wheels
 

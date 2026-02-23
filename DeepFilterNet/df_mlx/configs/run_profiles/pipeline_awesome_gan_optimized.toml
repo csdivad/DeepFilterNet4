@@ -25,7 +25,7 @@
 #     --run-config DeepFilterNet/df_mlx/configs/run_profiles/pipeline_awesome_gan_optimized.toml
 
 [dataset]
-cache_dir = "/Users/andrew/DataDump/datasets/mlx_datastore"
+cache_dir = "./datasets/mlx_datastore"
 
 [training]
 epochs = 200
@@ -47,7 +47,7 @@ prefetch_size = 16           # up from 12: better data pipeline overlap for bs=1
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "/Users/andrew/DataDump/checkpoints/gan_optimized_vad_weighted"
+checkpoint_dir = "./checkpoints/gan_optimized_vad_weighted"
 save_strategy = "epoch"
 save_total_limit = 3        # keep last 3 epoch/step checkpoints; best.safetensors is preserved separately
 validate_every = 1

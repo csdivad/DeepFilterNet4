@@ -16,6 +16,7 @@ data/
 .fastembed_cache
 .codanna/
 models/
+*.npz
 
 ### Rust gitignore ###
 

@@ -319,6 +319,19 @@ resolve_ld() {
   echo ""
 }
 
+uv_avail() {
+  command -v uv >/dev/null 2>&1
+}
+
+pip_install() {
+  if uv_avail; then
+    # Tie uv installs to the active interpreter/venv for pip parity.
+    uv pip install --python "$(command -v python)" "$@"
+  else
+    python -m pip install "$@"
+  fi
+}
+
 # ------------------------- macOS deployment target ------------------------- #
 # Set early so it applies to all native builds (pip, cargo, maturin).
 # This avoids version mismatch errors where assembly/C code compiled for
@@ -354,7 +367,7 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
 
   pushd DeepFilterNet
 
-  python -m pip install -U pip setuptools wheel silero-vad
+  pip_install -U pip setuptools wheel silero-vad
 
   all_extras=("${DEFAULT_EXTRAS[@]}")
   if [[ ${#USER_EXTRAS[@]} -gt 0 ]]; then
@@ -389,7 +402,7 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
     echo "Installing project without extras${edit_label}"
     pip_install_args+=(".")
   fi
-  python -m pip install "${pip_install_args[@]}"
+  pip_install "${pip_install_args[@]}"
 
   popd
 fi
@@ -427,7 +440,7 @@ if [[ $BUILD_PYDF -eq 1 || $BUILD_PYDF_DATA -eq 1 || $BUILD_PYDF_AUGMENT -eq 1 ]
   echo "==> Maturin builds"
   if ! command -v maturin >/dev/null 2>&1; then
     echo "maturin not found; installing into current environment"
-    python -m pip install maturin
+    pip_install maturin
   fi
 fi
 

@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "DeepFilterAugment"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "ndarray",
  "numpy",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "DeepFilterDataLoader"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "crossbeam-channel",
  "deep_filter",
@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "DeepFilterLib"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "deep_filter",
  "ndarray",
@@ -1092,7 +1092,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "deep-filter-ladspa"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "deep_filter",
  "env_logger 0.10.2",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "deep_filter"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "df-demo"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",

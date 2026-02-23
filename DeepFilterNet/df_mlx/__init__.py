@@ -47,7 +47,7 @@ Optional:
     - pesq (for PESQ metric)
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # Check MLX availability
 try:

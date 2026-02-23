@@ -122,17 +122,18 @@ Major innovations:
 │   │  └──────────────────────────────────────────────┘   │          │
 │   └────────────────────────┬────────────────────────────┘          │
 │                            │                                        │
-│              ┌─────────────┴─────────────┐                         │
-│              ▼                           ▼                         │
-│   ┌──────────────────┐        ┌──────────────────┐                 │
-│   │   ERB Decoder    │        │    DF Decoder    │                 │
-│   │  (Gain Masks)    │        │(Filter Coeffs)   │                 │
-│   └────────┬─────────┘        └────────┬─────────┘                 │
-│            │                           │                           │
-│            ▼                           ▼                           │
+│              ┌─────────────┼─────────────┐                         │
+│              ▼             ▼             ▼                         │
+│   ┌──────────────────┐┌──────────┐┌──────────────────┐             │
+│   │   ERB Decoder    ││ VAD Head ││    DF Decoder    │             │
+│   │  (Gain Masks)    ││(Speech P)││(Filter Coeffs)   │             │
+│   └────────┬─────────┘└────┬─────┘└────────┬─────────┘             │
+│            │               │               │                       │
+│            ▼               ▼               ▼                       │
 │   ┌──────────────────────────────────────────────────┐             │
 │   │              Apply Deep Filtering                 │             │
 │   │   enhanced = gains ⊙ input + DF(input, coeffs)   │             │
+│   │   output = max(sigmoid(vad_logits), 0.01) * enhanced │             │
 │   └────────────────────────┬─────────────────────────┘             │
 │                            │                                        │
 │                            ▼                                        │
@@ -292,6 +293,27 @@ Linear (256 → nb_erb)
     │
     ▼
 Sigmoid → Gains (B, T, nb_erb) ∈ [0, 1]
+```
+
+#### VAD Head (Voice Activity Detection)
+
+Estimates speech presence from the backbone embedding. Returns raw logits; sigmoid is applied downstream at inference gating points and via `binary_cross_entropy(with_logits=True)` during training.
+
+```python
+Mamba Output (B, T, d_model)
+    │
+    ▼
+Linear (d_model → d_model // 2)
+    │
+    ▼
+GELU
+    │
+    ▼
+Linear (d_model // 2 → 1)
+    │
+    ▼
+VAD Logits (B, T, 1) — unbounded
+    # sigmoid applied at inference: gate = max(sigmoid(logits), 0.01)
 ```
 
 #### DF Decoder (Filter Coefficient Estimation)

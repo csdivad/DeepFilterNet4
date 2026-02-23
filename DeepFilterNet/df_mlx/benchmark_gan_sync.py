@@ -111,9 +111,7 @@ def _make_batch(batch_size: int) -> Dict[str, mx.array]:
     }
 
 
-def _make_waveforms(
-    batch_size: int, max_samples: int = _DISC_MAX_SAMPLES
-) -> Tuple[mx.array, mx.array]:
+def _make_waveforms(batch_size: int, max_samples: int = _DISC_MAX_SAMPLES) -> Tuple[mx.array, mx.array]:
     pred_wav = mx.random.normal((batch_size, max_samples))
     clean_wav = mx.random.normal((batch_size, max_samples))
     return pred_wav, clean_wav
@@ -400,18 +398,12 @@ def _print_comparison(old: SyncBenchmarkResult, new: SyncBenchmarkResult) -> Non
     print()
     print(f"  {'Metric':<20} {'OLD (5 barriers)':>18} {'NEW (1 barrier)':>18} {'Speedup':>10}")
     print(f"  {'-' * 20} {'-' * 18} {'-' * 18} {'-' * 10}")
-    print(
-        f"  {'Mean (ms)':<20} {old.step_mean_ms:>18.2f} {new.step_mean_ms:>18.2f} "
-        f"{speedup_mean:>9.2f}x"
-    )
+    print(f"  {'Mean (ms)':<20} {old.step_mean_ms:>18.2f} {new.step_mean_ms:>18.2f} " f"{speedup_mean:>9.2f}x")
     print(
         f"  {'Median (ms)':<20} {old.step_median_ms:>18.2f} {new.step_median_ms:>18.2f} "
         f"{old.step_median_ms / new.step_median_ms if new.step_median_ms > 0 else 0:>9.2f}x"
     )
-    print(
-        f"  {'P95 (ms)':<20} {old.step_p95_ms:>18.2f} {new.step_p95_ms:>18.2f} "
-        f"{speedup_p95:>9.2f}x"
-    )
+    print(f"  {'P95 (ms)':<20} {old.step_p95_ms:>18.2f} {new.step_p95_ms:>18.2f} " f"{speedup_p95:>9.2f}x")
     print(
         f"  {'P99 (ms)':<20} {old.step_p99_ms:>18.2f} {new.step_p99_ms:>18.2f} "
         f"{old.step_p99_ms / new.step_p99_ms if new.step_p99_ms > 0 else 0:>9.2f}x"
@@ -425,9 +417,7 @@ def _print_comparison(old: SyncBenchmarkResult, new: SyncBenchmarkResult) -> Non
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Benchmark GAN sync-barrier patterns (old=5 barriers vs new=1)"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark GAN sync-barrier patterns (old=5 barriers vs new=1)")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size (default: 4)")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup steps per repeat")
     parser.add_argument("--steps", type=int, default=40, help="Measured steps per repeat")
@@ -497,11 +487,7 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         payload: Any = {
             "results": [asdict(old_result), asdict(new_result)],
-            "speedup_mean": (
-                old_result.step_mean_ms / new_result.step_mean_ms
-                if new_result.step_mean_ms > 0
-                else 0
-            ),
+            "speedup_mean": (old_result.step_mean_ms / new_result.step_mean_ms if new_result.step_mean_ms > 0 else 0),
             "saved_ms_per_step": old_result.step_mean_ms - new_result.step_mean_ms,
         }
         if args.metadata:

@@ -708,12 +708,20 @@ class TestFullModel:
         feat_spec = mx.random.normal(shape=(batch, time, 96, 2))  # (batch, time, df_bins, 2)
 
         spec = (spec_real, spec_imag)
-        output = model(spec, feat_erb, feat_spec)
-        mx.eval(output[0], output[1])
+        output = model(spec, feat_erb, feat_spec, return_vad=True)
 
-        out_real, out_imag = output
+        # Model returns (spec_out, vad_logits) — VadHead outputs raw logits
+        assert isinstance(output, tuple)
+        assert len(output) == 2
+        spec_out, vad_logits = output
+
+        out_real, out_imag = spec_out
+        mx.eval(out_real, out_imag, vad_logits)
+
         assert out_real.shape == spec_real.shape
         assert not mx.any(mx.isnan(out_real))
+        assert vad_logits.shape == (batch, time, 1)
+        assert mx.all(mx.isfinite(vad_logits))  # logits: any finite value is valid
 
     @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
     def test_model_batch_sizes(self, batch_size):
@@ -730,7 +738,9 @@ class TestFullModel:
         feat_erb = mx.random.normal(shape=(batch_size, time, 32))
         feat_spec = mx.random.normal(shape=(batch_size, time, 96, 2))
 
-        out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec)
+        output = model((spec_real, spec_imag), feat_erb, feat_spec, return_vad=True)
+        spec_out, vad_logits = output
+        out_real, out_imag = spec_out
         mx.eval(out_real)
 
         assert out_real.shape[0] == batch_size
@@ -751,8 +761,10 @@ class TestFullModel:
         feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
 
         def loss_fn(model):
-            out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec)
-            return mx.mean(out_real**2 + out_imag**2)
+            output = model((spec_real, spec_imag), feat_erb, feat_spec, return_vad=True)
+            spec_out, vad_logits = output
+            out_real, out_imag = spec_out
+            return mx.mean(out_real**2 + out_imag**2) + mx.mean(vad_logits)
 
         loss, grads = nn.value_and_grad(model, loss_fn)(model)
         mx.eval(loss)
@@ -790,7 +802,9 @@ class TestFullModel:
         feat_erb = mx.random.normal(shape=(batch, time, 32))
         feat_spec = mx.random.normal(shape=(batch, time, 96, 2))
 
-        out_real, out_imag = model((spec_real, spec_imag), feat_erb, feat_spec)
+        output = model((spec_real, spec_imag), feat_erb, feat_spec, return_vad=True)
+        spec_out, vad_logits = output
+        out_real, out_imag = spec_out
         mx.eval(out_real)
 
         assert not mx.any(mx.isnan(out_real))
@@ -857,7 +871,7 @@ class TestTraining:
         target = mx.random.normal(shape=(48000,))
 
         snr_val = snr(pred, target)
-        assert isinstance(snr_val, float)
+        assert isinstance(float(snr_val), float)
 
     def test_lr_schedule(self):
         """Test learning rate schedule."""

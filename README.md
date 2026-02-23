@@ -1,7 +1,7 @@
 > [!CAUTION]
 > This repo is a fork of the original [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) trying to do some VAD-gated changes to very specifically target speech and low quality/volume source.
 > It's doing this while _also_ porting the whole thing to MLX for first-class Apple Silicon support.
-> 
+>
 > It is not ready for prime-time yet. Please peruse at your own risk. A lot of the documentation has not yet been updated.
 >
 > If you want to get started on Apple Silicon, use the helper script:
@@ -13,12 +13,12 @@
 
 # DeepFilterNet
 
-This file is a pointer to the canonical README at the repository root.
 
-See [../README.md](../README.md).
+> [!NOTE]
+> All config options are also override-able on the CLI
 
 ```bash
-python df/train.py --model-type dfnet4 path/to/dataset.cfg path/to/data/ path/to/output/
+python -m df_mlx.train_dynamic --run-config /path/to/run_config.toml
 ```
 
 #### GAN Training

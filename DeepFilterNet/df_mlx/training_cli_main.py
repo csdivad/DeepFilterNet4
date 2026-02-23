@@ -43,6 +43,11 @@ def main():
         help="Path to pre-built audio cache (from build_audio_cache.py)",
     )
     parser.add_argument(
+        "--cache-hf",
+        type=str,
+        help="HuggingFace dataset repo ID to stream from (e.g., 'my-org/mlx_datastore')",
+    )
+    parser.add_argument(
         "--speech-list",
         type=str,
         help="Path to file containing speech file paths (one per line)",

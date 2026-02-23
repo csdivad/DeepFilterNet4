@@ -17,6 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from df_mlx.dynamic_dataset import CheckpointState  # noqa: E402
 
 
+def _mlx_data_stream_or_skip():
+    module = pytest.importorskip("df_mlx.dynamic_dataset", reason="mlx-data not available")
+    return module.MLXDataStream
+
+
 class TestCheckpointStateRoundtrip:
     """Verify CheckpointState save/load preserves batch_idx."""
 
@@ -57,6 +62,19 @@ class TestCheckpointStateRoundtrip:
         assert raw["batch_idx"] == 42
         assert raw["epoch"] == 5
 
+    def test_roundtrip_preserves_pipeline_stage_metadata(self, tmp_path):
+        cs = CheckpointState()
+        cs.epoch = 7
+        cs.batch_idx = 9
+        cs.pipeline_stage_index = 3
+        cs.pipeline_stage_name = "curriculum_stage_3"
+        path = tmp_path / "data_checkpoint.json"
+        cs.save(path)
+
+        loaded = CheckpointState.load(path)
+        assert loaded.pipeline_stage_index == 3
+        assert loaded.pipeline_stage_name == "curriculum_stage_3"
+
 
 class TestMLXDataStreamProgressAfterResume:
     """Verify get_progress() returns correct batch after from_checkpoint()."""
@@ -85,10 +103,7 @@ class TestMLXDataStreamProgressAfterResume:
     def test_get_progress_matches_checkpoint_batch(self, mock_dataset, saved_checkpoint):
         """Regression: get_progress() must reflect checkpoint batch_idx
         immediately after from_checkpoint(), before any iteration."""
-        try:
-            from df_mlx.dynamic_dataset import MLXDataStream
-        except ImportError:
-            pytest.skip("mlx-data not available")
+        MLXDataStream = _mlx_data_stream_or_skip()
 
         stream = MLXDataStream.from_checkpoint(
             dataset=mock_dataset,
@@ -104,10 +119,7 @@ class TestMLXDataStreamProgressAfterResume:
 
     def test_get_progress_batch_zero_for_fresh_stream(self, mock_dataset):
         """Fresh stream (no checkpoint) should report batch=0."""
-        try:
-            from df_mlx.dynamic_dataset import MLXDataStream
-        except ImportError:
-            pytest.skip("mlx-data not available")
+        MLXDataStream = _mlx_data_stream_or_skip()
 
         stream = MLXDataStream(dataset=mock_dataset, batch_size=24)
         progress = stream.get_progress()
@@ -115,10 +127,7 @@ class TestMLXDataStreamProgressAfterResume:
 
     def test_batch_count_synced_after_construction(self, mock_dataset, saved_checkpoint):
         """_batch_count must equal _checkpoint.batch_idx after construction."""
-        try:
-            from df_mlx.dynamic_dataset import MLXDataStream
-        except ImportError:
-            pytest.skip("mlx-data not available")
+        MLXDataStream = _mlx_data_stream_or_skip()
 
         stream = MLXDataStream.from_checkpoint(
             dataset=mock_dataset,
@@ -130,10 +139,7 @@ class TestMLXDataStreamProgressAfterResume:
 
     def test_set_epoch_resets_batch_count(self, mock_dataset, saved_checkpoint):
         """set_epoch() must reset both _batch_count and _checkpoint.batch_idx."""
-        try:
-            from df_mlx.dynamic_dataset import MLXDataStream
-        except ImportError:
-            pytest.skip("mlx-data not available")
+        MLXDataStream = _mlx_data_stream_or_skip()
 
         stream = MLXDataStream.from_checkpoint(
             dataset=mock_dataset,
@@ -149,16 +155,23 @@ class TestMLXDataStreamProgressAfterResume:
 
     def test_set_resume_position_updates_progress(self, mock_dataset):
         """set_resume_position() must update get_progress() immediately."""
-        try:
-            from df_mlx.dynamic_dataset import MLXDataStream
-        except ImportError:
-            pytest.skip("mlx-data not available")
+        MLXDataStream = _mlx_data_stream_or_skip()
 
         stream = MLXDataStream(dataset=mock_dataset, batch_size=24)
         stream.set_resume_position(epoch=10, batch_idx=50)
         progress = stream.get_progress()
         assert progress["epoch"] == 10
         assert progress["batch"] == 50
+
+    def test_progress_includes_pipeline_stage_metadata(self, mock_dataset):
+        MLXDataStream = _mlx_data_stream_or_skip()
+
+        stream = MLXDataStream(dataset=mock_dataset, batch_size=24)
+        stream._checkpoint.pipeline_stage_index = 2
+        stream._checkpoint.pipeline_stage_name = "gan_focus"
+        progress = stream.get_progress()
+        assert progress["pipeline_stage_index"] == 2
+        assert progress["pipeline_stage_name"] == "gan_focus"
 
 
 class TestResumeValidationLogic:
@@ -212,10 +225,7 @@ class TestInterruptHandlerSync:
 
     def test_interrupt_handler_syncs_stream_position(self):
         """Simulate the interrupt handler's sync of train_stream checkpoint."""
-        try:
-            from df_mlx.dynamic_dataset import MLXDataStream
-        except ImportError:
-            pytest.skip("mlx-data not available")
+        MLXDataStream = _mlx_data_stream_or_skip()
 
         ds = MagicMock()
         ds.config = MagicMock()

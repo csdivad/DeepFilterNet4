@@ -84,6 +84,8 @@ class CheckpointRecord:
     batch_idx: int | None = None
     global_step: int | None = None
     last_completed_epoch: int | None = None
+    pipeline_stage_index: int | None = None
+    pipeline_stage_name: str | None = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -232,6 +234,7 @@ def validate_checkpoint_dir(
         "resume_epoch": 0,
         "resume_batch": 0,
         "resume_global_step": None,
+        "resume_stage_index": 0,
         "warnings": [],
     }
 
@@ -288,6 +291,8 @@ def validate_checkpoint_dir(
         last_completed = state.get("last_completed_epoch")
         batch_idx = state.get("micro_batches_completed", state.get("batch_idx"))
         global_step = state.get("optimizer_steps_completed", state.get("global_step"))
+        pipeline_stage_index = state.get("pipeline_stage_index")
+        pipeline_stage_name = state.get("pipeline_stage_name")
 
         if kind not in _CHECKPOINT_KINDS:
             record.errors.append("missing/invalid kind")
@@ -299,12 +304,18 @@ def validate_checkpoint_dir(
             record.errors.append("invalid batch_idx")
         if global_step is not None and not isinstance(global_step, int):
             record.errors.append("invalid global_step")
+        if pipeline_stage_index is not None and not isinstance(pipeline_stage_index, int):
+            record.errors.append("invalid pipeline_stage_index")
+        if pipeline_stage_name is not None and not isinstance(pipeline_stage_name, str):
+            record.errors.append("invalid pipeline_stage_name")
 
         record.kind = kind if isinstance(kind, str) else None
         record.epoch = epoch if isinstance(epoch, int) else None
         record.batch_idx = batch_idx if isinstance(batch_idx, int) else None
         record.global_step = global_step if isinstance(global_step, int) else None
         record.last_completed_epoch = last_completed if isinstance(last_completed, int) else None
+        record.pipeline_stage_index = pipeline_stage_index if isinstance(pipeline_stage_index, int) else None
+        record.pipeline_stage_name = pipeline_stage_name if isinstance(pipeline_stage_name, str) else None
 
         expected = manifest.expected_from_name(ckpt)
         if expected:
@@ -395,12 +406,16 @@ def validate_checkpoint_dir(
             report["resume_global_step"] = latest.state.get(
                 "optimizer_steps_completed", latest.state.get("global_step")
             )
+            stage_idx = latest.state.get("pipeline_stage_index")
+            if isinstance(stage_idx, int):
+                report["resume_stage_index"] = stage_idx
 
     # Detect monotonicity issues across valid checkpoints (by modification time).
     valid_by_time = sorted(valid_records, key=lambda rec: rec.mtime)
     last_epoch_seen = None
     last_step_seen = None
     last_completed_seen = None
+    last_stage_seen = None
     for rec in valid_by_time:
         if rec.epoch is not None:
             if last_epoch_seen is not None and rec.epoch < last_epoch_seen:
@@ -414,6 +429,10 @@ def validate_checkpoint_dir(
             if last_completed_seen is not None and rec.last_completed_epoch < last_completed_seen:
                 report["invalid"].append((rec.path, "last_completed_epoch decreased relative to earlier checkpoint"))
             last_completed_seen = rec.last_completed_epoch
+        if rec.pipeline_stage_index is not None:
+            if last_stage_seen is not None and rec.pipeline_stage_index < last_stage_seen:
+                report["invalid"].append((rec.path, "pipeline_stage_index decreased relative to earlier checkpoint"))
+            last_stage_seen = rec.pipeline_stage_index
 
     data_ckpt = checkpoint_dir / "data_checkpoint.json"
     if data_ckpt.exists():
@@ -480,6 +499,8 @@ def save_checkpoint(
     discriminator: nn.Module | None = None,
     disc_optimizer: optim.Optimizer | None = None,
     last_completed_epoch: int = -1,
+    pipeline_stage_index: int | None = None,
+    pipeline_stage_name: str | None = None,
     kind: str = "epoch_end",
     raise_on_error: bool = False,
 ) -> bool:
@@ -569,6 +590,8 @@ def save_checkpoint(
             "optimizer_state": optimizer_state_dict,
             "disc_optimizer_state": disc_optimizer_state_dict,
             "last_completed_epoch": last_completed_epoch,
+            "pipeline_stage_index": pipeline_stage_index,
+            "pipeline_stage_name": pipeline_stage_name,
             "kind": kind,
             "checkpoint_kind": checkpoint_kind,
             "counter_semantics_version": _COUNTER_SEMANTICS_VERSION,

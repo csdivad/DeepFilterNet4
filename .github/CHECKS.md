@@ -169,7 +169,7 @@ The repository also maintains these existing workflows:
    black .
    isort .
    flake8
-   
+
    # Rust formatting
    cargo fmt
    cargo clippy --all-features -- -D warnings

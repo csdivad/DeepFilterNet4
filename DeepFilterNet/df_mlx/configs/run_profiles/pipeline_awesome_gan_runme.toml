@@ -7,23 +7,23 @@
 
 [dataset]
 # Path to pre-built audio cache (from build_audio_cache.py)
-# Default: 
+# Default:
 cache_dir = ""
 
 # Path to file containing speech file paths (one per line)
-# Default: 
+# Default:
 speech_list = ""
 
 # Path to file containing noise file paths (one per line)
-# Default: 
+# Default:
 noise_list = ""
 
 # Path to file containing RIR file paths (one per line)
-# Default: 
+# Default:
 rir_list = ""
 
 # Dataset/mixer config JSON path (same as --config)
-# Default: 
+# Default:
 config = ""
 
 # Override base SNR range in dB (e.g., [-5, 40])
@@ -128,7 +128,7 @@ fp16 = "false"
 seed = -1
 
 # Path to train.py-compatible INI config (optional)
-# Default: 
+# Default:
 train_config = ""
 
 [dataloader]
@@ -376,7 +376,7 @@ batches = 8
 max_seconds = 0.0
 
 # Path to silero_vad.onnx (optional)
-# Default: 
+# Default:
 silero_model_path = ""
 
 # Silero sample rate (Hz)
@@ -416,7 +416,7 @@ debug_numerics_fail_fast = true
 debug_numerics_every = 1
 
 # Directory for numeric debug dumps (empty disables override)
-# Default: 
+# Default:
 debug_numerics_dump_dir = ""
 
 # Dump small tensor slices

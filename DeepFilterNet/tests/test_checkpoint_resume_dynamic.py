@@ -10,7 +10,11 @@ import pytest
 # Ensure the df_mlx package is importable when running tests from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from df_mlx.training_checkpoints import compute_resume_epoch, save_checkpoint, validate_checkpoint_dir  # noqa: E402
+from df_mlx.training_checkpoints import (  # noqa: E402
+    compute_resume_epoch,
+    save_checkpoint,
+    validate_checkpoint_dir,
+)
 
 
 class TinyModel(nn.Module):
@@ -30,6 +34,8 @@ def _make_checkpoint(
     last_completed: int,
     batch_idx: int | None = None,
     global_step: int | None = None,
+    pipeline_stage_index: int | None = None,
+    pipeline_stage_name: str | None = None,
 ):
     model = TinyModel()
     optimizer = optim.AdamW(learning_rate=0.001)
@@ -59,6 +65,8 @@ def _make_checkpoint(
         config={},
         optimizer=optimizer,
         last_completed_epoch=last_completed,
+        pipeline_stage_index=pipeline_stage_index,
+        pipeline_stage_name=pipeline_stage_name,
         kind=kind,
     )
     return ckpt_path
@@ -85,6 +93,24 @@ def test_resume_in_progress_epoch_not_skipped():
         state_path = ckpt_path.with_suffix(".state.json")
         state = json.loads(state_path.read_text())
         assert compute_resume_epoch(state) == 3
+
+
+def test_resume_report_includes_pipeline_stage_index():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        _make_checkpoint(
+            tmpdir,
+            epoch=3,
+            kind="step",
+            last_completed=2,
+            batch_idx=5,
+            global_step=301,
+            pipeline_stage_index=2,
+            pipeline_stage_name="awesome_focus",
+        )
+
+        report = validate_checkpoint_dir(tmpdir, strict=True, validate_load=False)
+        assert report["resume_stage_index"] == 2
 
 
 def test_resume_after_completed_epoch_advances():
@@ -115,6 +141,35 @@ def test_resume_prefers_interrupted_checkpoint():
         report = validate_checkpoint_dir(tmpdir, strict=True, validate_load=False)
         assert report["latest_path"] == interrupted
         assert report["resume_epoch"] == 3
+
+
+def test_validate_flags_stage_regression_across_checkpoints():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        _make_checkpoint(
+            tmpdir,
+            epoch=2,
+            kind="step",
+            last_completed=1,
+            batch_idx=1,
+            global_step=201,
+            pipeline_stage_index=2,
+            pipeline_stage_name="stage_2",
+        )
+        _make_checkpoint(
+            tmpdir,
+            epoch=3,
+            kind="step",
+            last_completed=2,
+            batch_idx=1,
+            global_step=301,
+            pipeline_stage_index=1,
+            pipeline_stage_name="stage_1",
+        )
+
+        report = validate_checkpoint_dir(tmpdir, strict=False, validate_load=False)
+        invalid_reasons = [reason for _, reason in report["invalid"]]
+        assert any("pipeline_stage_index decreased" in reason for reason in invalid_reasons)
 
 
 def test_corrupted_checkpoint_rejected():

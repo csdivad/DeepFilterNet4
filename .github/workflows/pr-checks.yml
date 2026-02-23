@@ -21,10 +21,10 @@ jobs:
           # Check if Cargo.lock or poetry.lock were modified
           CARGO_CHANGED=$(git diff --name-only origin/main...HEAD | grep -c "Cargo.lock" || echo "0")
           POETRY_CHANGED=$(git diff --name-only origin/main...HEAD | grep -c "poetry.lock" || echo "0")
-          
+
           echo "Cargo.lock changed: $CARGO_CHANGED"
           echo "poetry.lock changed: $POETRY_CHANGED"
-          
+
           if [ "$CARGO_CHANGED" -gt 0 ] || [ "$POETRY_CHANGED" -gt 0 ]; then
             echo "lockfiles_changed=true" >> $GITHUB_OUTPUT
             echo "::notice::Lockfiles were modified in this PR. Please ensure dependencies are intentional."
@@ -38,7 +38,7 @@ jobs:
           COMMITS=$(git log --format=%s origin/main..HEAD)
           echo "Checking commit messages for conventional commit format..."
           echo "$COMMITS"
-          
+
           # This is informational only - we don't fail the check
           echo "::notice::Consider using conventional commit format: type(scope): description"
           echo "::notice::Types: feat, fix, docs, style, refactor, test, chore"

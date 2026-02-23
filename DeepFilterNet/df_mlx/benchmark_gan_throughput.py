@@ -110,9 +110,7 @@ def _run_benchmark_case(
     if gen_gradient_checkpoint:
         gen_loss_and_grad = nn.value_and_grad(
             model,
-            lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(
-                mx.checkpoint(m)((nr, ni), fe, fs), (cr, ci)
-            ),
+            lambda m, nr, ni, fe, fs, cr, ci: spectral_loss(mx.checkpoint(m)((nr, ni), fe, fs), (cr, ci)),
         )
     else:
         gen_loss_and_grad = nn.value_and_grad(
@@ -608,10 +606,7 @@ def main() -> None:
                 gc.collect()
                 mx.reset_peak_memory()
 
-            print(
-                f"\n  Building models: mpd_ch={model_key[0]}, "
-                f"msd_ch={model_key[1]}, bs={model_key[2]}..."
-            )
+            print(f"\n  Building models: mpd_ch={model_key[0]}, " f"msd_ch={model_key[1]}, bs={model_key[2]}...")
             model, gen_opt, disc, disc_opt = _build_models(
                 batch_size=model_key[2],
                 mpd_channels=model_key[0],

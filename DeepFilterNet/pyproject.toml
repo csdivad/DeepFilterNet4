@@ -1,6 +1,6 @@
 [project]
 name = "DeepFilterNet4"
-version = "0.7.0"
+version = "0.8.0"
 description = "Noise supression using deep filtering; an advancement in real-time speech enhancement."
 requires-python = ">=3.10,<3.15"
 dynamic = ["dependencies"]
@@ -74,14 +74,15 @@ sympy = ">=1.6"
 soundfile = { version = ">=0.10,<0.14", optional = true }
 icecream = { version = ">=2,<3", optional = true }
 pystoi = { version = ">=0.3,<0.5", optional = true }
-pesq = { version = ">=0.0.3,<0.0.5", optional = true }
+pesq = { version = ">=0.0.3,<0.0.5", optional = true, markers = "platform_system != 'Windows'" }
 scipy = { version = "^1", optional = true }
-onnxruntime = { version = "^1.15", optional = true }
+onnxruntime = { version = ">=1.15,<1.24", optional = true }
 torch = { version = ">=2.9.1" }
 torchcodec = { version = ">=0.1", optional = true }
 torchaudio = { version = ">=2.9.1" }
 librosa = { version = "^0.11.0" }
 pandas = { version = "*" }
+huggingface_hub = { version = ">=0.20.0" }
 tqdm = { version = "*" }
 h5py = { version = "*" }
 ptflops = { version = "*" }
