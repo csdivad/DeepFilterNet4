@@ -1207,7 +1207,9 @@ class SqueezedAttention(nn.Module):
 
         for _ in range(num_layers):
             self.norms.append(nn.LayerNorm(hidden_size))
-            self.attention_layers.append(nn.MultiHeadAttention(dims=hidden_size, num_heads=num_heads))
+            self.attention_layers.append(
+                nn.MultiHeadAttention(dims=hidden_size, num_heads=num_heads)
+            )
             self.ffn_norms.append(nn.LayerNorm(hidden_size))
             self.ffns.append(
                 nn.Sequential(
@@ -1219,7 +1221,9 @@ class SqueezedAttention(nn.Module):
 
         # Output projection
         if output_size is not None and output_size != hidden_size:
-            self.linear_out: Optional[nn.Module] = GroupedLinear(hidden_size, output_size, linear_groups)
+            self.linear_out: Optional[nn.Module] = GroupedLinear(
+                hidden_size, output_size, linear_groups
+            )
         else:
             self.linear_out = None
 
@@ -1257,7 +1261,9 @@ class SqueezedAttention(nn.Module):
             mask = self._mask_cache
 
         # Apply attention layers with pre-norm and residual
-        for norm, attn, ffn_norm, ffn in zip(self.norms, self.attention_layers, self.ffn_norms, self.ffns):
+        for norm, attn, ffn_norm, ffn in zip(
+            self.norms, self.attention_layers, self.ffn_norms, self.ffns
+        ):
             # Self-attention with pre-norm
             normed = norm(out)
             attn_out = attn(normed, normed, normed, mask=mask)
