@@ -209,9 +209,16 @@ def convert_audio_to_wav(
         # Try soundfile first (handles wav, flac, ogg)
         import soundfile as sf
 
+        audio = None
+        sr = None
+        decode_errors = []
+
         try:
             audio, sr = sf.read(input_path, dtype="float32")
-        except Exception:
+        except Exception as e:
+            decode_errors.append(f"soundfile: {e}")
+
+        if audio is None:
             # Fall back to pydub for mp3, m4a, etc.
             try:
                 from pydub import AudioSegment
@@ -229,13 +236,26 @@ def convert_audio_to_wav(
                     audio = samples.reshape(-1, 2)
                 else:
                     audio = samples
-            except ImportError:
-                # Try librosa as last resort
+            except Exception as e:
+                decode_errors.append(f"pydub: {e}")
+
+        if audio is None:
+            # Try librosa as last resort.
+            # Some librosa versions reference sf.SoundFileRuntimeError, which is
+            # missing in older soundfile versions.
+            if not hasattr(sf, "SoundFileRuntimeError"):
+                setattr(sf, "SoundFileRuntimeError", RuntimeError)
+            try:
                 import librosa
 
                 audio, sr = librosa.load(input_path, sr=None, mono=False)
                 if audio.ndim == 2:
                     audio = audio.T  # librosa returns (channels, samples)
+            except Exception as e:
+                decode_errors.append(f"librosa: {e}")
+
+        if audio is None or sr is None:
+            raise RuntimeError("; ".join(decode_errors))
 
         # Convert to mono if needed
         if mono and audio.ndim > 1:
