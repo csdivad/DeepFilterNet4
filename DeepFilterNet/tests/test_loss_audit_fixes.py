@@ -331,6 +331,28 @@ class TestGANLossCorrectness:
         result = float(generator_loss(fake))
         assert result > 0, f"Gen loss should be positive, got {result}"
 
+    def test_train_dynamic_gan_score_clipping_bounds_extremes(self):
+        import df_mlx.train_dynamic as td
+
+        fake_scores = [mx.array([1000.0, -1000.0, 0.5], dtype=mx.float32)]
+        clipped = td._clip_gan_scores(fake_scores)
+        mx.eval(clipped[0])
+
+        max_score = float(mx.max(clipped[0]))
+        min_score = float(mx.min(clipped[0]))
+        assert max_score <= td._GAN_SCORE_ABS_CLIP
+        assert min_score >= -td._GAN_SCORE_ABS_CLIP
+
+    def test_train_dynamic_gan_score_clipping_can_be_disabled(self):
+        import df_mlx.train_dynamic as td
+
+        fake_scores = [mx.array([2.0, -3.0], dtype=mx.float32)]
+        unclipped = td._clip_gan_scores(fake_scores, clip_value=0.0)
+        mx.eval(unclipped[0])
+
+        delta = float(mx.max(mx.abs(unclipped[0] - fake_scores[0])))
+        assert delta == 0.0
+
     def test_feature_matching_identical_zero(self):
         from df_mlx.loss import FeatureMatchingLoss
 
@@ -363,3 +385,39 @@ class TestDeadConstantRemoved:
         assert not hasattr(
             td, "_PIPELINE_MASK_SATURATION_PENALTY"
         ), "_PIPELINE_MASK_SATURATION_PENALTY should be removed"
+
+
+class TestTrainDynamicRegularizerGates:
+    """Guardrail tests for stage-aware training regularizer switches."""
+
+    def test_vad_train_reg_can_enable_from_stage_weight(self):
+        import df_mlx.train_dynamic as td
+
+        assert td._is_vad_train_reg_enabled(
+            vad_train_prob=0.2,
+            vad_train_every_steps=0,
+            max_stage_vad_weight=0.1,
+        )
+
+    def test_vad_train_reg_requires_sampling_and_positive_weight(self):
+        import df_mlx.train_dynamic as td
+
+        assert not td._is_vad_train_reg_enabled(
+            vad_train_prob=0.0,
+            vad_train_every_steps=0,
+            max_stage_vad_weight=0.1,
+        )
+        assert not td._is_vad_train_reg_enabled(
+            vad_train_prob=0.2,
+            vad_train_every_steps=0,
+            max_stage_vad_weight=0.0,
+        )
+
+    def test_stage_speech_loss_uses_runtime_weight_gate(self):
+        import inspect
+
+        import df_mlx.train_dynamic as td
+
+        train_source = inspect.getsource(td.train)
+        assert train_source.count("if speech_weight > 0:") >= 3
+        assert train_source.count("if vad_speech_loss_weight > 0:") == 1

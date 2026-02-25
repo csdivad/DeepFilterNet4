@@ -170,6 +170,10 @@ if TYPE_CHECKING:
 # value-immutable, so sharing a single instance is safe.
 _SCALAR_ZERO = mx.array(0.0)
 
+# Clamp discriminator logits before hinge losses to prevent rare runaway
+# values from dominating the composite loss while preserving sign.
+_GAN_SCORE_ABS_CLIP = 30.0
+
 # =============================================================================
 # tqdm configuration
 # =============================================================================
@@ -272,6 +276,22 @@ def curriculum_schedule(
         progress * target_p_very_low,
         progress * target_p_interfer,
     )
+
+
+def _clip_gan_scores(scores: list[mx.array], clip_value: float = _GAN_SCORE_ABS_CLIP) -> list[mx.array]:
+    """Clamp GAN discriminator logits to a bounded range for stability."""
+    if clip_value <= 0:
+        return scores
+    return [mx.clip(score, -clip_value, clip_value) for score in scores]
+
+
+def _is_vad_train_reg_enabled(
+    vad_train_prob: float,
+    vad_train_every_steps: int,
+    max_stage_vad_weight: float,
+) -> bool:
+    """Return whether sparse VAD train regularization should be enabled."""
+    return (vad_train_prob > 0 or vad_train_every_steps > 0) and max_stage_vad_weight > 0
 
 
 def train(
@@ -750,7 +770,11 @@ def train(
         )
 
     use_vad_loss = stage_max_vad_weight > 0 or stage_max_vad_speech_weight > 0
-    use_vad_train_reg = (vad_train_prob > 0 or vad_train_every_steps > 0) and vad_loss_weight > 0
+    use_vad_train_reg = _is_vad_train_reg_enabled(
+        vad_train_prob=vad_train_prob,
+        vad_train_every_steps=vad_train_every_steps,
+        max_stage_vad_weight=stage_max_vad_weight,
+    )
 
     need_band_mask = (
         use_vad_loss or use_awesome_loss or use_pipeline_awesome_loss or vad_eval_enabled or use_vad_train_reg
@@ -1345,6 +1369,7 @@ def train(
                     _disc_fn = discriminator
                 disc_fake, fake_feats = _disc_fn(gan_out_wav, return_features=_need_feats)
                 disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav), return_features=_need_feats)
+            disc_fake = _clip_gan_scores(disc_fake)
             gan_g_loss = gen_loss_fn(disc_fake)
             total_loss = total_loss + gan_weight * gan_g_loss
             if feature_match_loss is not None and gan_fm_weight > 0:
@@ -1408,7 +1433,7 @@ def train(
                 vad_z_slope,
             )
             speech_loss = _SCALAR_ZERO
-            if vad_speech_loss_weight > 0:
+            if speech_weight > 0:
                 speech_loss = _compute_speech_band_logmag_loss(
                     clean_real,
                     clean_imag,
@@ -1543,6 +1568,7 @@ def train(
                         _disc_fn = discriminator
                     disc_fake, fake_feats = _disc_fn(gan_out_wav, return_features=_need_feats)
                     disc_real, real_feats = _disc_fn(mx.stop_gradient(gan_clean_wav), return_features=_need_feats)
+                disc_fake = _clip_gan_scores(disc_fake)
                 gan_g_loss = gen_loss_fn(disc_fake)
                 total_loss = total_loss + gan_weight * gan_g_loss
                 if feature_match_loss is not None and gan_fm_weight > 0:
@@ -1606,7 +1632,7 @@ def train(
                     vad_z_slope,
                 )
                 speech_loss = _SCALAR_ZERO
-                if vad_speech_loss_weight > 0:
+                if speech_weight > 0:
                     speech_loss = _compute_speech_band_logmag_loss(
                         clean_real,
                         clean_imag,
@@ -1719,6 +1745,7 @@ def train(
             gen_loss_fn, _ = gan_loss_fns
             disc_fake, fake_feats = discriminator(out_wav)
             disc_real, real_feats = discriminator(clean_wav)
+            disc_fake = _clip_gan_scores(disc_fake)
             gan_g_loss = gen_loss_fn(disc_fake)
             _diag_check("gan_g_loss", gan_g_loss)
             if feature_match_loss is not None and gan_fm_weight > 0:
@@ -2056,6 +2083,8 @@ def train(
             def _disc_loss_inner(disc):
                 real_out, _ = disc(clean_wav_d, return_features=False)
                 fake_out, _ = disc(pred_wav_d, return_features=False)
+                real_out = _clip_gan_scores(real_out)
+                fake_out = _clip_gan_scores(fake_out)
                 total_loss, _, _ = _disc_loss_fn_ref(real_out, fake_out)
                 return total_loss
 
@@ -2337,7 +2366,7 @@ def train(
                     debug_ctx=debug_ctx,
                 )
                 speech_loss = _SCALAR_ZERO
-                if vad_speech_loss_weight > 0:
+                if epoch_vad_speech_loss_weight > 0:
                     speech_loss = _compute_speech_band_logmag_loss(
                         clean_real,
                         clean_imag,
@@ -3310,8 +3339,7 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
-                                f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO
@@ -3554,6 +3582,8 @@ def train(
                             def disc_loss_wrapper(disc):
                                 real_out, _ = disc(clean_wav_d, return_features=False)
                                 fake_out, _ = disc(pred_wav_d, return_features=False)
+                                real_out = _clip_gan_scores(real_out)
+                                fake_out = _clip_gan_scores(fake_out)
                                 total_loss, _, _ = disc_loss_fn(real_out, fake_out)
                                 return total_loss
 
@@ -3749,6 +3779,7 @@ def train(
                         gen_loss_fn, _ = gan_loss_fns
                         disc_fake, fake_feats = discriminator(out_wav)
                         disc_real, real_feats = discriminator(clean_wav)
+                        disc_fake = _clip_gan_scores(disc_fake)
                         gan_g_loss_val = float(gen_loss_fn(disc_fake))
                         train_gan_g_loss += gan_g_loss_val * epoch_eval_frequency
                         if feature_match_loss is not None and gan_fm_weight > 0:
@@ -3774,7 +3805,7 @@ def train(
                         debug_ctx=debug_ctx,
                     )
                     speech_loss = _SCALAR_ZERO
-                    if vad_speech_loss_weight > 0:
+                    if speech_weight > 0:
                         speech_loss = _compute_speech_band_logmag_loss(
                             clean_real,
                             clean_imag,

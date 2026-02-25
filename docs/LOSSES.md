@@ -10,7 +10,7 @@ The MLX training pipeline (`df_mlx/train_dynamic.py`) computes a composite loss 
 
 The total generator loss is:
 
-$$L_{total} = L_{spec} + L_{mrstft} + w_{gan} \cdot L_{gen} + w_{fm} \cdot L_{fm} + w_{awesome} \cdot L_{awesome} + w_{vad} \cdot L_{vad} + w_{speech} \cdot L_{speech} + w_{vad\_reg} \cdot L_{vad\_reg}$$
+$$L_{total} = L_{spec} + L_{mrstft} + w_{gan} \cdot L_{gen} + w_{fm} \cdot L_{fm} + w_{awesome} \cdot L_{awesome} + w_{vad} \cdot L_{vad\_proxy} + w_{vad} \cdot L_{vad\_head} + w_{speech} \cdot L_{speech} + w_{vad\_reg} \cdot L_{vad\_reg}$$
 
 Each component is optionally enabled by config flags. The discriminator has a separate loss and optimizer (§2.5, §3.6).
 
@@ -81,7 +81,9 @@ $$L_{mrstft} = \frac{1}{N_{res}} \sum_{n} \Bigl[ f_{mag} \cdot \lVert M_n^\gamma
 
 **Formula:**
 
-$$L_{gen} = \frac{1}{N_d} \sum_d \text{mean}(-f_d)$$
+$$\tilde{f}_d = \operatorname{clip}(f_d, -30, 30)$$
+
+$$L_{gen} = \frac{1}{N_d} \sum_d \text{mean}(-\tilde{f}_d)$$
 
 where $f_d$ = discriminator output on fake (generated) samples.
 
@@ -96,6 +98,7 @@ where $f_d$ = discriminator output on fake (generated) samples.
 **Details:**
 - Hinge loss variant: generator wants discriminator outputs to be large (close to real).
 - Only active when `gan_active = True` and discriminator is not `None`.
+- In `train_dynamic.py`, discriminator fake scores are clipped to `[-30, 30]` before calling `generator_loss()` to prevent rare runaway logits from dominating the composite loss.
 
 **Effect of weight change:** Increasing drives more perceptually pleasing output; too high causes training instability. Decreasing favours reconstruction fidelity over perceptual quality.
 
@@ -230,18 +233,22 @@ $$L_{music} = \text{mean}\!\bigl(\lvert\log(1{+}\lvert\hat{S}\rvert)\rvert \cdot
 
 ---
 
-### 2.8 VAD Loss (Multi-task Head)
+### 2.8 VAD Losses (Proxy + Multi-task Head)
 
 | | |
 |---|---|
-| **Source** | [df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py) — `loss_fn()` |
-| **Measures** | Binary Cross-Entropy (BCE) between the model's VadHead logits and the energy-based proxy VAD target ($p_{ref}$). Uses `nn.losses.binary_cross_entropy(..., with_logits=True)` for numerical stability. |
+| **Source** | [df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py) and [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py) |
+| **Measures** | A proxy VAD consistency penalty plus an optional BCE head loss against the same proxy target. |
 
 **Formula:**
 
-$$L_{vad} = \text{BCE\_with\_logits}(z_{vad}, p_{ref})$$
+$$L_{vad\_proxy} = \text{mean}\!\bigl(\text{gate} \cdot \max(p_{ref} - p_{out} - \text{margin}, 0)\bigr)$$
+
+$$L_{vad\_head} = \text{BCE\_with\_logits}(z_{vad}, p_{ref})$$
 
 where:
+- $p_{out}$ is the output VAD proxy probability derived from enhanced audio.
+- $\text{gate}$ is the SNR/energy gate used to focus the proxy penalty.
 - $z_{vad}$ is the raw logit output of the model's `VadHead` (no sigmoid — sigmoid is fused inside the BCE kernel).
 - $p_{ref}$ is the energy-based proxy VAD target computed from the clean reference signal.
 
@@ -249,10 +256,13 @@ where:
 
 | Parameter | Description |
 |-----------|-------------|
-| `use_vad_loss` | `bool` — enable/disable |
-| `vad_weight` | Multiplier in total loss |
+| `vad_loss_weight` | Multiplier applied to both proxy and BCE head terms |
+| `vad_threshold` | Threshold used by proxy target gating |
+| `vad_margin` | Margin used in proxy consistency penalty |
 
 **Details:**
+- The proxy VAD term is always used when VAD losses are enabled.
+- The VAD head BCE term is added when `vad_logits` is returned by the model.
 - The VAD head is trained as a multi-task objective alongside the main enhancement task.
 - During inference, $\sigma(z_{vad})$ is used for soft-gating the output spectrum to suppress non-speech regions: $\text{gate} = \max(\sigma(z_{vad}),\, 0.01)$.
 
@@ -273,7 +283,7 @@ $$L_{speech} = \text{mean}\!\bigl(\lvert\bar{O} - \bar{C}\rvert \cdot \text{gate
 
 where $\bar{O}, \bar{C}$ are speech-band averaged log magnitudes (via band mask summation divided by band bins).
 
-**Config:** Active when `vad_speech_loss_weight > 0` within the VAD loss block. `speech_weight` is applied as a multiplier in `loss_fn`.
+**Config:** Active when the effective runtime `speech_weight > 0` (stage override + warmup). This corresponds to `vad_speech_loss_weight` after stage resolution and warmup scaling.
 
 **Details:**
 - Focuses model attention on preserving speech-band energy specifically.
@@ -297,10 +307,13 @@ where $\bar{O}, \bar{C}$ are speech-band averaged log magnitudes (via band mask 
 
 | Parameter | Description |
 |-----------|-------------|
-| `use_vad_train_reg` | `bool` — enable/disable |
-| `vad_reg_weight` | Multiplier in total loss |
+| `vad_train_prob` | Probability of applying the sparse regularizer on a batch |
+| `vad_train_every_steps` | Deterministic step cadence for applying the regularizer |
+| `vad_loss_weight` | Base coefficient reused as `vad_reg_weight` when the sparse gate fires |
 
 **Effect of weight change:** Complements VAD loss (§2.8) with finer-grained speech-ratio–aware control. Increasing adds stronger regularisation pressure on speech-present frames.
+
+**Objective note:** This term is applied sparsely during training. Validation logs `vad_reg` as a separate metric but does not include it in the early-stopping validation objective.
 
 ---
 
@@ -471,8 +484,8 @@ The following loss functions and helpers are **not** used by the production trai
 
 | Function | GAN paths | Used by |
 |----------|-----------|---------|
-| `loss_fn` (L1201) | Gated by `gan_active` closure variable | `compiled_step`, `compiled_loss_and_grad_step`, eager mode |
-| `loss_fn_gan` (L1382) | Hardcoded as always-active | `_compiled_gan_step`, `_compiled_gan_loss_and_grad_step` |
+| `loss_fn` (L1287) | Gated by `gan_active` closure variable | `compiled_step`, `compiled_loss_and_grad_step`, eager mode |
+| `loss_fn_gan` (L1485) | Hardcoded as always-active | `_compiled_gan_step`, `_compiled_gan_loss_and_grad_step` |
 
 **Why they exist:** `mx.compile` captures Python booleans at trace time. If `loss_fn` is compiled when `gan_active == False`, the GAN branch is permanently dead in the compiled graph — even after `gan_active` flips to `True` at `gan_start_epoch`. The duplicate `loss_fn_gan` hardcodes `True` for GAN paths so the compiled graph always includes generator adversarial loss computation.
 

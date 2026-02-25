@@ -117,7 +117,7 @@ vad_loss_weight = 0.40
 vad_speech_loss_weight = 0.45
 
 [[loss.pipeline_stages]]
-start_epoch = 150
+start_epoch = 140
 name = "gan_integration"
 # Auxiliary eased ~20% to absorb incoming GAN gradient budget
 # aux = 0.65 + 0.32 + 0.28 = 1.25; GAN = 0→0.58 over 20 epochs
@@ -196,7 +196,7 @@ eval_frequency = 6           # benchmarked EF=6 optimal
 loss_weight = 0.4            # down from 0.8: was 80% of spectral; now 30%
                              # still meaningful signal for VadHead training
                              # VAD accuracy target: >85% by epoch 75 (Stage 3)
-threshold = 0.2
+threshold = 0.05
 margin = 0.05
 speech_loss_weight = 0.35    # down from 0.6: 300-3400Hz band refinement loss
                              # complementary (not redundant) with full-spectrum spectral
