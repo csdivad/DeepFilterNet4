@@ -20,7 +20,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PKG_ROOT = _REPO_ROOT / "DeepFilterNet"
@@ -85,6 +85,41 @@ class RollbackPlan:
     data_assessment: DataCheckpointAssessment
 
 
+@dataclass
+class ProgressReporter:
+    """Emit robust user-facing progress updates for long-running stages."""
+
+    enabled: bool = True
+    progress_every: int = 100
+    stream: TextIO | None = None
+
+    def _emit(self, message: str) -> None:
+        if self.enabled:
+            print(message, file=self.stream or sys.stderr, flush=True)
+
+    def info(self, message: str) -> None:
+        self._emit(message)
+
+    def start(self, label: str) -> float:
+        self._emit(f"⏳ {label}...")
+        return time.perf_counter()
+
+    def done(self, label: str, start_time: float, *, detail: str | None = None) -> None:
+        elapsed = time.perf_counter() - start_time
+        suffix = f" — {detail}" if detail else ""
+        self._emit(f"✅ {label} ({elapsed:.2f}s){suffix}")
+
+    def loop(self, label: str, index: int, total: int, *, item: str | None = None) -> None:
+        if not self.enabled or total <= 0:
+            return
+        should_emit = total <= 10 or index in {1, total} or index % max(self.progress_every, 1) == 0
+        if not should_emit:
+            return
+        pct = 100.0 * index / total
+        item_suffix = f" — {item}" if item and (total <= 10 or index in {1, total}) else ""
+        self._emit(f"   {label}: {index}/{total} ({pct:.1f}%){item_suffix}")
+
+
 def _disc_path(weights_path: Path) -> Path:
     return weights_path.with_name(f"{weights_path.stem}.disc{weights_path.suffix}")
 
@@ -117,7 +152,7 @@ def _load_data_checkpoint(path: Path) -> dict[str, Any] | None:
         return json.load(f)
 
 
-def _load_snapshots(checkpoint_dir: Path) -> list[CheckpointSnapshot]:
+def _load_snapshots(checkpoint_dir: Path, progress: ProgressReporter) -> list[CheckpointSnapshot]:
     manifest = CheckpointManifest()
     ckpt_files = sorted(
         [
@@ -127,9 +162,13 @@ def _load_snapshots(checkpoint_dir: Path) -> list[CheckpointSnapshot]:
         ],
         key=lambda p: p.stat().st_mtime,
     )
+    progress.info(f"   Found {len(ckpt_files)} checkpoint weight files to inspect")
+    stage_start = progress.start("Loading checkpoint metadata")
 
     snapshots: list[CheckpointSnapshot] = []
-    for ckpt in ckpt_files:
+    total = len(ckpt_files)
+    for idx, ckpt in enumerate(ckpt_files, start=1):
+        progress.loop("Parsed metadata", idx, total, item=ckpt.name)
         state_path = manifest.state_path(ckpt)
         if not state_path.exists():
             continue
@@ -176,6 +215,8 @@ def _load_snapshots(checkpoint_dir: Path) -> list[CheckpointSnapshot]:
 
     if not snapshots:
         raise RuntimeError(f"No valid checkpoint pairs found in {checkpoint_dir}")
+
+    progress.done("Loading checkpoint metadata", stage_start, detail=f"{len(snapshots)} usable checkpoints")
     return snapshots
 
 
@@ -309,8 +350,19 @@ def _assess_data_checkpoint(
     )
 
 
-def build_rollback_plan(checkpoint_dir: Path, target_resume_epoch: int) -> RollbackPlan:
+def build_rollback_plan(
+    checkpoint_dir: Path,
+    target_resume_epoch: int,
+    *,
+    progress: ProgressReporter,
+) -> RollbackPlan:
+    validation_start = progress.start("Validating checkpoint directory")
     report = validate_checkpoint_dir(checkpoint_dir, strict=False, validate_load=False)
+    progress.done(
+        "Validating checkpoint directory",
+        validation_start,
+        detail=f"total={report['total']} valid={report['valid']} invalid={len(report['invalid'])}",
+    )
     non_data_invalid = [(path, reason) for path, reason in report["invalid"] if path.name != "data_checkpoint.json"]
     if non_data_invalid:
         invalid_msgs = "; ".join(f"{path.name}: {reason}" for path, reason in non_data_invalid)
@@ -318,7 +370,7 @@ def build_rollback_plan(checkpoint_dir: Path, target_resume_epoch: int) -> Rollb
             "Checkpoint directory contains invalid artifacts. " "Clean these first before rollback: " f"{invalid_msgs}"
         )
 
-    snapshots = _load_snapshots(checkpoint_dir)
+    snapshots = _load_snapshots(checkpoint_dir, progress)
     target_candidates = [snapshot for snapshot in snapshots if snapshot.resume_epoch == target_resume_epoch]
     if not target_candidates:
         available_epochs = sorted({snapshot.resume_epoch for snapshot in snapshots})
@@ -340,17 +392,37 @@ def build_rollback_plan(checkpoint_dir: Path, target_resume_epoch: int) -> Rollb
         )
 
     manifest = CheckpointManifest()
+    marker_scan_start = progress.start("Scanning epoch completion markers")
     removable_markers: list[Path] = []
-    for marker in checkpoint_dir.glob(f"epoch_*{manifest.epoch_complete_suffix}"):
+    markers = sorted(checkpoint_dir.glob(f"epoch_*{manifest.epoch_complete_suffix}"))
+    marker_total = len(markers)
+    for idx, marker in enumerate(markers, start=1):
+        progress.loop("Scanned markers", idx, marker_total, item=marker.name)
         marker_epoch = manifest.marker_epoch(marker)
         if marker_epoch is None:
             continue
         marker_resume_epoch = marker_epoch + 1
         if marker_resume_epoch > target_resume_epoch:
             removable_markers.append(marker)
+    progress.done(
+        "Scanning epoch completion markers",
+        marker_scan_start,
+        detail=f"{len(removable_markers)} marker(s) will be removed",
+    )
 
+    data_assess_start = progress.start("Assessing data checkpoint coherence")
     data_state = _load_data_checkpoint(checkpoint_dir / "data_checkpoint.json")
     data_assessment = _assess_data_checkpoint(data_state, projected_latest)
+    progress.done(
+        "Assessing data checkpoint coherence",
+        data_assess_start,
+        detail=f"status={data_assessment.status}",
+    )
+    progress.info(
+        "✅ Rollback planning complete "
+        f"(selected={selected.path.name}, projected_latest={projected_latest.path.name}, "
+        f"remove={len(removable)}, target_resume_epoch={target_resume_epoch})"
+    )
 
     return RollbackPlan(
         checkpoint_dir=checkpoint_dir,
@@ -406,20 +478,31 @@ def apply_rollback_plan(
     plan: RollbackPlan,
     *,
     sync_data_checkpoint: bool,
+    progress: ProgressReporter,
 ) -> None:
-    for snapshot in plan.removable:
+    remove_start = progress.start("Removing superseded checkpoint files")
+    total_remove = len(plan.removable)
+    for idx, snapshot in enumerate(plan.removable, start=1):
+        progress.loop("Removed checkpoints", idx, total_remove, item=snapshot.path.name)
         snapshot.path.unlink(missing_ok=True)
         snapshot.state_path.unlink(missing_ok=True)
         _disc_path(snapshot.path).unlink(missing_ok=True)
+    progress.done("Removing superseded checkpoint files", remove_start, detail=f"removed={total_remove}")
 
-    for marker in plan.removable_markers:
+    marker_remove_start = progress.start("Removing epoch completion markers")
+    total_markers = len(plan.removable_markers)
+    for idx, marker in enumerate(plan.removable_markers, start=1):
+        progress.loop("Removed markers", idx, total_markers, item=marker.name)
         marker.unlink(missing_ok=True)
+    progress.done("Removing epoch completion markers", marker_remove_start, detail=f"removed={total_markers}")
 
     if sync_data_checkpoint:
+        sync_start = progress.start("Synchronizing data checkpoint")
         data_path = plan.checkpoint_dir / "data_checkpoint.json"
         existing_data = _load_data_checkpoint(data_path)
         normalized = _normalized_data_checkpoint(existing_data, plan.projected_latest)
         _write_json_atomic(data_path, normalized)
+        progress.done("Synchronizing data checkpoint", sync_start, detail=str(data_path))
 
 
 def _plan_to_dict(plan: RollbackPlan) -> dict[str, Any]:
@@ -474,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--checkpoint-dir",
+        "--checkpoit-dir",
         type=Path,
         required=True,
         help="Directory containing .safetensors checkpoints and state JSON files",
@@ -481,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--target-resume-epoch",
+        "--target-resume",
         type=int,
         help="Target resume epoch index (0-based, internal train loop index)",
     )
@@ -509,10 +594,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print machine-readable JSON plan/report.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress updates.",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="Emit loop progress every N items for large checkpoint sets.",
+    )
 
     args = parser.parse_args(argv)
 
     try:
+        progress = ProgressReporter(enabled=not args.quiet, progress_every=max(args.progress_every, 1))
+        mode = "APPLY" if args.apply else "DRY-RUN"
+        progress.info(f"🚀 Starting rollback helper in {mode} mode")
+
         target_resume_epoch = _resolve_target_resume_epoch(
             target_resume_epoch=args.target_resume_epoch,
             target_epoch=args.target_epoch,
@@ -522,7 +622,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: checkpoint directory not found: {checkpoint_dir}", file=sys.stderr)
             return 2
 
-        plan = build_rollback_plan(checkpoint_dir, target_resume_epoch)
+        planning_start = progress.start("Building rollback plan")
+        plan = build_rollback_plan(checkpoint_dir, target_resume_epoch, progress=progress)
+        progress.done("Building rollback plan", planning_start)
         sync_data_checkpoint = not args.no_sync_data_checkpoint
 
         if args.json:
@@ -546,8 +648,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         if args.apply:
-            apply_rollback_plan(plan, sync_data_checkpoint=sync_data_checkpoint)
+            apply_start = progress.start("Applying rollback changes")
+            apply_rollback_plan(plan, sync_data_checkpoint=sync_data_checkpoint, progress=progress)
+            progress.done("Applying rollback changes", apply_start)
 
+            post_validate_start = progress.start("Validating post-rollback state")
             latest = find_latest_checkpoint(checkpoint_dir)
             if latest is None:
                 print("Error: no checkpoints remain after rollback", file=sys.stderr)
@@ -577,6 +682,14 @@ def main(argv: list[str] | None = None) -> int:
             if post_assessment.status == "error":
                 print(f"Validation failure: {post_assessment.message}", file=sys.stderr)
                 return 1
+            progress.done(
+                "Validating post-rollback state",
+                post_validate_start,
+                detail=(
+                    f"latest={latest.name}, resume_epoch={post_report['resume_epoch']}, "
+                    f"resume_batch={post_report['resume_batch']}"
+                ),
+            )
 
             if args.json:
                 print(
@@ -593,6 +706,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 print("Rollback applied and validated.")
+
+        progress.info("✅ Rollback helper completed")
 
         return 0
     except ValueError as exc:

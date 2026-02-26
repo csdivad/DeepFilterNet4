@@ -254,3 +254,39 @@ def test_apply_creates_data_checkpoint_when_missing(tmp_path: Path):
     assert payload["batch_idx"] == 7
     assert payload["pipeline_stage_index"] == 1
     assert payload["pipeline_stage_name"] == "stage_1"
+
+
+def test_progress_feedback_emits_stage_updates(tmp_path: Path, capsys):
+    _make_checkpoint(tmp_path, epoch=3, kind="epoch_end", last_completed=3, global_step=301)
+    _make_checkpoint(tmp_path, epoch=4, kind="step", last_completed=3, batch_idx=2, global_step=402)
+
+    rc = main(
+        [
+            "--checkpoint-dir",
+            str(tmp_path),
+            "--target-resume-epoch",
+            "4",
+        ]
+    )
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    assert "Starting rollback helper" in captured.err
+    assert "Validating checkpoint directory" in captured.err
+    assert "Loading checkpoint metadata" in captured.err
+    assert "Rollback planning complete" in captured.err
+
+
+def test_cli_aliases_are_supported(tmp_path: Path):
+    _make_checkpoint(tmp_path, epoch=4, kind="step", last_completed=3, batch_idx=1, global_step=401)
+
+    rc = main(
+        [
+            "--checkpoit-dir",
+            str(tmp_path),
+            "--target-resume",
+            "4",
+            "--quiet",
+        ]
+    )
+    assert rc == 0

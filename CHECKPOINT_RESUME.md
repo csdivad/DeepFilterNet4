@@ -101,12 +101,18 @@ auto `--resume` and auto `--resume-data` artifacts:
 Notes:
 
 - Dry-run prints which checkpoint files and epoch markers would be removed.
+- The helper now emits timed progress updates to `stderr` for each major phase
+  (validation, metadata scan, marker scan, apply/remove, post-validate).
 - `--apply` removes only checkpoints whose computed resume epoch is newer than
   the selected target.
 - By default, `--apply` syncs `data_checkpoint.json` to the selected model
   resume position so `--resume-data` stays coherent.
 - Add `--require-resume-data` if your workflow mandates that
   `data_checkpoint.json` must exist and be valid.
+- Use `--quiet` to suppress progress logs, and `--progress-every N` to control
+  loop progress update frequency for large checkpoint directories.
+- Convenience aliases are supported: `--target-resume` for
+  `--target-resume-epoch` and `--checkpoit-dir` for `--checkpoint-dir`.
 
 ## 📊 Checkpoint Organization
 
