@@ -317,17 +317,90 @@ All changes are config-level (no code changes). The most significant risk is FM 
 
 ---
 
-## 8. Monitoring Checklist
+## 8. Monitoring Rubric for `pipeline_awesome_gan_curriculum_adj.toml`
 
-During training with these recommendations, track:
+This rubric is the operational gate for the tuned profile currently in use:
 
-1. **Spectral loss trajectory**: Should decrease monotonically epochs 0–75, then flatten
-2. **MRSTFT loss trajectory**: Should show improvement with the higher weight
-3. **Pipeline awesome sub-losses**: Speech and noise losses should both decrease in Stage 2+
-4. **VAD accuracy**: Should reach >85% by epoch 75 despite lower weight
-5. **GAN gen/disc loss ratio**: Should stay within 0.3–3.0 range; if gen > 5×disc, GAN is collapsing
-6. **Total gradient norm**: Should stay under max_grad_norm 80% of the time; if consistently clipped, reduce weights
-7. **Stage transitions**: Watch for loss spikes within 2 epochs of stage boundaries (epochs 30, 75, 130)
+- Stage boundaries: **0 → 60 → 100 → 130**
+- GAN schedule: **start=130, ramp=24, adv=0.08, fm=0.6**
+- Late-stage suppression emphasis: **lower VAD/speech weights in GAN phase**
+
+### 8.1 Primary decision metrics and thresholds
+
+#### A) Loss-budget ratio (most important)
+
+Track weighted objective balance at validation:
+
+$$
+R_{aux/recon} = \frac{w_{awesome}L_{awesome} + w_{vad}(L_{vad\_proxy} + L_{vad\_head}) + w_{speech}L_{speech}}{L_{spec} + L_{mrstft}}
+$$
+
+Guardrails:
+
+- **Stage 2–3 target:** `0.8 ≤ R_aux/recon ≤ 1.3`
+- **Warning:** sustained `R_aux/recon > 1.5` for 2+ validations
+- **Action:** reduce `vad_loss_weight` and/or `vad_speech_loss_weight` by 10–20%
+
+Rationale: keeps auxiliary speech/noise supervision from dominating reconstruction and preserving non-target speech.
+
+#### B) GAN stability ratio
+
+Track generator/discriminator balance:
+
+$$
+R_{gan} = \frac{L_{gen}}{L_{disc} + 10^{-8}}
+$$
+
+Guardrails:
+
+- **Healthy band:** `0.3 ≤ R_gan ≤ 3.0`
+- **High risk:** `R_gan > 5.0` or `R_gan < 0.1` for 2+ validations
+- **Action:**
+  - if `R_gan > 5.0`: increase `fm_weight` (e.g., `0.6 -> 0.7`) or lower `adv_weight` (`0.08 -> 0.06`)
+  - if `R_gan < 0.1`: reduce discriminator pressure (`disc_lr` down 20–30%)
+
+#### C) Suppression-vs-intelligibility split (deployment objective)
+
+Evaluate on two validation subsets:
+
+1. **Target-present speech set** (intelligibility retention)
+2. **Target-absent interferer/music set** (suppression strictness)
+
+Guardrails:
+
+- If suppression improves but target-speech quality drops by >10% over 3 validations, treat as over-suppression.
+- If target-speech quality is stable but residual interferer/music energy rises, treat as leakage.
+
+Actions:
+
+- Over-suppression: increase Stage 3 `awesome_loss_weight` slightly or reduce GAN aggressiveness (`adv_weight`).
+- Leakage: reduce Stage 4 `vad_*` weights further and/or increase suppression emphasis via pipeline-awesome balance.
+
+#### D) Stage-transition stability check
+
+At boundaries (`60`, `100`, `130`), monitor for transient spikes:
+
+- **Pass:** total validation loss stabilizes within 2 epochs
+- **Fail:** >20% loss jump persisting for 3 epochs
+- **Action:** add an intermediate stage or soften adjacent stage deltas
+
+### 8.2 Rollback triggers (hard stop)
+
+Rollback to the best pre-regression checkpoint when any trigger is met:
+
+1. `R_aux/recon > 1.8` for 3 consecutive validations
+2. GAN instability (`R_gan > 5` or `< 0.1`) persists after one corrective adjustment
+3. Target-speech quality degrades >10% for 3 validations while suppression does not materially improve
+4. Stage-transition instability persists beyond 3 epochs after boundary
+
+### 8.3 Minimal intervention ladder
+
+Apply one change at a time in this order:
+
+1. `fm_weight` (+0.1) or `adv_weight` (−0.02) for GAN instability
+2. Stage 4 `vad_loss_weight` / `vad_speech_loss_weight` (−10% each) for non-target speech leakage
+3. Add stage between 100 and 130 if transition is abrupt
+4. Roll back to best checkpoint and resume with adjusted config
 
 ---
 
