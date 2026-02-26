@@ -446,9 +446,28 @@ def validate_checkpoint_dir(
             if not isinstance(data_batch, int) or data_batch < 0:
                 report["invalid"].append((data_ckpt, "data checkpoint has invalid batch_idx"))
             if report["latest_state"] and isinstance(data_epoch, int):
-                latest_epoch = report["latest_state"].get("epoch")
-                if isinstance(latest_epoch, int) and data_epoch > latest_epoch:
-                    report["invalid"].append((data_ckpt, "data checkpoint epoch exceeds latest model checkpoint epoch"))
+                latest_state = report["latest_state"]
+                latest_epoch = latest_state.get("epoch")
+                max_resume_epoch = compute_resume_epoch(latest_state)
+                if data_epoch > max_resume_epoch:
+                    report["invalid"].append((data_ckpt, "data checkpoint epoch exceeds latest resume epoch"))
+                elif isinstance(latest_epoch, int) and data_epoch > latest_epoch:
+                    latest_kind = latest_state.get("kind")
+                    if latest_kind not in _COMPLETED_KINDS:
+                        report["invalid"].append(
+                            (data_ckpt, "data checkpoint epoch exceeds latest in-progress model checkpoint epoch")
+                        )
+
+                latest_kind = latest_state.get("kind")
+                if (
+                    latest_kind in _COMPLETED_KINDS
+                    and data_epoch == max_resume_epoch
+                    and isinstance(data_batch, int)
+                    and data_batch > 0
+                ):
+                    report["warnings"].append(
+                        "data checkpoint is mid-epoch for epoch-boundary resume and will be reset to batch 0"
+                    )
         except Exception as e:
             report["invalid"].append((data_ckpt, f"data checkpoint load error: {e}"))
 

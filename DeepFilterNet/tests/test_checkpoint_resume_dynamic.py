@@ -125,6 +125,53 @@ def test_resume_after_completed_epoch_advances():
         assert report["resume_epoch"] == 5  # completed epoch advances by one
 
 
+def test_data_checkpoint_allows_epoch_boundary_resume_epoch():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        _make_checkpoint(tmpdir, epoch=4, kind="epoch_end", last_completed=4, global_step=401)
+
+        data_ckpt = tmpdir / "data_checkpoint.json"
+        data_ckpt.write_text(
+            json.dumps(
+                {
+                    "epoch": 5,
+                    "batch_idx": 0,
+                    "samples_processed": 0,
+                    "seed": 42,
+                    "split": "train",
+                }
+            )
+        )
+
+        report = validate_checkpoint_dir(tmpdir, strict=True, validate_load=False)
+        assert report["resume_epoch"] == 5
+        invalid_msgs = [reason for path, reason in report["invalid"] if path.name == "data_checkpoint.json"]
+        assert invalid_msgs == []
+
+
+def test_data_checkpoint_warns_for_mid_epoch_on_epoch_boundary_resume():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        _make_checkpoint(tmpdir, epoch=6, kind="epoch_end", last_completed=6, global_step=601)
+
+        data_ckpt = tmpdir / "data_checkpoint.json"
+        data_ckpt.write_text(
+            json.dumps(
+                {
+                    "epoch": 7,
+                    "batch_idx": 4,
+                    "samples_processed": 96,
+                    "seed": 42,
+                    "split": "train",
+                }
+            )
+        )
+
+        report = validate_checkpoint_dir(tmpdir, strict=True, validate_load=False)
+        assert report["resume_epoch"] == 7
+        assert any("mid-epoch for epoch-boundary resume" in warning for warning in report["warnings"])
+
+
 def test_resume_prefers_interrupted_checkpoint():
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
