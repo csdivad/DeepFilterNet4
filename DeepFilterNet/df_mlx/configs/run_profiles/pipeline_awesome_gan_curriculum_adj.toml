@@ -13,8 +13,8 @@
 #   2. 4-stage pipeline curriculum (new — no prior profile used stages):
 #      - Stage 1 (0–29):   Foundation — spectral-dominant, aux at 15-19% of target
 #      - Stage 2 (30–74):  Ramp — speech-aware at ~50%, VadHead starts learning
-#      - Stage 3 (75–129): Full multi-task — all non-GAN losses at target balance
-#      - Stage 4 (130–199): GAN polish — aux reduced 20% to absorb GAN gradient budget
+#      - Stage 3 (75–129): Full multi-task — converge pre-GAN with moderated VAD pressure
+#      - Stage 4 (130–199): GAN polish — aux reduced further to absorb GAN gradient budget
 #
 #   3. Better GAN integration:
 #      - FM:adversarial ratio 17:1 → 6.25:1 (fm 1.0→0.5, adv 0.06→0.08)
@@ -72,10 +72,10 @@ variant = "full"
 # ─── Loss Configuration ─────────────────────────────────────────────────────────
 #
 # Total loss (at full convergence, epoch 150+):
-#   L = spec(1.0) + mrstft(0.35) + awesome(0.65) + vad(0.32) + speech(0.28)
-#     + adv(0.08) + fm(0.5)
+#   L = spec(1.0) + mrstft(0.35) + awesome(0.65) + vad(0.24) + speech(0.24)
+#     + adv(0.08) + fm(0.6)
 #
-# Weight budget:  reconstruction 1.35 : auxiliary 1.25 : GAN 0.58 = balanced
+# Weight budget:  reconstruction 1.35 : auxiliary 1.13 : GAN 0.68 = suppression-forward
 # Compare prior:  reconstruction 1.20 : auxiliary 3.40 : GAN 1.06 = aux-dominated
 
 [loss]
@@ -109,22 +109,22 @@ vad_speech_loss_weight = 0.15
 [[loss.pipeline_stages]]
 start_epoch = 100
 name = "full_multitask"
-# All non-GAN losses at target strength — model converges on pre-GAN optimum
-# aux = 0.80 + 0.40 + 0.35 = 1.55 vs reconstruction 1.35 → 1:1.15 (balanced)
-# 55 epochs of stable multi-task training before GAN phase
-awesome_loss_weight = 0.80
-vad_loss_weight = 0.40
-vad_speech_loss_weight = 0.45
+# All non-GAN losses at target strength with moderated VAD/speech pressure
+# aux = 0.75 + 0.30 + 0.35 = 1.40 vs reconstruction 1.35 → near parity pre-GAN
+# 30 epochs of stable multi-task training before GAN phase
+awesome_loss_weight = 0.75
+vad_loss_weight = 0.30
+vad_speech_loss_weight = 0.35
 
 [[loss.pipeline_stages]]
-start_epoch = 140
+start_epoch = 130
 name = "gan_integration"
-# Auxiliary eased ~20% to absorb incoming GAN gradient budget
-# aux = 0.65 + 0.32 + 0.28 = 1.25; GAN = 0→0.58 over 20 epochs
-# Net effect at full GAN ramp: total changes from 2.90 to 3.18 (+10%, not +37%)
+# Auxiliary eased further to absorb GAN gradient budget and reduce non-target speech retention
+# aux = 0.65 + 0.24 + 0.24 = 1.13; GAN = 0→0.68 over 24 epochs
+# Stage aligned with GAN start for smoother objective transition
 awesome_loss_weight = 0.65
-vad_loss_weight = 0.32
-vad_speech_loss_weight = 0.28
+vad_loss_weight = 0.24
+vad_speech_loss_weight = 0.24
 
 [loss.awesome]
 loss_weight = 0.8            # down from 1.2: reduces aux dominance
@@ -152,21 +152,21 @@ hop_sizes = [128, 256, 512]
 # GAN timeline: silent 0-129 → ramp 130-149 → full 150-199 (50 epochs at full)
 # Compare prior: silent 0-149 → ramp 150-161 → full 162-199 (38 epochs at full)
 #
-# FM:adversarial effective ratio: 0.5 × 1.0 : 0.08 = 6.25:1
+# FM:adversarial effective ratio: 0.6 × 1.0 : 0.08 = 7.5:1
 # Compare prior: 1.0 × 1.0 : 0.06 = 16.7:1
 # Lower ratio increases adversarial perceptual feedback while FM still stabilizes
 
 [gan]
 enabled = true
 start_epoch = 130            # 20 epochs earlier: 70 total GAN epochs (was 50)
-ramp_epochs = 20             # smoother ramp: 20 epochs (was 12)
-                             # full GAN weight at epoch 150, then 50 epochs of
-                             # stable adversarial training
+ramp_epochs = 24             # smoother ramp: 24 epochs (was 12)
+                             # full GAN weight reached around epoch 153,
+                             # then stable adversarial training to end
 adv_weight = 0.08            # up from 0.06: more perceptual adversarial signal
                              # range 0.04-0.09 across profiles; 0.08 is moderate
-fm_weight = 0.5              # down from 1.0: FM was drowning adversarial signal
-                             # effective FM = 0.5 × factor(1.0) = 0.5
-                             # HIGHEST-RISK CHANGE: if GAN destabilizes, try 0.7
+fm_weight = 0.6              # moderate FM stabilizer while preserving adversarial pressure
+                             # effective FM = 0.6 × factor(1.0) = 0.6
+                             # if GAN destabilizes, try 0.7 or lower adv_weight to 0.06
 discriminator = "combined"
 mpd_periods = [2, 3, 5, 7, 11]
 msd_scales = 3
@@ -193,13 +193,13 @@ eval_frequency = 6           # benchmarked EF=6 optimal
 # gradient pollution is reduced while VAD accuracy should reach >85% by epoch 75.
 
 [vad]
-loss_weight = 0.4            # down from 0.8: was 80% of spectral; now 30%
-                             # still meaningful signal for VadHead training
-                             # VAD accuracy target: >85% by epoch 75 (Stage 3)
+loss_weight = 0.3            # base fallback when stage override is absent
+                             # lower base reduces non-target speech preservation bias
+                             # VAD accuracy target: >85% by epoch 90 (Stage 3)
 threshold = 0.05
 margin = 0.05
-speech_loss_weight = 0.35    # down from 0.6: 300-3400Hz band refinement loss
-                             # complementary (not redundant) with full-spectrum spectral
+speech_loss_weight = 0.30    # base fallback when stage override is absent
+                             # helps avoid preserving competing voices in speech band
 warmup_epochs = 5            # all VAD sub-losses ramp together
 snr_gate_db = -12.0
 snr_gate_width = 6.0
