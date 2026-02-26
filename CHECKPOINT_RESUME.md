@@ -74,6 +74,40 @@ When `--resume` is set:
 4. Resumes training from exact previous state
 5. Progress bars correctly show remaining epochs
 
+### Rolling Back to an Earlier Resume Epoch
+
+Use the rollback helper to prune newer checkpoints and validate coherence between
+auto `--resume` and auto `--resume-data` artifacts:
+
+```bash
+# Dry-run (no file mutations)
+.venv/bin/python scripts/rollback_checkpoint_epoch.py \
+  --checkpoint-dir DeepFilterNet/checkpoints \
+  --target-resume-epoch 140
+
+# Apply rollback and normalize/create data_checkpoint.json
+.venv/bin/python scripts/rollback_checkpoint_epoch.py \
+  --checkpoint-dir DeepFilterNet/checkpoints \
+  --target-resume-epoch 140 \
+  --apply
+
+# 1-based alias for target resume epoch
+.venv/bin/python scripts/rollback_checkpoint_epoch.py \
+  --checkpoint-dir DeepFilterNet/checkpoints \
+  --target-epoch 141 \
+  --apply
+```
+
+Notes:
+
+- Dry-run prints which checkpoint files and epoch markers would be removed.
+- `--apply` removes only checkpoints whose computed resume epoch is newer than
+  the selected target.
+- By default, `--apply` syncs `data_checkpoint.json` to the selected model
+  resume position so `--resume-data` stays coherent.
+- Add `--require-resume-data` if your workflow mandates that
+  `data_checkpoint.json` must exist and be valid.
+
 ## 📊 Checkpoint Organization
 
 ```
