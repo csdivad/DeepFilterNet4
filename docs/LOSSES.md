@@ -32,6 +32,22 @@ $$L_{spec} = (1 - \alpha) \cdot \text{mean}\!\bigl(\lvert\hat{M} - M\rvert\bigr)
 
 where $\alpha = 0.5$ by default, $\hat{M}$ = predicted magnitude, $M$ = target magnitude, $R, I$ = real/imaginary components.
 
+**Term-by-term interpretation:**
+- $L_{spec}$: aggregate spectral reconstruction objective. Lower is better.
+- $\alpha$: tradeoff between magnitude-only fit and complex-domain fit.
+	- **What:** scalar in $[0,1]$.
+	- **Why relevant:** balances “sounds right in energy” (magnitude) vs “phase/coherence also right” (complex).
+	- **How chosen:** fixed hyperparameter; typically tuned by validation listening/metrics.
+- $\hat{M}, M$: predicted vs reference magnitudes, computed as $\sqrt{R^2 + I^2 + \varepsilon}$.
+	- **Why relevant:** magnitude errors strongly track perceived loudness and masking behavior.
+- $\hat{R}, \hat{I}, R, I$: predicted/reference real/imaginary STFT parts.
+	- **Why relevant:** preserves fine waveform structure after iSTFT, reducing chirps/phasiness.
+- $\text{mean}(\cdot)$: average over batch, frame, and frequency bins.
+	- **Why relevant:** gives one scale-stable scalar per step.
+
+**Real-world connection:**
+Magnitude-only losses can produce "right energy, wrong texture" audio. Adding complex terms helps maintain natural transients and timbre in speech enhancement and denoising.
+
 **Details:**
 - Casts all inputs to FP32 internally for numerical stability.
 - $\varepsilon = 10^{-8}$ inside `mx.sqrt` prevents zero gradients on silence.
@@ -52,6 +68,23 @@ where $\alpha = 0.5$ by default, $\hat{M}$ = predicted magnitude, $M$ = target m
 **Formula:**
 
 $$L_{mrstft} = \frac{1}{N_{res}} \sum_{n} \Bigl[ f_{mag} \cdot \lVert M_n^\gamma - \hat{M}_n^\gamma \rVert_2^2 + f_{complex} \cdot \bigl(\lVert R_n - \hat{R}_n \rVert_2^2 + \lVert I_n - \hat{I}_n \rVert_2^2\bigr) \Bigr]$$
+
+**Term-by-term interpretation:**
+- $N_{res}$: number of STFT resolutions (FFT/hop settings).
+	- **Why relevant:** averaging across resolutions prevents overfitting to one time-frequency scale.
+- $n$: resolution index.
+- $M_n, \hat{M}_n$: target/predicted magnitudes at resolution $n$.
+- $\gamma$: magnitude compression exponent.
+	- **What:** typically $0 < \gamma < 1$.
+	- **Why relevant:** compresses dynamic range so quiet details matter in gradients.
+	- **How derived:** power-law companding from psychoacoustic and robust-regression practice.
+- $f_{mag}$: magnitude-loss coefficient.
+- $f_{complex}$: complex-loss coefficient.
+- $\lVert\cdot\rVert_2^2$: squared L2 energy across TF bins.
+	- **Why relevant:** penalizes large deviations strongly, useful for gross artifacts.
+
+**Real-world connection:**
+Different resolutions correspond to different perceptual phenomena: short windows capture transients/plosives, long windows capture harmonic structure/formants. MRSTFT aligns both.
 
 **Config options:**
 
@@ -87,6 +120,19 @@ $$L_{gen} = \frac{1}{N_d} \sum_d \text{mean}(-\tilde{f}_d)$$
 
 where $f_d$ = discriminator output on fake (generated) samples.
 
+**Term-by-term interpretation:**
+- $f_d$: discriminator score for fake sample at discriminator head $d$.
+	- **Why relevant:** this is the adversarial signal estimating "how real" generated audio appears.
+- $\tilde{f}_d$: clipped score.
+	- **What:** $\operatorname{clip}(f_d,-30,30)$.
+	- **Why relevant:** prevents rare logit explosions from dominating the total loss.
+	- **How derived:** numerical-stability guardrail; clipping preserves sign while bounding magnitude.
+- $N_d$: number of discriminator heads/scales.
+- $-\tilde{f}_d$: sign inversion means generator is rewarded when discriminator assigns higher "real-like" scores.
+
+**Real-world connection:**
+Adversarial terms often improve perceptual realism (less muffled output), but can destabilize optimization. Score clipping is a practical control knob to keep training usable.
+
 **Config options:**
 
 | Parameter | Description |
@@ -117,6 +163,17 @@ $$L_{fm} = \frac{f_{fm}}{N \cdot L} \sum_{n,l} \text{mean}\!\bigl(\lvert F_{n,l}
 
 where $f_{fm}$ is the class `factor` (default 2.0), $N$ = number of sub-discriminators, $L$ = number of layers per discriminator.
 
+**Term-by-term interpretation:**
+- $F_{n,l}^{real}, F_{n,l}^{fake}$: intermediate discriminator activations for real/fake at sub-discriminator $n$, layer $l$.
+	- **Why relevant:** compares internal representation statistics, not just final logits.
+- $\lvert\cdot\rvert$ and $\text{mean}(\cdot)$: L1 feature distance averaged over activation dimensions.
+	- **Why relevant:** L1 is robust to outliers and gives stable gradients.
+- $N \cdot L$: normalization by number of compared feature maps.
+- $f_{fm}$: global strength of feature matching.
+
+**Real-world connection:**
+In audio vocoding/enhancement, feature matching reduces buzzy adversarial artifacts and improves continuity, similar to perceptual/content loss in vision.
+
 **Config options:**
 
 | Parameter | Description |
@@ -142,6 +199,19 @@ where $f_{fm}$ is the class `factor` (default 2.0), $N$ = number of sub-discrimi
 $$L_{disc} = \frac{1}{N_d} \sum_d \Bigl[ \text{mean}\!\bigl(\max(1 - r_d,\; 0)\bigr) + \text{mean}\!\bigl(\max(1 + f_d,\; 0)\bigr) \Bigr]$$
 
 Hinge loss: real outputs should be $> 1$, fake outputs should be $< -1$.
+
+**Term-by-term interpretation:**
+- $r_d$: discriminator score for real sample.
+- $f_d$: discriminator score for fake sample.
+- $\max(1-r_d,0)$: real-sample margin penalty.
+	- **Why relevant:** zero once real samples are confidently classified (score above margin).
+- $\max(1+f_d,0)$: fake-sample margin penalty.
+	- **Why relevant:** zero once fake samples are confidently below negative margin.
+- Margin constant $1$: hinge boundary defining "confident enough" separation.
+- $N_d$: average across discriminator heads.
+
+**Real-world connection:**
+Hinge GAN objectives often train more stably than vanilla BCE GANs in speech/audio generation, especially with multi-scale discriminators.
 
 **Config options:**
 
@@ -172,6 +242,24 @@ Hinge loss: real outputs should be $> 1$, fake outputs should be $< -1$.
 **Total:**
 
 $$L_{awesome} = L_{speech} + L_{noise} + 0.2 \cdot L_{smooth}$$
+
+**Term-by-term interpretation:**
+- $\hat{S}, S$: enhanced vs clean complex spectrograms.
+- $\log(1+|\cdot|)$: log-compressed magnitude.
+	- **Why relevant:** approximates perceptual loudness compression and stabilizes gradients at high amplitudes.
+- $m$: speech-dominance mask from clean-vs-noise contrast.
+	- **What:** sigmoid of contrast logits.
+	- **Why relevant:** steers error budget toward speech-important bins.
+- $w_{proxy}$: frame-level proxy weight (speech-presence confidence).
+	- **Why relevant:** downweights dubious or non-speech frames.
+- $L_{speech}$: preserves speech structure.
+- $L_{noise}$: suppresses residual noise where speech is unlikely.
+- $L_{smooth}$: temporal regularizer on adjacent frames.
+- Coefficient $0.2$: smoothness strength.
+	- **How chosen:** empirical compromise; enough to reduce musical noise without over-smoothing consonants.
+
+**Real-world connection:**
+This is effectively a hand-crafted multi-objective balancing intelligibility (speech term), comfort (noise term), and artifact control (smoothness).
 
 **Mask computation:** $m = \sigma\!\bigl(\text{sharpness} \cdot (\text{clean\_log} - \text{noise\_log})\bigr)$, clamped to $\pm 30$ logits, then `stop_gradient`.
 
@@ -227,6 +315,20 @@ $$L_{pipeline} = L_{speech} + L_{noise} + 0.3 \cdot L_{smooth} + 1.5 \cdot L_{mu
 
 $$L_{music} = \text{mean}\!\bigl(\lvert\log(1{+}\lvert\hat{S}\rvert)\rvert \cdot w_{instrument} \cdot (1 - m)\bigr)$$
 
+**Term-by-term interpretation:**
+- $L_{speech}, L_{noise}$: same base semantics as awesome loss, with improved masking floor.
+- Coefficient $0.3$ on $L_{smooth}$:
+	- **Why relevant:** stronger artifact suppression than base awesome (0.2).
+- Coefficient $1.5$ on $L_{music}$:
+	- **Why relevant:** explicitly prioritizes removal of instrumental leakage in non-vocal regions.
+- $w_{instrument}$: instrument-likelihood gate from improved musicness estimator.
+	- **How derived:** proxy from spectral flatness, temporal flux, and vocal/harmonic cues.
+- $(1-m)$: non-speech emphasis term.
+	- **Why relevant:** avoids penalizing desired speech energy.
+
+**Real-world connection:**
+Useful in mixed-content audio (speech + background media/music), where naive denoisers either leave music bleed or damage speech harmonic detail.
+
 **Proxy frame:** Higher floor (0.15), additive boosts, vocal gate restores music gate for vocal-like content.
 
 **Config:** `use_pipeline_awesome_loss` (bool). Shares `awesome_weight` multiplier. Mutually exclusive with basic awesome in practice.
@@ -251,6 +353,23 @@ where:
 - $\text{gate}$ is the SNR/energy gate used to focus the proxy penalty.
 - $z_{vad}$ is the raw logit output of the model's `VadHead` (no sigmoid — sigmoid is fused inside the BCE kernel).
 - $p_{ref}$ is the energy-based proxy VAD target computed from the clean reference signal.
+
+**Term-by-term interpretation:**
+- $p_{ref}$: target speech-presence probability from clean speech-band energy statistics.
+	- **How derived:** z-scored log-energy in speech band, passed through sigmoid-like mapping.
+- $p_{out}$: same proxy computed on enhanced output.
+- $p_{ref} - p_{out}$: estimated speech-presence loss due to enhancement.
+- $\text{margin}$: tolerated reduction before penalty starts.
+	- **Why relevant:** prevents over-penalizing tiny/noisy differences.
+- $\max(\cdot,0)$: hinge-style one-sided penalty.
+- $\text{gate}$: SNR/energy confidence weighting.
+	- **Why relevant:** emphasizes reliable speech-present conditions.
+- $z_{vad}$: raw VAD head logits.
+- $\text{BCE\_with\_logits}$: numerically stable logistic cross-entropy.
+	- **Why relevant:** combines sigmoid + CE in one stable kernel.
+
+**Real-world connection:**
+Proxy term protects speech regions from being erased; head term learns deployable VAD gating for downstream suppression, streaming, and endpointing logic.
 
 **Config options:**
 
@@ -283,6 +402,16 @@ $$L_{speech} = \text{mean}\!\bigl(\lvert\bar{O} - \bar{C}\rvert \cdot \text{gate
 
 where $\bar{O}, \bar{C}$ are speech-band averaged log magnitudes (via band mask summation divided by band bins).
 
+**Term-by-term interpretation:**
+- $\bar{O}, \bar{C}$: output/clean speech-band summaries.
+	- **How derived:** masked frequency summation over 300–3400 Hz (configurable), normalized by band-bin count.
+- $\lvert\bar{O}-\bar{C}\rvert$: absolute speech-band mismatch.
+- $\text{gate}$: emphasis on frames likely containing speech.
+- $\text{mean}(\cdot)$: normalization across batch/time.
+
+**Real-world connection:**
+Directly protects intelligibility-critical telephone band cues (vowels/formants/consonant energy) used by humans and ASR systems.
+
 **Config:** Active when the effective runtime `speech_weight > 0` (stage override + warmup). This corresponds to `vad_speech_loss_weight` after stage resolution and warmup scaling.
 
 **Details:**
@@ -298,10 +427,25 @@ where $\bar{O}, \bar{C}$ are speech-band averaged log magnitudes (via band mask 
 | **Source** | [df_mlx/training_losses.py](../DeepFilterNet/df_mlx/training_losses.py#L870-L947) — `_compute_vad_reg_loss()` |
 | **Measures** | Sparse regularisation using speech ratio and musicness proxy gates. |
 
+**Formula (conceptual):**
+
+$$L_{vad\_reg} = \text{mean}\!\bigl(\max(p_{ref}-p_{out}-\text{margin},0) \cdot g_{speech\_ratio} \cdot g_{music}\bigr)$$
+
 **Details:**
 - Computes VAD decrease ($\max(p_{ref} - p_{out} - \text{margin}, 0)$), then gates it by `speech_ratio_gate × music_gate`.
 - Internally calls `_compute_speech_band_logmag_loss` with the computed gate.
 - Uses `_compute_proxy_gates` with `proxy_enabled=True` for speech ratio and musicness scoring.
+
+**Term-by-term interpretation:**
+- $g_{speech\_ratio}$: gate from estimated speech-to-mixture ratio.
+	- **Why relevant:** applies stronger regularization where speech dominance should be preserved.
+- $g_{music}$: gate from musicness estimator.
+	- **Why relevant:** avoids over-constraining regions likely to be non-speech/music-heavy.
+- Sparse activation (`vad_train_prob` / `vad_train_every_steps`):
+	- **Why relevant:** reduces compute overhead and avoids over-regularizing every batch.
+
+**Real-world connection:**
+Acts like a targeted safety regularizer: it is not always-on, but periodically nudges training away from speech deletion failure modes in difficult mixtures.
 
 **Config:**
 
