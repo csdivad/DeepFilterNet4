@@ -413,11 +413,33 @@ class TestTrainDynamicRegularizerGates:
             max_stage_vad_weight=0.0,
         )
 
-    def test_stage_speech_loss_uses_runtime_weight_gate(self):
+    def test_stage_speech_loss_uses_runtime_weight_gate_in_eager_metrics(self):
         import inspect
 
         import df_mlx.train_dynamic as td
 
         train_source = inspect.getsource(td.train)
-        assert train_source.count("if speech_weight > 0:") >= 3
+        # Eager-side detailed metric logging may skip this expensive metric when
+        # speech weight is zero.
+        assert train_source.count("if speech_weight > 0:") == 1
         assert train_source.count("if vad_speech_loss_weight > 0:") == 1
+
+    def test_compiled_loss_paths_do_not_branch_on_weight_tensors(self):
+        import inspect
+        import re
+
+        import df_mlx.train_dynamic as td
+
+        train_source = inspect.getsource(td.train)
+
+        loss_fn_start = train_source.index("def loss_fn(")
+        loss_fn_end = train_source.index("loss_and_grad = nn.value_and_grad(model, loss_fn)")
+        loss_fn_src = train_source[loss_fn_start:loss_fn_end]
+        assert "if speech_weight > 0:" not in loss_fn_src
+        assert re.search(r"if\s+\w+_weight\s*>\s*0", loss_fn_src) is None
+
+        gan_start = train_source.index("def loss_fn_gan(")
+        gan_end = train_source.index("loss_and_grad_gan = nn.value_and_grad(model, loss_fn_gan)")
+        gan_src = train_source[gan_start:gan_end]
+        assert "if speech_weight > 0:" not in gan_src
+        assert re.search(r"if\s+\w+_weight\s*>\s*0", gan_src) is None

@@ -1432,17 +1432,18 @@ def train(
                 vad_z_threshold,
                 vad_z_slope,
             )
-            speech_loss = _SCALAR_ZERO
-            if speech_weight > 0:
-                speech_loss = _compute_speech_band_logmag_loss(
-                    clean_real,
-                    clean_imag,
-                    spec_out[0],
-                    spec_out[1],
-                    vad_band_mask,
-                    vad_band_bins,
-                    gate,
-                )
+            # IMPORTANT: avoid Python control flow on runtime weight tensors in
+            # compiled paths. speech_weight may be an mx.array scalar, and
+            # branching on it would force evaluation or raise inside mx.compile.
+            speech_loss = _compute_speech_band_logmag_loss(
+                clean_real,
+                clean_imag,
+                spec_out[0],
+                spec_out[1],
+                vad_band_mask,
+                vad_band_bins,
+                gate,
+            )
             total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
 
             # Option C: Multi-task VAD head BCE loss (logits path)
@@ -1631,17 +1632,17 @@ def train(
                     vad_z_threshold,
                     vad_z_slope,
                 )
-                speech_loss = _SCALAR_ZERO
-                if speech_weight > 0:
-                    speech_loss = _compute_speech_band_logmag_loss(
-                        clean_real,
-                        clean_imag,
-                        spec_out[0],
-                        spec_out[1],
-                        vad_band_mask,
-                        vad_band_bins,
-                        gate,
-                    )
+                # IMPORTANT: avoid Python control flow on runtime weight tensors
+                # in compiled paths (see loss_fn comment above).
+                speech_loss = _compute_speech_band_logmag_loss(
+                    clean_real,
+                    clean_imag,
+                    spec_out[0],
+                    spec_out[1],
+                    vad_band_mask,
+                    vad_band_bins,
+                    gate,
+                )
                 total_loss = total_loss + vad_weight * vad_loss + speech_weight * speech_loss
 
                 # Option C: Multi-task VAD head BCE loss (logits path)
@@ -3339,7 +3340,8 @@ def train(
                         else:
                             did_optimizer_update = False
                             tqdm.write(
-                                "⚠️  Non-finite grads after clipping; skipping optimizer update " f"(step={global_step})"
+                                "⚠️  Non-finite grads after clipping; skipping optimizer update "
+                                f"(step={global_step})"
                             )
                         accumulated_grads = None
                         accumulated_loss = _SCALAR_ZERO

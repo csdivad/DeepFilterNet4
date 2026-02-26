@@ -294,6 +294,30 @@ sync_mode = "fast"
 
 ---
 
+### Compiled Loss Control-Flow Invariants
+
+**Status:** REQUIRED
+
+**Scope:** `DeepFilterNet/df_mlx/train_dynamic.py` compiled loss functions (`loss_fn`, `loss_fn_gan`) and related tests
+
+**Rule:**
+
+- Never branch in Python on runtime MLX scalar arrays inside compiled transforms (for example `if speech_weight > 0:` when `speech_weight` is an `mx.array`).
+- In compiled loss paths, compute weight-gated terms unconditionally and apply weighting arithmetically (`total += weight * term`).
+- Keep Python conditional gating for diagnostics/eager-only metric paths where weights are guaranteed Python scalars.
+
+**Rationale:**
+
+- `mx.compile` traces with placeholders and cannot evaluate arrays in Python control flow; attempting to do so triggers runtime failures (`ValueError: Attempting to eval an array during function transformations...`).
+- Arithmetic gating preserves differentiability and compile safety while still allowing zero-weight terms to be disabled effectively.
+
+**Related Files:**
+
+- [DeepFilterNet/df_mlx/train_dynamic.py](../DeepFilterNet/df_mlx/train_dynamic.py)
+- [DeepFilterNet/tests/test_loss_audit_fixes.py](../DeepFilterNet/tests/test_loss_audit_fixes.py)
+
+---
+
 ### Hardware Profile Presets
 
 **Status:** STRONGLY RECOMMENDED
@@ -439,6 +463,7 @@ _None documented yet._
 - **2026-02-14**: Added sync mode selection, compile boundary shape invariants, hardware profile presets, performance regression gate, and GAN-phase eager mode conventions.
 - **2026-02-15**: Added GAN discriminator optimizer-step cadence and GAN mixed-precision waveform-path conventions to prevent GAN-onset OOM under gradient accumulation.
 - **2026-02-15**: Added Augmentation Extension Fallback Architecture convention documenting `augment_ext.py` bridge pattern and `pyDF-augment` Rust extension.
+- **2026-02-26**: Added compiled loss control-flow invariant forbidding Python branches on runtime MLX weight arrays in compiled paths.
 
 ---
 
