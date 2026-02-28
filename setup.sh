@@ -165,7 +165,7 @@ while [[ $# -gt 0 ]]; do
       PRINT_ENV=1
       shift 1
       ;;
-    --dry-run)
+    -n|--dry-run)
       DRY_RUN=1
       shift 1
       ;;

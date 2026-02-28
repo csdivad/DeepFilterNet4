@@ -149,15 +149,19 @@ def test_train_loop_logs_modes_and_guards_against_gan_compiled_mix():
     checkpoints_source = (Path(__file__).resolve().parents[1] / "df_mlx" / "training_checkpoints.py").read_text()
     assert '_TRAIN_MODE_COMPILED = "COMPILED"' in checkpoints_source
     assert '_TRAIN_MODE_EAGER = "EAGER"' in checkpoints_source
-    assert "TRAIN_MODE={train_mode}" in source
+    assert "TRAIN_MODE={loop_state.train_mode}" in source
     assert "GAN active epoch cannot run compiled step" in source
 
 
 def test_compiled_base_eligibility_not_blocked_by_grad_accumulation():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
-    assert "base_compiled_step_enabled = not (debug_numerics or nan_skip_batch)" in source
-    assert "grad_accumulation_steps > 1" in source
-    assert "compiled forward/backward enabled; optimizer updates remain accumulated" in source
+    helpers_source = (Path(__file__).resolve().parents[1] / "df_mlx" / "training_helpers.py").read_text()
+    # Core eligibility logic lives in training_helpers.print_compiled_step_eligibility
+    assert "enabled = not (debug_numerics or nan_skip_batch)" in helpers_source
+    assert "grad_accumulation_steps > 1" in helpers_source
+    assert "compiled forward/backward enabled; optimizer updates remain accumulated" in helpers_source
+    # train_dynamic.py delegates to the helper
+    assert "print_compiled_step_eligibility(" in source
 
 
 def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
@@ -169,6 +173,6 @@ def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
 
 def test_pipeline_stage_progression_is_monotonic_and_non_mutating():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
-    assert "next_stage_index = max(active_stage_index, scheduled_stage_index)" in source
-    assert "active_stage_index += 1" in source
+    assert "next_stage_index = max(loop_state.active_stage_index, scheduled_stage_index)" in source
+    assert "loop_state.active_stage_index += 1" in source
     assert 'next_stage["start_epoch"] = epoch + 1' not in source

@@ -1,11 +1,18 @@
-"""Class-based API for DfNet4 dynamic training.
+"""Class-based API for DeepFilterNet4 dynamic training.
 
-Provides :class:`TrainingSession` as a thin wrapper around
-:func:`~df_mlx.train_dynamic.train`.  Future phases will incrementally
-migrate the body of ``train()`` into class methods; for now, the session
-simply delegates to the function.
+Provides :class:`TrainingSession` as a thin, kwargs-driven wrapper around
+:func:`~df_mlx.train_dynamic.train`.  Callers can construct a session from
+either explicit keyword arguments or a :class:`~df_mlx.run_config.RunConfig`,
+then invoke ``session.run()`` to execute the full training pipeline.
 
-Phase 3 of the train_dynamic.py monolith decomposition.
+Key exports:
+    - TrainingSession: High-level session object wrapping train().
+    - _kwargs_from_run_config: Convert a RunConfig into train() kwargs dict.
+    - _TRAIN_KWARGS: Canonical ordered tuple of all train() keyword argument names.
+
+Relationship to train_dynamic:
+    All public symbols are re-exported via train_dynamic.py for backward
+    compatibility.  TrainingSession.run() delegates directly to train().
 """
 
 from __future__ import annotations
@@ -268,6 +275,14 @@ class TrainingSession:
             raise TypeError(f"TrainingSession received unexpected keyword arguments: {sorted(unknown)}")
         self._kwargs: dict[str, Any] = kwargs
         self._ready: bool = False
+        # Extension-point attributes — reserved for future refactoring phases
+        # that will move model init, dataset creation, and optimizer setup into
+        # the session object.  Kept as typed placeholders so the interface is
+        # stable when that work lands.
+        self.state: Any | None = None
+        self.step: Any | None = None
+        self.validation: Any | None = None
+        self.loop: Any | None = None
 
     @classmethod
     def from_run_config(cls, run_config: RunConfig, **overrides: Any) -> TrainingSession:
@@ -285,20 +300,17 @@ class TrainingSession:
     def setup(self) -> None:
         """Prepare the session for execution.
 
-        Currently a no-op placeholder.  Future phases will move model
-        initialization, dataset creation, and optimizer setup here.
+        For now this is intentionally lightweight and only marks the
+        session as ready — "ready" simply means ``setup()`` has been
+        called; no validation of arguments or initialisation of external
+        resources occurs here.  The heavy lifting remains in ``train()``.
         """
         self._ready = True
 
     def run(self) -> None:
-        """Execute the training loop.
-
-        Delegates to :func:`~df_mlx.train_dynamic.train` with the stored
-        keyword arguments.
-        """
+        """Execute the training loop."""
         if not self._ready:
             self.setup()
-
         from df_mlx.train_dynamic import train
 
         train(**self._kwargs)
