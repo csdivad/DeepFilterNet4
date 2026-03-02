@@ -58,7 +58,7 @@
 | 2.3 MultiPeriodDiscriminator | `discriminator.py` | M | ✅ |
 | 2.4 MultiScaleDiscriminator | `discriminator.py` | M | ✅ |
 | 2.5 GAN losses (G/D/feature matching) | `loss.py` | M | ✅ |
-| 2.6 Alternating GAN training loop | `train_gan.py` | L | ✅ |
+| 2.6 Alternating GAN training loop | `train_dynamic.py` | L | ✅ |
 
 **Deliverable**: Full GAN training capability matching PyTorch
 
@@ -152,7 +152,7 @@ df_mlx/
 ├── # Training
 ├── train.py                      # ✅ Basic training (needs LR scheduler)
 ├── train_dynamic.py              # ✅ Dynamic mixing training
-├── train_gan.py                  # ✅ GAN training loop
+├── # (GAN training folded into train_dynamic.py)
 ├── loss.py                       # ✅ All loss functions
 ├── lr.py                         # ✅ LR schedulers
 │

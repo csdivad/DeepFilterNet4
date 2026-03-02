@@ -27,8 +27,6 @@ Features:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -43,94 +41,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from df_mlx.training_ops import clip_grad_norm  # noqa: E402
 
-
-def save_checkpoint(
-    model: nn.Module,
-    optimizer: optim.Optimizer,
-    path: Path,
-    *,
-    epoch: int,
-    loss: float,
-    best_valid_loss: float,
-) -> None:
-    """Save a training checkpoint atomically.
-
-    Uses temp files + atomic rename to prevent corruption on crash.
-
-    Args:
-        model: Model to save
-        optimizer: Optimizer state
-        path: Path to save to
-        epoch: Current epoch
-        loss: Current loss
-        best_valid_loss: Best validation loss so far
-    """
-    from mlx.utils import tree_flatten
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_weights = path.with_name(f"{path.stem}.tmp{path.suffix}")
-
-    params = model.parameters()
-    flat_params = tree_flatten(params)
-    weights = {k: v for k, v in flat_params}
-    if weights:
-        mx.eval(*weights.values())
-    mx.save_safetensors(str(tmp_weights), weights)
-
-    state_path = path.with_suffix(".state.json")
-    tmp_state = state_path.with_name(f"{state_path.stem}.tmp{state_path.suffix}")
-    state = {
-        "epoch": epoch,
-        "loss": loss,
-        "best_valid_loss": best_valid_loss,
-    }
-    with open(tmp_state, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-
-    tmp_weights.replace(path)
-    tmp_state.replace(state_path)
-
-
-def load_checkpoint(model: nn.Module, path: str | Path) -> dict:
-    """Load a training checkpoint.
-
-    Args:
-        model: Model to load weights into
-        path: Path to checkpoint
-
-    Returns:
-        Training state dict
-    """
-    from mlx.utils import tree_flatten, tree_unflatten
-
-    ckpt_path = Path(path)
-
-    weights = mx.load(str(ckpt_path))
-
-    flat_model = tree_flatten(model.parameters())
-    pairs = []
-    missing = []
-    for name, param in flat_model:
-        if isinstance(weights, dict) and name in weights:
-            pairs.append((name, weights[name]))
-        else:
-            pairs.append((name, param))
-            missing.append(name)
-
-    model.update(tree_unflatten(pairs))
-    if missing:
-        print(f"⚠️  {len(missing)} parameters were missing in checkpoint")
-
-    state_path = ckpt_path.with_suffix(".state.json")
-    state = {}
-    if state_path.exists():
-        with open(state_path) as f:
-            state = json.load(f)
-
-    return state  # type: ignore[return-value]
+# Delegate checkpoint I/O to the canonical implementation in train.py
+from df_mlx.train import load_checkpoint, save_checkpoint  # noqa: E402
 
 
 def train(

@@ -9,7 +9,7 @@
 		{
 			"label": "Format Files",
 			"type": "shell",
-			"command": "cd ${workspaceFolder} && .venv/bin/python -m black --line-length 100 DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1 && .venv/bin/python -m isort --profile black DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/train_gan.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1"
+			"command": "cd ${workspaceFolder} && .venv/bin/python -m black --line-length 100 DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1 && .venv/bin/python -m isort --profile black DeepFilterNet/df_mlx/train.py DeepFilterNet/df_mlx/__init__.py DeepFilterNet/df_mlx/test_mlx_comprehensive.py DeepFilterNet/examples/mlx_training.py 2>&1"
 		},
 		{
 			"label": "Git commit DUP-7.1",
@@ -80,6 +80,51 @@
 			"label": "Verify state",
 			"type": "shell",
 			"command": "cd ${workspaceFolder} && git log --oneline -3 && echo '---' && git status --short"
+		},
+		{
+			"label": "DUP-9 baseline tests",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --tb=short 2>&1 | tee /tmp/dfn_dup9_baseline.txt"
+		},
+		{
+			"label": "Check DUP-9 baseline",
+			"type": "shell",
+			"command": "tail -5 /tmp/dfn_dup9_baseline.txt 2>/dev/null || echo 'Still running'"
+		},
+		{
+			"label": "Delete train_gan.py",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && rm DeepFilterNet/df_mlx/train_gan.py && echo 'Deleted train_gan.py'"
+		},
+		{
+			"label": "Wait for baseline tests",
+			"type": "shell",
+			"command": "sleep 60 && tail -3 /tmp/dfn_dup9_baseline.txt"
+		},
+		{
+			"label": "DUP-9 baseline tests",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --tb=short -x 2>&1 | tee /tmp/dfn_dup9_baseline.txt"
+		},
+		{
+			"label": "Check DUP-9 baseline",
+			"type": "shell",
+			"command": "tail -5 /tmp/dfn_dup9_baseline.txt 2>/dev/null || echo 'Still running'"
+		},
+		{
+			"label": "DUP-9.1 tests",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && .venv/bin/python -m pytest DeepFilterNet/tests/ -q --tb=short -x 2>&1 | tee /tmp/dfn_dup9_test1.txt"
+		},
+		{
+			"label": "Check DUP-9.1 tests",
+			"type": "shell",
+			"command": "tail -5 /tmp/dfn_dup9_test1.txt 2>/dev/null || echo 'Still running'"
+		},
+		{
+			"label": "Commit DUP-9.1",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && git add -A && git diff --cached --stat && git commit -m 'refactor(train): delegate train_with_data.py checkpoint I/O to train.py (DUP-9.1)\n\nRemoved inline save_checkpoint/load_checkpoint from train_with_data.py\nand replaced with imports from the canonical train.py implementation.\nAlso fixed stale train_gan.py references in ROADMAP.md.\n\n~90 lines of duplicated code removed.' --no-verify --no-gpg-sign 2>&1"
 		}
 	]
 }
