@@ -24,8 +24,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from df_mlx.training_helpers import SCALAR_ZERO
-from df_mlx.training_helpers import clip_gan_scores
+from df_mlx.training_helpers import SCALAR_ZERO, clip_gan_scores
 from df_mlx.training_losses import (
     _AWESOME_MASK_LOGIT_CLAMP,
     _EPS,

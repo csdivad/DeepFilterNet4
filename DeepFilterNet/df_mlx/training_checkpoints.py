@@ -971,12 +971,23 @@ def reconcile_resume(
             if isinstance(ckpt_stage_name, str):
                 result.resume_stage_name = ckpt_stage_name
 
-            # Restore dynamic pipeline stages if present
+            # Restore dynamic pipeline stages from checkpoint — but only if
+            # the caller did not already supply stages from the run-config.
+            # When the user passes --run-config with explicit stages, those
+            # take precedence over whatever was serialised in the checkpoint.
             ckpt_config = state.get("config", {})
-            if "pipeline_stages" in ckpt_config and ckpt_config["pipeline_stages"]:
-                pipeline_stage_defs.clear()
-                pipeline_stage_defs.extend(ckpt_config["pipeline_stages"])
+            ckpt_stages = ckpt_config.get("pipeline_stages") or []
+            if ckpt_stages and not pipeline_stage_defs:
+                pipeline_stage_defs.extend(ckpt_stages)
                 print("  Restored dynamic pipeline stages from checkpoint.")
+            elif ckpt_stages and pipeline_stage_defs:
+                ckpt_starts = [s.get("start_epoch") for s in ckpt_stages]
+                cfg_starts = [s.get("start_epoch") for s in pipeline_stage_defs]
+                if ckpt_starts != cfg_starts:
+                    print(
+                        f"  ℹ️  Checkpoint had pipeline stages {ckpt_starts} but run-config "
+                        f"stages {cfg_starts} take precedence."
+                    )
 
             print(
                 "  Resumed from: "

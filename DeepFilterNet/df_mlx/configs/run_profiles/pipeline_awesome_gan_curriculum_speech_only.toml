@@ -16,7 +16,7 @@
 cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
 
 [training]
-epochs = 220
+epochs = 120
 batch_size = 24
 learning_rate = 1e-4
 learning_rate_min = 1e-7
@@ -58,21 +58,21 @@ vad_loss_weight = 0.08
 vad_speech_loss_weight = 0.05
 
 [[loss.pipeline_stages]]
-start_epoch = 60
+start_epoch = 30
 name = "ramp"
 awesome_loss_weight = 0.45
 vad_loss_weight = 0.20
 vad_speech_loss_weight = 0.15
 
 [[loss.pipeline_stages]]
-start_epoch = 100
+start_epoch = 55
 name = "full_multitask"
 awesome_loss_weight = 0.75
 vad_loss_weight = 0.30
 vad_speech_loss_weight = 0.35
 
 [[loss.pipeline_stages]]
-start_epoch = 130
+start_epoch = 80
 name = "gan_integration"
 awesome_loss_weight = 0.65
 vad_loss_weight = 0.24
@@ -93,7 +93,7 @@ hop_sizes = [128, 256, 512]
 
 [gan]
 enabled = true
-start_epoch = 130
+start_epoch = 80
 ramp_epochs = 24
 adv_weight = 0.08
 fm_weight = 0.6

@@ -464,9 +464,7 @@ class MLXDatastoreWriter:
         # any async write failures that inflated pre-incremented counts.
         reconciled_samples: dict[str, int] = {}
         for shard in self._shards:
-            reconciled_samples[shard.split] = (
-                reconciled_samples.get(shard.split, 0) + shard.num_samples
-            )
+            reconciled_samples[shard.split] = reconciled_samples.get(shard.split, 0) + shard.num_samples
 
         # Save final index
         index = DatastoreIndex(

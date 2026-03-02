@@ -39,10 +39,9 @@ from tqdm import tqdm
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from df_mlx.training_ops import clip_grad_norm  # noqa: E402
-
 # Delegate checkpoint I/O to the canonical implementation in train.py
 from df_mlx.train import load_checkpoint, save_checkpoint  # noqa: E402
+from df_mlx.training_ops import clip_grad_norm  # noqa: E402
 
 
 def train(
