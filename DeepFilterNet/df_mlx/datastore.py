@@ -460,11 +460,19 @@ class MLXDatastoreWriter:
             print("\n  No shards written.")
             return None
 
+        # Reconcile sample counts from actual written shards to handle
+        # any async write failures that inflated pre-incremented counts.
+        reconciled_samples: dict[str, int] = {}
+        for shard in self._shards:
+            reconciled_samples[shard.split] = (
+                reconciled_samples.get(shard.split, 0) + shard.num_samples
+            )
+
         # Save final index
         index = DatastoreIndex(
             config=self.config,
             shards=self._shards,
-            total_samples=self._sample_counts.copy(),
+            total_samples=reconciled_samples,
             files_processed=self._files_processed.copy(),
         )
         index.save(self.output_dir / "index.json")

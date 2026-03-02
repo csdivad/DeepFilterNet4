@@ -26,7 +26,8 @@ def clip_grad_norm_tree(grads: Any, max_norm: float) -> Tuple[Any, mx.array]:
 
     total_norm_sq = _ZERO
     for _, g in leaves:
-        total_norm_sq = total_norm_sq + mx.sum(g * g)
+        g_arr: mx.array = g  # type: ignore[assignment]  # tree_flatten leaves are always arrays
+        total_norm_sq = total_norm_sq + mx.sum(g_arr * g_arr)
     total_norm = mx.sqrt(total_norm_sq)
     # When total_norm is non-finite (inf/nan from exploding grads),
     # zero all gradients rather than propagating nan through the model.

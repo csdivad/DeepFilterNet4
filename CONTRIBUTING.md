@@ -79,7 +79,7 @@ maturin develop --release -m pyDF-data/Cargo.toml
 
 We use the following tools for Python code quality:
 
-- **black**: Code formatting (line length: 100)
+- **black**: Code formatting (line length: 120)
 - **isort**: Import sorting
 - **flake8**: Linting
 

@@ -49,7 +49,7 @@ This project uses **bd (beads)** for issue tracking with full AI integration.
 - `cargo +nightly run -p df-demo --features ui --bin df-demo --release` — run the UI demo (Linux).
 
 ## Coding Style & Naming Conventions
-- Python is formatted with Black (`line-length = 100`) and imports organized with isort (see `pyproject.toml`).
+- Python is formatted with Black (`line-length = 120`) and imports organized with isort (see `pyproject.toml`).
 - Use `snake_case` for functions/variables, `PascalCase` for classes, and keep module names lowercase.
 - Rust formatting follows `rustfmt.toml`; prefer `cargo fmt` before commits.
 - Type checking uses Pyright (`pyrightconfig.json`).

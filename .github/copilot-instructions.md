@@ -35,7 +35,7 @@ Quick commands: `bd prime` (get context), `bd ready` (find work), `bd sync` (sav
 
 ## Coding Style
 
-- Python: Black (`line-length = 100`), isort, Pyright for type checking
+- Python: Black (`line-length = 120`), isort, Pyright for type checking
 - Rust: `cargo fmt` (follows `rustfmt.toml`)
 - Tests: pytest, name test files `test_*.py`
 

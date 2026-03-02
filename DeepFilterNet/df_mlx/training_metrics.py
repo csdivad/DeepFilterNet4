@@ -257,12 +257,14 @@ def collect_sync_metrics(
                 spec_out, _vad_logits = raw
             else:
                 spec_out = raw
+            assert spec_out is not None
             out = (
                 mx.stop_gradient(spec_out[0]),
                 mx.stop_gradient(spec_out[1]),
             )
         else:
             spec_out = out
+        assert spec_out is not None
         if debugger is not None:
             debugger.check("model.out_real", spec_out[0], debug_ctx)
             debugger.check("model.out_imag", spec_out[1], debug_ctx)
@@ -341,6 +343,7 @@ def collect_sync_metrics(
     # VAD loss metrics
     # ------------------------------------------------------------------
     if use_vad_loss and needs_model_out:
+        assert spec_out is not None
         vad_loss, p_ref, p_out, gate = _compute_vad_loss(
             clean_real,
             clean_imag,
@@ -413,6 +416,7 @@ def collect_sync_metrics(
     # Awesome loss metrics
     # ------------------------------------------------------------------
     if use_awesome_loss and needs_model_out:
+        assert spec_out is not None
         (
             awesome_loss,
             awesome_speech,
@@ -538,6 +542,7 @@ def collect_sync_metrics(
     # Pipeline awesome loss metrics
     # ------------------------------------------------------------------
     if use_pipeline_awesome_loss and needs_model_out:
+        assert out is not None
         (
             awesome_loss,
             awesome_speech,
@@ -644,6 +649,7 @@ def collect_sync_metrics(
     # VAD train regularization metrics
     # ------------------------------------------------------------------
     if use_vad_train_reg and apply_vad_reg and needs_model_out:
+        assert out is not None
         vad_reg_loss, vad_dec, gate, _, _, _, _ = _compute_vad_reg_loss(
             clean_real,
             clean_imag,

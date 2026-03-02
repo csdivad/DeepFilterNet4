@@ -191,7 +191,7 @@ def _apply_train_ini_parser(
             run_cfg.gan.ramp_epochs = sec.getint("gan_ramp_epochs")
             used.add("gan_ramp_epochs")
         if "discriminator_type" in sec:
-            run_cfg.gan.discriminator = sec.get("discriminator_type").lower()
+            run_cfg.gan.discriminator = sec["discriminator_type"].lower()
             used.add("discriminator_type")
         if "mpd_periods" in sec:
             run_cfg.gan.mpd_periods = _parse_csv_ints(sec.get("mpd_periods"))
@@ -268,7 +268,7 @@ def _apply_train_ini_parser(
     if sec is not None:
         used = set()
         if "backbone" in sec:
-            backbone = sec.get("backbone").lower()
+            backbone = sec["backbone"].lower()
             if backbone in {"mamba", "gru", "attention"}:
                 run_cfg.model.backbone_type = backbone
                 model_cfg.backbone.backbone_type = backbone  # type: ignore[assignment]
@@ -276,7 +276,7 @@ def _apply_train_ini_parser(
                 warnings.append(f"train-config: unsupported deepfilternet4.backbone={backbone}")
             used.add("backbone")
         if "model_variant" in sec:
-            variant = sec.get("model_variant").lower()
+            variant = sec["model_variant"].lower()
             if variant in {"full", "lite"}:
                 run_cfg.model.variant = variant
             else:
@@ -377,7 +377,7 @@ def _apply_train_ini_parser(
             used.add("factor")
         if "type" in sec:
             # MLX GAN uses hinge loss; keep config but warn if mismatched.
-            loss_type = sec.get("type").lower()
+            loss_type = sec["type"].lower()
             if loss_type != "hinge":
                 warnings.append(f"train-config: GANLoss.type={loss_type} not supported; using hinge loss.")
             used.add("type")
