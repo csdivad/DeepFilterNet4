@@ -4,7 +4,7 @@
 **Branch:** `feat/final-audit`  
 **Baseline:** 1007 tests pass, 11 skipped  
 **Post-fix:** 1007 tests pass, 11 skipped  
-**Date:** 2025-07-16
+**Date:** 2026-03-02
 
 ## Findings Summary
 
@@ -16,6 +16,9 @@
 | DUP-9.4 | — | train.py (WarmupCosineSchedule) / lr.py (CosineScheduler) | Justified | Keep |
 | DUP-9.5 | — | 4× checkpoint implementations | Justified (3 of 4) | Keep |
 | DUP-9.6 | — | df/ vs df_mlx/ cross-package | Justified (platform) | Keep |
+| DUP-9.7 | — | MultiResolutionSTFTLoss delegation to SpectralLoss | Not duplication | Keep |
+| DUP-9.8 | — | spectral_loss function vs SpectralLoss class | Justified (different input domains) | Keep |
+| DUP-9.9 | P1 | load_audio_file copy-paste across 3 data scripts | Unnecessary | **FIXED** |
 
 ---
 
@@ -116,6 +119,39 @@
 
 ---
 
+### DUP-9.7 (Not duplication): MultiResolutionSTFTLoss delegates to SpectralLoss
+
+- **Files:** `df_mlx/train.py` (L386–L453)
+- **Evidence:** `MultiResolutionSTFTLoss.__init__` creates `self._spectral_loss = SpectralLoss(...)`.
+  The `__call__` method delegates to `self._spectral_loss`. This is composition, not duplication.
+- **Classification:** Not duplication — proper delegation pattern.
+
+### DUP-9.8 (Justified): spectral_loss function vs SpectralLoss class
+
+- **Files:** `df_mlx/train.py::spectral_loss` (L347), `df_mlx/loss.py::SpectralLoss` (L100)
+- **Rationale:** Different input domains:
+  - `spectral_loss()` operates on **pre-computed spectrograms** (real, imag) tuples
+  - `SpectralLoss` class operates on **waveforms** and computes STFTs internally
+- **Risk if consolidated:** Would conflate two different abstraction levels.
+
+### DUP-9.9 (P1, FIXED): load_audio_file copy-paste across 3 data scripts
+
+- **Files:**
+  - `df_mlx/dynamic_dataset.py` (L77–L102): `load_audio_file` with soundfile/wavfile fallback
+  - `df_mlx/build_audio_cache.py` (L64–L80): `load_audio_file` with error handling
+  - `df_mlx/prepare_data.py` (L44–L71): `load_audio` with soundfile/wavfile fallback
+- **Evidence:** All three implemented the identical load→mono→resample→float32 pipeline using
+  `scipy.signal.resample`. The `build_audio_cache` version added `Optional[np.ndarray]` return.
+- **Classification:** Unnecessary — identical backend-agnostic utility duplicated 3x.
+- **Fix:** Created `_audio_io.py` as single canonical implementation:
+  - `load_audio_file(path, sr)` → `np.ndarray` (soundfile with wavfile fallback)
+  - `load_audio_file_safe(path, sr)` → `Optional[np.ndarray]` (wraps with error handling)
+  - Updated all 3 callers to import from `_audio_io`
+  - ~65 lines of duplicate code removed
+- **Verification:** 1007 passed, 11 skipped (identical to baseline).
+
+---
+
 ## Additional Observations
 
 ### Test files in df_mlx/ (not collected by pytest)
@@ -145,10 +181,11 @@ Not blocking; cosmetic cleanup.
 | Metric | Value |
 |--------|-------|
 | Files scanned | ~60 (df_mlx/), ~30 (df/) |
-| Duplication hotspots found | 6 |
-| Classified unnecessary | 2 (fixed) |
-| Classified justified | 4 (documented) |
-| Lines removed | ~90 |
+| Duplication hotspots found | 9 |
+| Classified unnecessary | 3 (fixed) |
+| Classified justified | 5 (documented) |
+| Not duplication | 1 (delegation pattern) |
+| Lines removed | ~155 |
 | Tests before | 1007 passed, 11 skipped |
 | Tests after | 1007 passed, 11 skipped |
 | Regressions | 0 |

@@ -56,6 +56,7 @@ from .feature_ops import (
     compute_stft,
     create_erb_filterbank,
 )
+from ._audio_io import load_audio_file
 from .file_lists import read_file_list as _read_file_list
 from .hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
 
@@ -69,37 +70,6 @@ try:
 except ImportError:
     dx = None
     HAS_MLX_DATA = False
-
-# Try to import soundfile, fall back to scipy.io.wavfile
-try:
-    import soundfile as sf
-
-    def load_audio_file(path: str, sr: int) -> np.ndarray:
-        """Load audio file and resample if needed."""
-        audio, file_sr = sf.read(path, dtype="float32")
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        if file_sr != sr:
-            num_samples = int(len(audio) * sr / file_sr)
-            audio = np.asarray(scipy_signal.resample(audio, num_samples), dtype=np.float32)
-        return audio.astype(np.float32)
-
-except ImportError:
-    from scipy.io import wavfile
-
-    def load_audio_file(path: str, sr: int) -> np.ndarray:
-        """Load audio file and resample if needed."""
-        file_sr, audio = wavfile.read(path)
-        if audio.dtype == np.int16:
-            audio = audio.astype(np.float32) / 32768.0
-        elif audio.dtype == np.int32:
-            audio = audio.astype(np.float32) / 2147483648.0
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        if file_sr != sr:
-            num_samples = int(len(audio) * sr / file_sr)
-            audio = np.asarray(scipy_signal.resample(audio, num_samples), dtype=np.float32)
-        return audio.astype(np.float32)
 
 
 @dataclass

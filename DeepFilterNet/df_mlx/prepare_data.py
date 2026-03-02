@@ -34,40 +34,9 @@ import numpy as np
 from scipy import signal as scipy_signal
 from tqdm import tqdm
 
+from ._audio_io import load_audio_file as load_audio
 from .feature_ops import compute_df_features, compute_erb_features, compute_stft, create_erb_filterbank
 from .file_lists import read_file_list as _read_file_list
-
-# Try to import soundfile, fall back to scipy.io.wavfile
-try:
-    import soundfile as sf
-
-    def load_audio(path: str, sr: int) -> np.ndarray:
-        """Load audio file and resample if needed."""
-        audio, file_sr = sf.read(path, dtype="float32")
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)  # Convert to mono
-        if file_sr != sr:
-            # Simple resampling using scipy
-            num_samples = int(len(audio) * sr / file_sr)
-            audio = scipy_signal.resample(audio, num_samples)
-        return cast(np.ndarray, audio).astype(np.float32)
-
-except ImportError:
-    from scipy.io import wavfile
-
-    def load_audio(path: str, sr: int) -> np.ndarray:
-        """Load audio file and resample if needed."""
-        file_sr, audio = wavfile.read(path)
-        if audio.dtype == np.int16:
-            audio = audio.astype(np.float32) / 32768.0
-        elif audio.dtype == np.int32:
-            audio = audio.astype(np.float32) / 2147483648.0
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        if file_sr != sr:
-            num_samples = int(len(audio) * sr / file_sr)
-            audio = scipy_signal.resample(audio, num_samples)
-        return cast(np.ndarray, audio).astype(np.float32)
 
 
 def read_file_list(path: str) -> List[str]:

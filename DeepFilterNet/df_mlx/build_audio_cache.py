@@ -54,31 +54,8 @@ from typing import Dict, List, Optional, Tuple, cast
 import numpy as np
 from tqdm import tqdm
 
+from ._audio_io import load_audio_file_safe as load_audio_file
 from .file_lists import read_file_list as _read_file_list
-
-# Audio loading with resampling
-try:
-    import soundfile as sf
-    from scipy import signal as scipy_signal
-
-    def load_audio_file(path: str, target_sr: int) -> Optional[np.ndarray]:
-        """Load audio file and resample if needed."""
-        try:
-            audio, file_sr = sf.read(path, dtype="float32")
-            if audio.ndim > 1:
-                audio = audio.mean(axis=1)  # Convert to mono
-            if file_sr != target_sr:
-                num_samples = int(len(audio) * target_sr / file_sr)
-                audio = scipy_signal.resample(audio, num_samples)
-            return cast(np.ndarray, audio).astype(np.float32)
-        except Exception as e:
-            print(f"Warning: Failed to load {path}: {e}")
-            return None
-
-except ImportError:
-    print("Error: soundfile and scipy required. Install with:")
-    print("  pip install soundfile scipy")
-    sys.exit(1)
 
 
 @dataclass

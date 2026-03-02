@@ -130,6 +130,11 @@
 			"label": "Commit report and push DUP-9",
 			"type": "shell",
 			"command": "cd ${workspaceFolder} && git add -A && git commit -m 'docs: add Pass 9 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
+		},
+		{
+			"label": "Verify final state",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && git log --oneline -5 && echo '---' && git status --short"
 		}
 	]
 }
