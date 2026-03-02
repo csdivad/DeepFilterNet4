@@ -285,6 +285,7 @@ def train(
                     optimizer,
                     ckpt_dir / "best.safetensors",
                     epoch=epoch + 1,
+                    step=global_step,
                     loss=avg_valid_loss,
                     best_valid_loss=best_valid_loss,
                 )
@@ -312,6 +313,7 @@ def train(
                 optimizer,
                 ckpt_path,
                 epoch=epoch + 1,
+                step=global_step,
                 loss=avg_train_loss,
                 best_valid_loss=best_valid_loss,
             )
@@ -329,6 +331,7 @@ def train(
         optimizer,
         final_path,
         epoch=final_epoch + 1,
+        step=global_step,
         loss=avg_train_loss,
         best_valid_loss=best_valid_loss,
     )

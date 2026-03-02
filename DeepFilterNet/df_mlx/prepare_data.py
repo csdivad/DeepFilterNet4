@@ -267,9 +267,10 @@ def process_file(
             if result:
                 results.append(result)
 
-    except Exception:
-        # Silently skip failed files in threaded mode
-        pass
+    except (OSError, ValueError, RuntimeError) as exc:
+        import logging
+
+        logging.getLogger(__name__).debug("Skipped %s: %s", speech_path, exc)
 
     return results
 

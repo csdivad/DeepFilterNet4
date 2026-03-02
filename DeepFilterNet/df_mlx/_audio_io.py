@@ -26,6 +26,8 @@ try:
         audio, file_sr = sf.read(path, dtype="float32")
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
+        if len(audio) == 0:
+            raise ValueError(f"Audio file contains zero samples: {path}")
         if file_sr != sr:
             num_samples = int(len(audio) * sr / file_sr)
             audio = np.asarray(scipy_signal.resample(audio, num_samples), dtype=np.float32)
@@ -41,8 +43,16 @@ except ImportError:
             audio = audio.astype(np.float32) / 32768.0
         elif audio.dtype == np.int32:
             audio = audio.astype(np.float32) / 2147483648.0
+        elif audio.dtype == np.uint8:
+            audio = (audio.astype(np.float32) - 128.0) / 128.0
+        elif audio.dtype == np.float64:
+            audio = audio.astype(np.float32)
+        else:
+            audio = audio.astype(np.float32)
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
+        if len(audio) == 0:
+            raise ValueError(f"Audio file contains zero samples: {path}")
         if file_sr != sr:
             num_samples = int(len(audio) * sr / file_sr)
             audio = np.asarray(scipy_signal.resample(audio, num_samples), dtype=np.float32)
