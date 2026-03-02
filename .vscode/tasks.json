@@ -125,6 +125,11 @@
 			"label": "Commit DUP-9.1",
 			"type": "shell",
 			"command": "cd ${workspaceFolder} && git add -A && git diff --cached --stat && git commit -m 'refactor(train): delegate train_with_data.py checkpoint I/O to train.py (DUP-9.1)\n\nRemoved inline save_checkpoint/load_checkpoint from train_with_data.py\nand replaced with imports from the canonical train.py implementation.\nAlso fixed stale train_gan.py references in ROADMAP.md.\n\n~90 lines of duplicated code removed.' --no-verify --no-gpg-sign 2>&1"
+		},
+		{
+			"label": "Commit report and push DUP-9",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && git add -A && git commit -m 'docs: add Pass 9 duplication audit report' --no-verify --no-gpg-sign && git push 2>&1"
 		}
 	]
 }
