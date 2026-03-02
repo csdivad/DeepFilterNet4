@@ -195,7 +195,6 @@ if MLX_AVAILABLE:
         spectral_loss,
         train,
     )
-    from .train_gan import GANConfig, GANTrainer, train_gan  # noqa: F401
     from .utils import (  # noqa: F401
         AudioDataset,
         benchmark_model,
@@ -357,10 +356,6 @@ if MLX_AVAILABLE:
         "quick_eval",
         "compare_before_after",
         "log_improvement",
-        # GAN Training (new)
-        "GANConfig",
-        "GANTrainer",
-        "train_gan",
         # Multi-frame processing (new)
         "MultiFrameModule",
         "DF",
