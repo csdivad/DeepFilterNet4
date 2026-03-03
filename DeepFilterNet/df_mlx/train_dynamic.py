@@ -50,6 +50,7 @@ from df_mlx.training_checkpoints import (
     _IN_PROGRESS_KINDS,
     _TRAIN_MODE_EAGER,
     _write_epoch_complete_marker,
+    check_reset_best_sentinel,
     cleanup_checkpoints,
     maybe_skip_resume_batches,
     reconcile_resume,
@@ -1727,6 +1728,11 @@ def train(
             f"vad_w={loop_state.epoch_vad_loss_weight:.4f} speech_w={loop_state.epoch_vad_speech_loss_weight:.4f}"
         )
         _sync_data_stream_stage(loop_state.active_stage_index, loop_state.active_stage_name)
+
+        # Check for user-requested best-loss reset (touch <ckpt_dir>/RESET_BEST)
+        if check_reset_best_sentinel(ckpt_dir, loop_state.active_stage_index, epoch):
+            loop_state.best_valid_loss = float("inf")
+            loop_state.epochs_without_improvement = 0
 
         # Set epoch for reproducible shuffling
         dataset.set_split("train")

@@ -1107,3 +1107,61 @@ def reconcile_resume(
         print(f"  last_completed_epoch: {lc_display}")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-based best-loss reset
+# ---------------------------------------------------------------------------
+
+_RESET_BEST_SENTINEL = "RESET_BEST"
+
+
+def check_reset_best_sentinel(ckpt_dir: Path, stage_index: int, epoch: int) -> bool:
+    """Check for a ``RESET_BEST`` sentinel file and perform a best-loss reset.
+
+    When the user touches ``<ckpt_dir>/RESET_BEST``, this function:
+    1. Backs up the current ``best.safetensors`` (and its ``.state.json``)
+       to ``best_stage{N}_epoch{E}.safetensors`` so no work is lost.
+    2. Removes the sentinel so it only fires once.
+    3. Returns ``True`` so the caller can reset ``best_valid_loss`` to ∞.
+
+    Usage from any terminal while training is running::
+
+        touch /path/to/checkpoints/RESET_BEST
+
+    Args:
+        ckpt_dir: Checkpoint directory to scan.
+        stage_index: Current pipeline stage index (used in backup name).
+        epoch: Current epoch index (used in backup name).
+
+    Returns:
+        ``True`` if the sentinel was found (caller must reset ``best_valid_loss``);
+        ``False`` otherwise.
+    """
+    sentinel = ckpt_dir / _RESET_BEST_SENTINEL
+    if not sentinel.exists():
+        return False
+
+    print("\n" + "=" * 60)
+    print("🔄 RESET_BEST sentinel detected — resetting best checkpoint baseline")
+    print("=" * 60)
+
+    best_weights = ckpt_dir / "best.safetensors"
+    best_state = ckpt_dir / "best.safetensors.state.json"
+    backup_stem = f"best_stage{stage_index}_epoch{epoch + 1:03d}"
+
+    for src in (best_weights, best_state):
+        if src.exists():
+            suffix = src.name.removeprefix("best.safetensors")
+            dst = ckpt_dir / f"{backup_stem}.safetensors{suffix}"
+            src.rename(dst)
+            print(f"  📦 Backed up {src.name} → {dst.name}")
+
+    try:
+        sentinel.unlink()
+    except FileNotFoundError:
+        pass
+
+    print("  best_valid_loss will reset to ∞ — next validation saves a new best.")
+    print("=" * 60 + "\n")
+    return True
