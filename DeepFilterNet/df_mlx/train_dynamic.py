@@ -1557,6 +1557,18 @@ def train(
                 f"resume_stage={resume_stage_index} → scheduled_stage={scheduled_start_stage_index}."
             )
         initial_stage_index = max(resume_stage_index, scheduled_start_stage_index)
+
+    # When resume advances the stage (checkpoint was in an earlier stage than the
+    # schedule now requires), the best_valid_loss from the old stage is meaningless
+    # because loss weights change between stages.  Reset so the new stage can
+    # establish its own "best" baseline.
+    if resume_stage_index is not None and initial_stage_index > resume_stage_index:
+        print(
+            "ℹ️  Stage advanced on resume "
+            f"({resume_stage_index} → {initial_stage_index}): resetting best_valid_loss to ∞."
+        )
+        best_valid_loss = float("inf")
+        epochs_without_improvement = 0
     initial_stage = _resolve_pipeline_stage_by_index(initial_stage_index, pipeline_stage_defs)
     initial_stage_name = str(initial_stage["name"])
     if resume_stage_name and resume_stage_name != initial_stage_name:
