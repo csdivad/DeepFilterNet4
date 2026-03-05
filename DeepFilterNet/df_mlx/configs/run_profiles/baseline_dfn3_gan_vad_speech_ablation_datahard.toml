@@ -1,16 +1,19 @@
-# DFN3-style baseline profile with delayed GAN and full-time VAD speech losses.
+# Ablation C: Data hardness
 #
-# Purpose:
-#   Use the traditional baseline DeepFilterNet3-style loss path
-#   (spectral-only core, no awesome/pipeline stages), then introduce GAN later.
-#   Keep VAD + speech-band supervision active from epoch 1.
-#
-# Usage:
-#   python -m df_mlx.train_dynamic \
-#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/baseline_dfn3_gan_vad_speech_aggressive.toml
+# Changes vs baseline_dfn3_gan_vad_speech_aggressive.toml:
+# - Increase hard/noisy examples and interfering speech prevalence.
+# - Ramp hard-example probabilities with curriculum warmup to avoid abrupt instability.
 
 [dataset]
 cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
+snr_range = [-5.0, 35.0]
+snr_range_extreme = [-25.0, -5.0]
+snr_range_very_low = [-35.0, -20.0]
+p_extreme_snr = 0.15
+p_very_low_snr = 0.05
+p_interfer_speech = 0.20
+speech_gain_range = [-12.0, 12.0]
+noise_gain_range = [-12.0, 12.0]
 
 [training]
 epochs = 80
@@ -19,6 +22,7 @@ learning_rate = 1e-4
 learning_rate_min = 1e-7
 weight_decay = 0.0
 warmup_epochs = 5
+curriculum_warmup_epochs = 10
 patience = 0
 grad_accumulation_steps = 2
 max_grad_norm = 1.0
@@ -31,7 +35,7 @@ prefetch_size = 16
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "./checkpoints/baseline_dfn3_gan_vad_speech_aggressive"
+checkpoint_dir = "./checkpoints/baseline_dfn3_gan_vad_speech_ablation_datahard"
 save_strategy = "epoch"
 save_total_limit = 3
 validate_every = 1
@@ -45,11 +49,9 @@ backbone_type = "attention"
 variant = "full"
 
 [loss]
-# Explicitly disable awesome/pipeline pathways.
 dynamic_loss = "baseline"
 
 [loss.mrstft]
-# Keep DFN3-style baseline objective: no MRSTFT auxiliary loss.
 factor = 0.0
 gamma = 1.0
 f_complex = -1.0
@@ -82,7 +84,6 @@ loss_weight = 0.30
 threshold = 0.05
 margin = 0.05
 speech_loss_weight = 0.30
-# Apply a short ramp for VAD and speech-band losses.
 warmup_epochs = 2
 snr_gate_db = -12.0
 snr_gate_width = 6.0

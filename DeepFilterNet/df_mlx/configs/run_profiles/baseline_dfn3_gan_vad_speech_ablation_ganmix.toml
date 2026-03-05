@@ -1,13 +1,7 @@
-# DFN3-style baseline profile with delayed GAN and full-time VAD speech losses.
+# Ablation B: GAN mix
 #
-# Purpose:
-#   Use the traditional baseline DeepFilterNet3-style loss path
-#   (spectral-only core, no awesome/pipeline stages), then introduce GAN later.
-#   Keep VAD + speech-band supervision active from epoch 1.
-#
-# Usage:
-#   python -m df_mlx.train_dynamic \
-#     --run-config DeepFilterNet/df_mlx/configs/run_profiles/baseline_dfn3_gan_vad_speech_aggressive.toml
+# Changes vs baseline_dfn3_gan_vad_speech_aggressive.toml:
+# - Shift GAN objective toward stronger adversarial signal and less FM dominance.
 
 [dataset]
 cache_dir = "~/DataDump/datasets/mlx_datastore_cleaned"
@@ -31,7 +25,7 @@ prefetch_size = 16
 use_mlx_data = true
 
 [checkpoint]
-checkpoint_dir = "./checkpoints/baseline_dfn3_gan_vad_speech_aggressive"
+checkpoint_dir = "./checkpoints/baseline_dfn3_gan_vad_speech_ablation_ganmix"
 save_strategy = "epoch"
 save_total_limit = 3
 validate_every = 1
@@ -45,11 +39,9 @@ backbone_type = "attention"
 variant = "full"
 
 [loss]
-# Explicitly disable awesome/pipeline pathways.
 dynamic_loss = "baseline"
 
 [loss.mrstft]
-# Keep DFN3-style baseline objective: no MRSTFT auxiliary loss.
 factor = 0.0
 gamma = 1.0
 f_complex = -1.0
@@ -60,8 +52,8 @@ hop_sizes = []
 enabled = true
 start_epoch = 50
 ramp_epochs = 24
-adv_weight = 0.08
-fm_weight = 0.6
+adv_weight = 0.10
+fm_weight = 0.40
 discriminator = "combined"
 mpd_periods = [2, 3, 5, 7, 11]
 msd_scales = 3
@@ -82,7 +74,6 @@ loss_weight = 0.30
 threshold = 0.05
 margin = 0.05
 speech_loss_weight = 0.30
-# Apply a short ramp for VAD and speech-band losses.
 warmup_epochs = 2
 snr_gate_db = -12.0
 snr_gate_width = 6.0
