@@ -28,6 +28,8 @@ Usage:
 
 from __future__ import annotations
 
+import copy
+
 # ── Standard library + third-party ──────────────────────────────────
 import gc
 import math
@@ -491,9 +493,16 @@ def train(
     prefetch_size = ds_result.prefetch_size
     use_mlx_data = ds_result.use_mlx_data
 
-    # Create dataset (this populates config.*_files from cache index if using cache)
+    # Create datasets (this populates config.*_files from cache index if using cache).
+    #
+    # IMPORTANT:
+    # Keep training and validation on separate DynamicDataset instances.
+    # MLXDataStream prefetch workers read from the dataset asynchronously; if
+    # train/valid share one mutable dataset and we flip split state, workers can
+    # observe the wrong split and crash with out-of-range indices.
     print("\nInitializing dynamic dataset...")
     dataset = DynamicDataset(config)
+    valid_dataset = DynamicDataset(copy.deepcopy(config))
 
     _aux = setup_auxiliary_losses(
         config=config,
@@ -687,16 +696,13 @@ def train(
     )
 
     dataset.set_split("train")
+    valid_dataset.set_split("valid")
 
     print(f"  Train samples: {len(dataset):,}")
+    print(f"  Valid samples: {len(valid_dataset):,}")
 
-    # Create validation dataset (with reproducible indices)
-    dataset.set_split("valid")
-    print(f"  Valid samples: {len(dataset):,}")
-
-    # Reset to training
-    dataset.set_split("train")
     dataset.set_epoch(0)
+    valid_dataset.set_epoch(0)
 
     pipeline = setup_data_pipeline(
         dataset=dataset,
@@ -1631,7 +1637,7 @@ def train(
     # Validation context — groups all immutable state needed by run_validation.
     _valid_ctx = ValidationContext(
         model=model,
-        dataset=dataset,
+        dataset=valid_dataset,
         batch_size=batch_size,
         fft_size=config.fft_size,
         hop_size=config.hop_size,
@@ -1755,6 +1761,11 @@ def train(
             dataset.config.p_extreme_snr = cur_p_extreme
             dataset.config.p_very_low_snr = cur_p_very_low
             dataset.config.p_interfer_speech = cur_p_interfer
+            # Keep validation dataset difficulty distribution aligned with
+            # current curriculum settings while preserving split isolation.
+            valid_dataset.config.p_extreme_snr = cur_p_extreme
+            valid_dataset.config.p_very_low_snr = cur_p_very_low
+            valid_dataset.config.p_interfer_speech = cur_p_interfer
             if epoch < curriculum_warmup_epochs or (epoch == curriculum_warmup_epochs and verbose):
                 print(
                     f"  Curriculum (epoch {epoch + 1}/{curriculum_warmup_epochs}): "
