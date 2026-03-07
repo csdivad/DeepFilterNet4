@@ -16,6 +16,12 @@ from df_mlx.training_checkpoints import (  # noqa: E402
     resolve_resume_batch_count,
     save_checkpoint,
 )
+from df_mlx.training_helpers import (  # noqa: E402
+    completed_micro_batches,
+    optimizer_steps_for_epoch,
+    should_flush_grad_accumulation,
+    should_save_step_checkpoint,
+)
 
 
 class TinyModel(nn.Module):
@@ -94,6 +100,40 @@ def test_save_checkpoint_persists_counter_semantics_metadata(tmp_path: Path):
     assert state["optimizer_steps_completed"] == 42
 
 
+def test_completed_micro_batches_preserves_resume_offset():
+    # Simulates a second interruption after resuming from micro-batch 5 and
+    # processing 3 additional micro-batches in the same epoch.
+    assert completed_micro_batches(5, 3) == 8
+
+
+def test_optimizer_steps_for_epoch_flushes_trailing_accumulation_window():
+    assert optimizer_steps_for_epoch(10, 3) == 4
+
+
+def test_should_flush_grad_accumulation_on_epoch_tail_remainder():
+    assert should_flush_grad_accumulation(1, 3, is_last_micro_batch=False) is False
+    assert should_flush_grad_accumulation(1, 3, is_last_micro_batch=True) is True
+
+
+def test_should_save_step_checkpoint_requires_real_optimizer_update():
+    firings: list[tuple[int, int]] = []
+    global_step = 499
+
+    for micro_batch_idx in range(4):
+        did_optimizer_update = micro_batch_idx == 0
+        if did_optimizer_update:
+            global_step += 1
+        if should_save_step_checkpoint(
+            save_strategy="steps",
+            save_steps=500,
+            did_optimizer_update=did_optimizer_update,
+            global_step=global_step,
+        ):
+            firings.append((micro_batch_idx, global_step))
+
+    assert firings == [(0, 500)]
+
+
 def test_train_loop_bounds_iterator_to_progress_total():
     source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
     assert "train_total = max(epoch_target_micro_batches - resume_batches_for_epoch, 0)" in source
@@ -169,6 +209,14 @@ def test_compiled_grad_accumulation_uses_compiled_loss_and_grad_path():
     assert "def compiled_loss_and_grad_step(" in source
     assert "if grad_accumulation_steps > 1:" in source
     assert "loss, model_out, cached_out_wav, cached_clean_wav, grads = active_compiled_lag(" in source
+
+
+def test_train_loop_uses_cumulative_completed_micro_batches_after_resume():
+    source = (Path(__file__).resolve().parents[1] / "df_mlx" / "train_dynamic.py").read_text()
+    assert (
+        "epoch_micro_batches_completed = completed_micro_batches(resume_batches_for_epoch, num_train_batches)" in source
+    )
+    assert "batch_idx=epoch_micro_batches_completed" in source
 
 
 def test_pipeline_stage_progression_is_monotonic_and_non_mutating():

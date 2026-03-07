@@ -22,6 +22,7 @@ Relationship to train_dynamic:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -112,6 +113,60 @@ def curriculum_schedule(
         progress * target_p_extreme,
         progress * target_p_very_low,
         progress * target_p_interfer,
+    )
+
+
+def optimizer_steps_for_epoch(micro_batches_per_epoch: int, grad_accumulation_steps: int) -> int:
+    """Return optimizer updates per epoch, flushing any trailing remainder window.
+
+    Gradient accumulation is defined in optimizer-step units, so a partial
+    accumulation window at the end of an epoch still produces one final
+    optimizer update instead of silently dropping those micro-batches.
+    """
+    if micro_batches_per_epoch < 1:
+        raise ValueError("micro_batches_per_epoch must be >= 1")
+    if grad_accumulation_steps < 1:
+        raise ValueError("grad_accumulation_steps must be >= 1")
+    return max(1, math.ceil(micro_batches_per_epoch / grad_accumulation_steps))
+
+
+def completed_micro_batches(resume_batches_for_epoch: int, local_micro_batches_completed: int) -> int:
+    """Return cumulative micro-batches completed within the current epoch."""
+    if resume_batches_for_epoch < 0:
+        raise ValueError("resume_batches_for_epoch must be >= 0")
+    if local_micro_batches_completed < 0:
+        raise ValueError("local_micro_batches_completed must be >= 0")
+    return resume_batches_for_epoch + local_micro_batches_completed
+
+
+def should_flush_grad_accumulation(
+    micro_batches_in_accum: int,
+    grad_accumulation_steps: int,
+    *,
+    is_last_micro_batch: bool,
+) -> bool:
+    """Return whether the current accumulation window should be applied now."""
+    if micro_batches_in_accum <= 0:
+        return False
+    if grad_accumulation_steps <= 1:
+        return True
+    return micro_batches_in_accum >= grad_accumulation_steps or is_last_micro_batch
+
+
+def should_save_step_checkpoint(
+    *,
+    save_strategy: str,
+    save_steps: int,
+    did_optimizer_update: bool,
+    global_step: int,
+) -> bool:
+    """Return whether a step checkpoint should be written on this iteration."""
+    return (
+        save_strategy == "steps"
+        and save_steps > 0
+        and did_optimizer_update
+        and global_step > 0
+        and global_step % save_steps == 0
     )
 
 

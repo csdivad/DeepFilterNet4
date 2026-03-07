@@ -72,11 +72,15 @@ from df_mlx.training_helpers import (
 from df_mlx.training_helpers import build_setup_panel_line as _build_setup_panel_line
 from df_mlx.training_helpers import clip_gan_scores as _clip_gan_scores
 from df_mlx.training_helpers import (
+    completed_micro_batches,
     curriculum_schedule,
 )
 from df_mlx.training_helpers import is_vad_train_reg_enabled as _is_vad_train_reg_enabled  # noqa: F401
 from df_mlx.training_helpers import (
+    optimizer_steps_for_epoch,
     print_compiled_step_eligibility,
+    should_flush_grad_accumulation,
+    should_save_step_checkpoint,
 )
 from df_mlx.training_losses import (
     _compute_awesome_losses,
@@ -760,9 +764,8 @@ def train(
             f"{approx_samples_per_epoch} samples -> 0 micro-batches/epoch"
         )
 
-    optimizer_steps_per_epoch = micro_batches_per_epoch // grad_accumulation_steps
-    if optimizer_steps_per_epoch < 1:
-        optimizer_steps_per_epoch = 1
+    optimizer_steps_per_epoch = optimizer_steps_for_epoch(micro_batches_per_epoch, grad_accumulation_steps)
+    if grad_accumulation_steps >= micro_batches_per_epoch:
         print(
             "Warning: "
             f"grad_accumulation_steps={grad_accumulation_steps} >= "
@@ -1851,6 +1854,10 @@ def train(
         partial_batch_fallbacks = 0
         partial_batch_warning_emitted = False
         num_train_batches = 0
+        resume_batches_for_epoch = 0
+        if resume_from and resume_checkpoint_kind in _IN_PROGRESS_KINDS and epoch == start_epoch:
+            resume_batches_for_epoch = resume_batch_idx
+        epoch_micro_batches_completed = resume_batches_for_epoch
         samples_processed = 0
         grad_norm = 0.0
         loss_val = 0.0  # Initialize for async eval
@@ -1860,7 +1867,7 @@ def train(
             epoch,
             0.0,
             loop_state.best_valid_loss,
-            batch_idx=0,
+            batch_idx=epoch_micro_batches_completed,
             global_step=loop_state.global_step,
             last_completed_epoch=loop_state.last_completed_epoch,
             pipeline_stage_index=loop_state.active_stage_index,
@@ -1888,10 +1895,6 @@ def train(
         _prev_vad_reg_w_mx = SCALAR_ZERO
 
         # Create data iterator (MLXDataStream or PrefetchDataLoader)
-        resume_batches_for_epoch = 0
-        if resume_from and resume_checkpoint_kind in _IN_PROGRESS_KINDS and epoch == start_epoch:
-            resume_batches_for_epoch = resume_batch_idx
-
         epoch_target_micro_batches = micro_batches_per_epoch
         if max_train_batches is not None:
             epoch_target_micro_batches = min(epoch_target_micro_batches, max_train_batches)
@@ -1961,6 +1964,7 @@ def train(
         for batch_idx, batch in train_pbar:
             data_time = time.perf_counter() - data_start
             total_data_time += data_time
+            is_last_micro_batch = (batch_idx + 1) >= train_total
 
             # Unpack batch
             noisy_real = batch["noisy_real"]
@@ -2101,10 +2105,14 @@ def train(
                     accumulated_loss = accumulated_loss + loss
                     micro_batches_in_accum += 1
 
-                    is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
-                    if is_accum_complete:
+                    if should_flush_grad_accumulation(
+                        micro_batches_in_accum,
+                        grad_accumulation_steps,
+                        is_last_micro_batch=is_last_micro_batch,
+                    ):
                         did_optimizer_update = True
-                        final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+                        accum_divisor = float(micro_batches_in_accum)
+                        final_grads = scale_grads(accumulated_grads, 1.0 / accum_divisor)
                         if max_grad_norm > 0:
                             final_grads, grad_norm_arr = clip_grad_norm(final_grads, max_grad_norm)
                             if should_sync:
@@ -2235,14 +2243,18 @@ def train(
                 accumulated_loss = accumulated_loss + loss
                 micro_batches_in_accum += 1
 
-                # Check if accumulation window is complete
-                is_accum_complete = micro_batches_in_accum >= grad_accumulation_steps
                 grad_norm_arr = None
-                if is_accum_complete:
+                if should_flush_grad_accumulation(
+                    micro_batches_in_accum,
+                    grad_accumulation_steps,
+                    is_last_micro_batch=is_last_micro_batch,
+                ):
                     did_optimizer_update = True
 
-                    # Scale by 1/grad_accumulation_steps for proper averaging
-                    final_grads = scale_grads(accumulated_grads, 1.0 / grad_accumulation_steps)
+                    # Scale by the actual accumulation window size so a trailing
+                    # partial window is still applied instead of being dropped.
+                    accum_divisor = float(micro_batches_in_accum)
+                    final_grads = scale_grads(accumulated_grads, 1.0 / accum_divisor)
 
                     # Gradient clipping (returns clipped grads and norm as
                     # MLX array).  clip_grad_norm zeros non-finite grads.
@@ -2437,6 +2449,7 @@ def train(
                         f"total={(data_time + fwd_time) * 1000:.1f}ms"
                     )
             num_train_batches += 1
+            epoch_micro_batches_completed = completed_micro_batches(resume_batches_for_epoch, num_train_batches)
             samples_processed += current_batch_size
             window_samples += current_batch_size
             # Only increment loop_state.global_step when optimizer actually updates
@@ -2449,7 +2462,7 @@ def train(
                 epoch,
                 loss_val,
                 loop_state.best_valid_loss,
-                batch_idx=num_train_batches,
+                batch_idx=epoch_micro_batches_completed,
                 global_step=loop_state.global_step,
                 last_completed_epoch=loop_state.last_completed_epoch,
                 pipeline_stage_index=loop_state.active_stage_index,
@@ -2551,7 +2564,12 @@ def train(
                     train_stream.save_checkpoint(data_checkpoint_path)
 
             # Save model checkpoint by steps (HuggingFace-style)
-            if save_strategy == "steps" and save_steps > 0 and loop_state.global_step % save_steps == 0:
+            if should_save_step_checkpoint(
+                save_strategy=save_strategy,
+                save_steps=save_steps,
+                did_optimizer_update=did_optimizer_update,
+                global_step=loop_state.global_step,
+            ):
                 # Force sync before checkpoint to get accurate loss
                 mx.eval(state)
                 loss_val = float(loss)
@@ -2561,7 +2579,7 @@ def train(
                     model,
                     ckpt_path,
                     epoch=epoch,
-                    batch_idx=num_train_batches,
+                    batch_idx=epoch_micro_batches_completed,
                     global_step=loop_state.global_step,
                     loss=train_loss / num_train_batches if num_train_batches > 0 else loss_val,
                     best_valid_loss=loop_state.best_valid_loss,
@@ -2676,7 +2694,7 @@ def train(
                         epoch,
                         loop_state.avg_train_loss,
                         loop_state.best_valid_loss,
-                        batch_idx=num_train_batches,
+                        batch_idx=epoch_micro_batches_completed,
                         global_step=loop_state.global_step,
                         last_completed_epoch=loop_state.last_completed_epoch,
                         pipeline_stage_index=loop_state.active_stage_index,
@@ -2695,7 +2713,7 @@ def train(
             epoch,
             loop_state.avg_train_loss,
             loop_state.best_valid_loss,
-            batch_idx=num_train_batches,
+            batch_idx=epoch_micro_batches_completed,
             global_step=loop_state.global_step,
             last_completed_epoch=loop_state.last_completed_epoch,
             pipeline_stage_index=loop_state.active_stage_index,
@@ -2770,7 +2788,7 @@ def train(
                     epoch,
                     loop_state.avg_train_loss,
                     loop_state.best_valid_loss,
-                    batch_idx=num_train_batches,
+                    batch_idx=epoch_micro_batches_completed,
                     global_step=loop_state.global_step,
                     last_completed_epoch=loop_state.last_completed_epoch,
                     pipeline_stage_index=loop_state.active_stage_index,
@@ -2805,7 +2823,7 @@ def train(
                 epoch,
                 loop_state.avg_train_loss,
                 loop_state.best_valid_loss,
-                batch_idx=num_train_batches,
+                batch_idx=epoch_micro_batches_completed,
                 global_step=loop_state.global_step,
                 last_completed_epoch=loop_state.last_completed_epoch,
                 pipeline_stage_index=loop_state.active_stage_index,

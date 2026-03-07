@@ -47,6 +47,7 @@ import mlx.core as mx
 import numpy as np
 from scipy import signal as scipy_signal
 
+from ._audio_io import load_audio_file
 from .augment_ext import biquad_filter as _ext_biquad_filter
 from .augment_ext import combine_noises as _ext_combine_noises
 from .augment_ext import mix_audio as _ext_mix_audio
@@ -56,7 +57,6 @@ from .feature_ops import (
     compute_stft,
     create_erb_filterbank,
 )
-from ._audio_io import load_audio_file
 from .file_lists import read_file_list as _read_file_list
 from .hf_paths import hf_dataset_fsspec_path, normalize_hf_dataset_cache_dir
 

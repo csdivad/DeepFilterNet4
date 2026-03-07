@@ -99,6 +99,32 @@ the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 ---
 
+### Rust ndarray Workspace Pin
+
+**Status:** REQUIRED
+
+**Scope:** Root `Cargo.toml`, `libDF/`, `ladspa/`, `pyDF-data/`, and any crate that depends on `tract-*` or `hdf5-rust`
+
+**Rule:**
+
+- All repo crates must consume `ndarray` from the workspace pin (`[workspace.dependencies] ndarray = "=0.15.6"`) rather than declaring their own version.
+- New Rust crates that touch `libDF`, `tract-*`, `hdf5-rust`, or Python/Numpy bridges must use `ndarray = { workspace = true }`.
+- Do not widen the `ndarray` version range casually; `tract`/`hdf5-rust` compatibility must be verified together.
+
+**Rationale:**
+
+- The libDF build previously failed from `tract`/`ndarray` divergence, producing ambiguous `tvec`/`Tensor` imports and cross-crate type mismatches.
+- A single workspace pin keeps `libDF`, `ladspa`, and PyO3/Numpy bridge crates on the same ndarray ABI/type universe and prevents subtle compile failures.
+
+**Related Files:**
+
+- [Cargo.toml](../Cargo.toml)
+- [libDF/Cargo.toml](../libDF/Cargo.toml)
+- [ladspa/Cargo.toml](../ladspa/Cargo.toml)
+- [pyDF-data/Cargo.toml](../pyDF-data/Cargo.toml)
+
+---
+
 ### ERB (Equivalent Rectangular Bandwidth) Scale
 
 **Status:** REQUIRED
@@ -188,6 +214,9 @@ the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 - Treat epoch progress in **micro-batches** (dataloader iterations), and treat `global_step` in **optimizer steps** (parameter updates).
 - In checkpoint state, `batch_idx` represents **micro-batches completed in the current epoch** (count), not the 0-based index of the last seen batch.
+- On mid-epoch resume, persisted `batch_idx` must remain the **cumulative completed count for that epoch** (`resume_offset + newly processed micro-batches`), never the post-resume local count alone.
+- Gradient accumulation must flush any trailing partial window at the end of the epoch; those micro-batches still count toward both optimizer-step bookkeeping and training progress.
+- Step checkpoints are keyed to **actual optimizer updates**, not raw micro-batch iterations, and must never fire at `global_step == 0`.
 - Progress bars must use micro-batch totals and iterate over a bounded iterator to avoid overshooting epoch boundaries.
 - When both model and data checkpoints are present for in-progress resume, their `(epoch, micro-batch)` positions must match exactly; otherwise fail loudly.
 
@@ -195,6 +224,7 @@ the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 - Mixing units (optimizer-step totals vs micro-batch iteration) causes misleading progress bars and apparent epoch overruns.
 - Count-vs-index ambiguity in `batch_idx` causes off-by-one resume behavior and can duplicate or skip data after interruption.
+- Resetting progress to a post-resume local count or dropping a trailing accumulation remainder can replay already-consumed data and silently discard training signal.
 - Strict model/data checkpoint reconciliation prevents silent divergence during recovery and makes incidents reproducible.
 
 **Related Files:**
@@ -464,6 +494,8 @@ _None documented yet._
 - **2026-02-15**: Added GAN discriminator optimizer-step cadence and GAN mixed-precision waveform-path conventions to prevent GAN-onset OOM under gradient accumulation.
 - **2026-02-15**: Added Augmentation Extension Fallback Architecture convention documenting `augment_ext.py` bridge pattern and `pyDF-augment` Rust extension.
 - **2026-02-26**: Added compiled loss control-flow invariant forbidding Python branches on runtime MLX weight arrays in compiled paths.
+- **2026-03-06**: Clarified that resumed `batch_idx` persists cumulative micro-batch progress, trailing accumulation windows flush at epoch end, and step checkpoints only fire on real optimizer-step transitions.
+- **2026-03-06**: Added Rust ndarray workspace-pin convention documenting the mandatory shared `ndarray = "=0.15.6"` dependency across tract/hdf5-related crates.
 
 ---
 

@@ -38,6 +38,7 @@ from df_mlx.training_losses import (
 )
 from df_mlx.training_ops import _batch_to_float
 from df_mlx.training_waveform import (
+    _disc_crop_waveform,
     _gan_waveform_view,
     compute_mrstft_loss,
     specs_to_wavs,
@@ -310,6 +311,9 @@ def collect_sync_metrics(
             )
             out_wav = _gan_waveform_view(out_wav, use_fp16=bool(use_fp16))
             clean_wav = _gan_waveform_view(clean_wav, use_fp16=bool(use_fp16))
+            if gan_disc_max_samples is not None:
+                out_wav, crop_start = _disc_crop_waveform(out_wav, gan_disc_max_samples)
+                clean_wav, _ = _disc_crop_waveform(clean_wav, gan_disc_max_samples, crop_start)
             gen_loss_fn, _ = gan_loss_fns
             disc_fake, fake_feats = discriminator(out_wav)
             disc_real, real_feats = discriminator(clean_wav)
