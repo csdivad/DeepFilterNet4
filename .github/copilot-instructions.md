@@ -14,10 +14,16 @@ applyTo: "**"
 
 ## Issue Tracking
 
-If `.beads/` exists in the project root, use the `bd` CLI for issue tracking. The beads skill (`.github/skills/beads/`) provides
-detailed guidance in a structured progressive disclosure format.
+This project uses **bd (beads)** for issue tracking.
+Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
 
-Quick commands: `bd prime` (get context), `bd ready` (find work), `bd sync` (save to git)
+**Quick reference:**
+- `bd ready` - Find unblocked work
+- `bd create "Title" --type task --priority 2` - Create issue
+- `bd close <id>` - Complete work
+- `bd dolt push` - Push beads to remote
+
+For full workflow details: `bd prime`
 
 ## Project Structure
 

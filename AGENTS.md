@@ -6,31 +6,18 @@
 - **NEVER create PRs to or reference Rikorose/DeepFilterNet**
 - All work stays within this repository only
 
-## Issue Tracking & AI Integration
+## Issue Tracking
 
-This project uses **bd (beads)** for issue tracking with full AI integration.
+This project uses **bd (beads)** for issue tracking.
+Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
 
-### For AI Agents
-- **Skill location:** `.github/skills/beads/` — comprehensive bd integration patterns
-- **Run `bd prime` at session start** to inject workflow context
-- **Git hooks auto-inject** context on commits if installed
-- Consult `SKILL.md` for decision trees, `resources/` for specific patterns
+**Quick reference:**
+- `bd ready` - Find unblocked work
+- `bd create "Title" --type task --priority 2` - Create issue
+- `bd close <id>` - Complete work
+- `bd dolt push` - Push beads to remote
 
-### Quick Reference
-
-| Command | Purpose |
-|---------|---------|
-| `bd ready` | Find unblocked work to claim |
-| `bd create "Title" --type task --priority 2` | Create new issue |
-| `bd update <id> --status in-progress` | Claim work |
-| `bd close <id>` | Complete work |
-| `bd sync` | Sync with git (run at session end) |
-| `bd prime` | Get full workflow context |
-
-### Session Workflow
-1. **Start:** `bd prime` → `bd ready` → claim work
-2. **During:** Reference issues in commits, update status as you go
-3. **End:** `bd sync` → `git push` (work isn't complete until pushed!)
+For full workflow details: `bd prime`
 
 ## Project Structure & Module Organization
 - `DeepFilterNet/` is the main Python package (training, inference, configs, scripts). Core code lives in `DeepFilterNet/df/`.
