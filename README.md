@@ -1,212 +1,141 @@
 > [!CAUTION]
-> This repo is a fork of the original [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) trying to do some VAD-gated changes to very specifically target speech and low quality/volume source.
-> It's doing this while _also_ porting the whole thing to MLX for first-class Apple Silicon support.
->
-> It is not ready for prime-time yet. Please peruse at your own risk. A lot of the documentation has not yet been updated.
->
-> If you want to get started on Apple Silicon, use the helper script:
-> ```sh
-> # Omit `--venv` if you want to install in the current virtual environment.
-> # Use `-h/--help` for help
-> ./setup.sh --all [--venv /path/to/venv]
-> ```
+> The most actively developed path in this repo is `DeepFilterNet/df_mlx/`: native MLX training and inference on Apple Silicon plus speech-aware VAD gating. Some older sections further down in this README still describe the broader framework and are being refreshed.
 
 # DeepFilterNet
 
+This repository contains the broader DeepFilterNet codebase together with an actively developed MLX implementation of DeepFilterNet4 in `DeepFilterNet/df_mlx/`.
 
-> [!NOTE]
-> All config options are also override-able on the CLI
+If you want to get started on Apple Silicon, use the helper script:
+
+```sh
+# Omit `--venv` if you want to install in the current virtual environment.
+# Use `-h/--help` for help.
+./setup.sh --all [--venv /path/to/venv]
+```
+
+## `df_mlx` today
+
+The current `df_mlx` module is centered on:
+
+- native MLX `DfNet4` / `DfNet4Lite` models for Apple Silicon
+- a dynamic training entrypoint at `python -m df_mlx.train_dynamic`
+- a structured TOML `RunConfig` system with hardware presets: `entry`, `pro`, `max`, `ultra`, and `debug`
+- a new VAD path built around `VadHead` plus inference-time soft gating
+- batch and streaming inference paths that both apply the same VAD gating behavior
+
+For module-level detail, see `DeepFilterNet/df_mlx/README.md`.
+
+## Running `df_mlx` training
+
+The supported CLI lives in `DeepFilterNet/df_mlx/training_cli_main.py`, and `python -m df_mlx.train_dynamic` is the supported module entrypoint.
+
+Start by generating a commented run-config template:
 
 ```bash
-python -m df_mlx.train_dynamic --run-config /path/to/run_config.toml
+python -m df_mlx.train_dynamic --print-run-config
 ```
 
-#### GAN Training
-
-Enable adversarial training for improved perceptual quality:
-
-```python
-from df.deepfilternet4 import DfNet4, DfNet4Discriminator
-
-# Generator
-model = DfNet4(config)
-
-# Discriminator
-discriminator = DfNet4Discriminator(
-    in_channels=1,
-    hidden_channels=[64, 128, 256, 512],
-    num_scales=3,
-    num_layers_per_scale=3,
-)
-```
-
-#### Quantization-Aware Training (QAT)
-
-Train models for INT8 deployment:
-
-```python
-from df.deepfilternet4 import DfNet4, prepare_qat
-
-model = DfNet4(config)
-qat_model = prepare_qat(model)
-
-# Train as usual, then convert
-quantized_model = torch.quantization.convert(qat_model)
-```
-
-#### Knowledge Distillation
-
-Train a lightweight student model:
-
-```python
-from df.deepfilternet4 import DfNet4, DfNet4Lite, DistillationLoss
-
-teacher = DfNet4(config).eval()
-student = DfNet4Lite(config)
-
-loss_fn = DistillationLoss(
-    teacher_model=teacher,
-    alpha_kd=0.5,      # Distillation weight
-    temperature=4.0,   # Softmax temperature
-)
-```
-
-### ONNX Export
-
-Export DFNet4 for deployment:
+A typical preset-based run looks like this:
 
 ```bash
-# Full model export
-python df/scripts/export_onnx.py output_dir/ \
-    --checkpoint path/to/checkpoint.pt \
-    --full-model \
-    --simplify
-
-# Component-wise export (encoder, ERB decoder, DF decoder)
-python df/scripts/export_onnx.py output_dir/ \
-    --checkpoint path/to/checkpoint.pt
-
-# Create deployment archive
-python df/scripts/export_onnx.py output_dir/ \
-    --checkpoint path/to/checkpoint.pt \
-    --archive
+python -m df_mlx.train_dynamic \
+    --preset pro \
+    --cache-dir /path/to/audio_cache \
+    --run-config /path/to/run_config.toml
 ```
 
-### Benchmarking
-
-Compare performance with previous versions:
+If you are not training from a prebuilt cache, `train_dynamic` can also read a dataset/mixer JSON or plain file lists:
 
 ```bash
-# Run benchmarks on VoiceBank-DEMAND
-python df/scripts/benchmark_dfnet4.py \
-    --checkpoint path/to/dfnet4.pt \
-    --test-dir path/to/voicebank/ \
-    --metrics pesq stoi dnsmos \
-    --compare-dfnet3
+python -m df_mlx.train_dynamic \
+    --config /path/to/config.json \
+    --run-config /path/to/run_config.toml
 
-# RTF-only benchmark
-python df/scripts/benchmark_dfnet4.py \
-    --checkpoint path/to/dfnet4.pt \
-    --rtf-only \
-    --device cuda
+python -m df_mlx.train_dynamic \
+    --speech-list /path/to/speech.txt \
+    --noise-list /path/to/noise.txt \
+    --rir-list /path/to/rirs.txt \
+    --run-config /path/to/run_config.toml
 ```
 
-### Configuration Reference
+The CLI distinguishes three different configuration inputs:
 
-Full configuration options:
+- `--config`: dataset/mixer JSON for dynamic data generation
+- `--run-config`: TOML runtime and training settings for `RunConfig`
+- `--train-config`: optional train.py-compatible legacy INI, translated by `df_mlx/train_dynamic_config.py`
 
-```python
-DfNet4Config(
-    # ERB/Spectral dimensions
-    nb_erb=32,             # Number of ERB bands
-    nb_df=96,              # DF frequency bins
-    df_order=5,            # Deep filter order
-    df_lookahead=2,        # Lookahead frames
+For new runs, prefer the TOML flow. The documented precedence is:
 
-    # Mamba parameters
-    mamba_d_model=256,     # Model dimension
-    mamba_d_state=64,      # State space dimension
-    mamba_d_conv=4,        # Convolution width
-    mamba_expand=2,        # Expansion factor
-    num_mamba_layers=4,    # Number of layers
-
-    # Optional features
-    hybrid_encoder=False,       # Multi-domain encoder
-    use_time_domain_enc=False,  # Time-domain branch
-    use_phase_enc=False,        # Phase branch
-    multi_res_df=False,         # Multi-resolution DF
-    adaptive_df_order=False,    # Adaptive filter order
-
-    # Decoder
-    hidden_dim=256,        # Hidden dimension
-    num_hidden_layers=2,   # Decoder layers
-)
+```text
+defaults < preset < train-config INI compatibility < run-config TOML < CLI flags
 ```
 
-### Migration from DFNet3
+The preset layer is optional; when you use one, it supplies the base `RunConfig`. The run-config TOML and explicit CLI flags still win.
 
-See the [Migration Guide](docs/MIGRATION.md) for detailed instructions on migrating from DeepFilterNet3 to DeepFilterNet4.
+See also:
 
-Key changes:
-- Configuration format: INI → Python dataclass
-- Model class: `ModelParams` → `DfNet4Config`
-- Encoder: GRU → Mamba SSM
-- New optional components: hybrid encoder, multi-resolution DF, adaptive order
+- `docs/RUN_CONFIG_PRESETS.md`
+- `DeepFilterNet/df_mlx/README.md`
 
----
+## New config system: `run_config.toml` vs legacy `.ini`
 
-![deepfilternet3](https://user-images.githubusercontent.com/16517898/225623209-a54fea75-ca00-404c-a394-c91d2d1146d2.svg)
+`df_mlx` no longer expects you to drive training from a single `config.ini`. The current configuration system is the `RunConfig` dataclass in `DeepFilterNet/df_mlx/run_config.py`, loaded from TOML and validated before training starts.
 
-For PipeWire integration as a virtual noise suppression microphone look [here](https://github.com/Rikorose/DeepFilterNet/blob/main/ladspa/README.md).
+| Concern | Legacy flow | Current `df_mlx` flow |
+| --- | --- | --- |
+| Main runtime / training settings | train.py-style `config.ini` | `run_config.toml` (`RunConfig`) |
+| Parser / adapter | `configparser`-style INI | TOML via `tomllib` / `tomli` |
+| Presets | none | `--preset entry\|pro\|max\|ultra\|debug` |
+| Config shape | flat sections | nested tables such as `[dataset]`, `[training]`, `[checkpoint]`, `[loss]`, and `[vad]` |
+| Stage scheduling | ad hoc | `loss.pipeline_stages` in TOML |
+| Backward compatibility | native | `--train-config` or `[train_ini.*]` compatibility tables |
+| Final override point | CLI | CLI |
 
-### Demo
+If you still have an older `config.ini`, `df_mlx/train_dynamic_config.py` can map supported sections such as `[df]`, `[train]`, `[optim]`, `[distortion]`, and `[deepfilternet4]` into the MLX training path. Unsupported legacy sections are ignored with warnings rather than silently misapplied.
 
-https://github.com/Rikorose/DeepFilterNet/assets/16517898/79679fd7-de73-4c22-948c-891927c7d2ca
+## VAD head and soft mask path
 
-To run the demo (linux only) use:
-```bash
-cargo +nightly run -p df-demo --features ui --bin df-demo --release
-```
+This fork's headline model addition is the `VadHead` path in `DeepFilterNet/df_mlx/model.py`.
 
-### News
+- `DfNet4` now instantiates `VadHead` alongside `ErbDecoder4` and `DfDecoder4`.
+- `VadHead` predicts raw logits from the shared backbone embedding.
+- During training, `train_dynamic.py` combines:
+  - the proxy VAD consistency loss from `df_mlx/training_losses.py`
+  - a BCE-with-logits head loss against the clean-signal VAD proxy target
+- During inference, the logits become a soft VAD mask / gate:
+  - `mx.maximum(mx.sigmoid(vad_logits), 0.01)`
+  - that gate is applied to the enhanced spectrum in both `DfNet4.__call__` and `StreamingDfNet4`
 
-- **DeepFilterNet4** - Next generation architecture with improved quality and efficiency:
-  - Mamba backbone (state-space models) for efficient long-range temporal modeling
-  - Hybrid encoder with optional time-domain and phase branches
-  - Multi-resolution deep filtering for better frequency detail preservation
-  - Adaptive filter order based on signal complexity
-  - GAN training support with discriminator and feature matching losses
-  - Quantization-aware training (QAT) for INT8 deployment
-  - Knowledge distillation for lightweight DfNet4Lite variant (~1.3M params)
-  - See [DeepFilterNet4 Documentation](DeepFilterNet/README.md#deepfilternet4) for details
+![Diagram of the `df_mlx` VAD head and soft mask path](docs/images/df_mlx_vad_mask_layer.svg)
 
-- New DeepFilterNet Demo: *DeepFilterNet: Perceptually Motivated Real-Time Speech Enhancement*
-  - Paper: https://arxiv.org/abs/2305.08227
-  - Video: https://youtu.be/EO7n96YwnyE
+The diagram uses “VAD mask” as shorthand for the inference-time soft gate. In code, the concrete pieces are `VadHead`, the BCE-with-logits supervision path, and the final sigmoid gate applied to the output spectrum.
 
-- New Multi-Frame Filtering Paper: *Deep Multi-Frame Filtering for Hearing Aids*
-  - Paper: https://arxiv.org/abs/2305.08225
+## Other `df_mlx` changes worth knowing about
 
-- Real-time version and a LADSPA plugin
-  - [Pre-compiled binary](#deep-filter), no python dependencies. Usage: `deep-filter audio-file.wav`
-  - [LADSPA plugin](ladspa/) with pipewire filter-chain integration for real-time noise reduction on your mic.
+In addition to the VAD path, the current MLX implementation exposes:
 
-- DeepFilterNet2 Paper: *DeepFilterNet2: Towards Real-Time Speech Enhancement on Embedded Devices for Full-Band Audio*
-  - Paper: https://arxiv.org/abs/2205.05474
-  - Samples: https://rikorose.github.io/DeepFilterNet2-Samples/
-  - Demo: https://huggingface.co/spaces/hshr/DeepFilterNet2
+- selectable backbones via `RunConfig.model.backbone_type`: `mamba`, `gru`, or `attention`
+- `full` and `lite` model variants via `RunConfig.model.variant`
+- LSNR estimation in `Encoder4`, plus optional LSNR-based dropout during training
+- streaming inference via `StreamingDfNet4`
+- hardware-aware run presets and dataloader tuning in `RunConfig`
 
-- Original DeepFilterNet Paper: *DeepFilterNet: A Low Complexity Speech Enhancement Framework for Full-Band Audio based on Deep Filtering*
-  - Paper: https://arxiv.org/abs/2110.05588
-  - Samples: https://rikorose.github.io/DeepFilterNet-Samples/
-  - Demo: https://huggingface.co/spaces/hshr/DeepFilterNet
-  - Video Lecture: https://youtu.be/it90gBqkY6k
+## Loss docs and background reading
+
+If you want the math and rationale behind the training objectives, start here:
+
+- `docs/LOSSES.md` — the technical reference for the composite loss, checkpoints, and weight-update paths
+- `docs/LOSSES_AN_INTRODUCTION_TO_LOSS.md` — higher-level background on how the loss stack fits together
+- `docs/LOSS_LANDSCAPE_ANALYSIS.md` — follow-on analysis of weighting tradeoffs and VAD-head gradient pressure
+- `docs/INCIDENT_LOSS_VAD_AUDIT_2025_01.md` — audit history for the VAD/loss correctness fixes that shaped the current implementation
+
+Those documents are the best place to go before changing `awesome`, `pipeline_awesome`, GAN, speech-band, or VAD-related weights.
 
 ## Usage
 
 ### deep-filter
 
-Download a pre-compiled deep-filter binary from the [release page](https://github.com/Rikorose/DeepFilterNet/releases/).
+Download a pre-compiled `deep-filter` binary from this repository's Releases page.
 You can use `deep-filter` to suppress noise in noisy .wav audio files. Currently, only wav files with a sampling rate of 48kHz are supported.
 
 ```bash
@@ -276,20 +205,18 @@ cd path/to/DeepFilterNet/  # cd into repository
 # Mandatory: Install cpu/cuda pytorch (>=1.8) dependency from pytorch.org, e.g.:
 pip install torch torchaudio -f https://download.pytorch.org/whl/cpu/torch_stable.html
 # Install build dependencies used to compile libdf and DeepFilterNet python wheels
-pip install maturin poetry
+pip install maturin setuptools wheel
 
 #  Install remaining DeepFilterNet python dependencies
 # *Option A:* Install DeepFilterNet python wheel globally within your environment. Do this if you want use
 # this repos as is, and don't want to develop within this repository.
-poetry -C DeepFilterNet install -E train -E eval
+pip install ./DeepFilterNet[train,eval]
 # *Option B:* If you want to develop within this repo, install only dependencies and work with the repository version
-poetry -C DeepFilterNet install -E train -E eval --no-root
-export PYTHONPATH=$PWD/DeepFilterNet # And set the python path correctly
+pip install -e ./DeepFilterNet[train,eval]
 
-# Build and install libdf python package required for enhance.py
+# If you are modifying the Rust bindings directly, rebuild them in-place:
 maturin develop --release -m pyDF/Cargo.toml
-# *Optional*: Install libdfdata python package with dataset and dataloading functionality for training
-# Required build dependency: HDF5 headers (e.g. ubuntu: libhdf5-dev)
+# Required build dependency for pyDF-data: HDF5 headers (e.g. ubuntu: libhdf5-dev)
 maturin develop --release -m pyDF-data/Cargo.toml
 # If you have troubles with hdf5 you may try to build and link hdf5 statically:
 # (This is required on macOS/Homebrew when only hdf5 2.x is installed.)
@@ -373,7 +300,7 @@ model, df_state, _ = init_df()  # Load default model
 enhanced_audio = enhance(model, df_state, noisy_audio)
 ```
 
-See [here](https://github.com/Rikorose/DeepFilterNet/blob/main/scripts/external_usage.py) for a full example.
+See `scripts/external_usage.py` for a full example.
 
 ### Training
 
@@ -465,9 +392,8 @@ of non-stationary noises by oversampling. In most cases you want to set this fac
 
 Finally, start the training script. The training script may create a model `base_dir` if not
 existing used for logging, some audio samples, model checkpoints, and config. If no config file is
-found, it will create a default config. See
-[DeepFilterNet/pretrained_models/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet/blob/main/DeepFilterNet/pretrained_models/DeepFilterNet/config.ini)
-for a config file.
+found, it will create a default config. For the older INI-based training flow, point the script at
+a model directory that already contains a `config.ini`.
 ```py
 # usage: train.py [-h] [--debug] data_config_file data_dir base_dir
 python df/train.py path/to/dataset.cfg path/to/data_dir/ path/to/base_dir/
