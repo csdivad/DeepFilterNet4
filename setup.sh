@@ -350,6 +350,52 @@ pip_install() {
   fi
 }
 
+split_project_python_requirements() {
+  local pyproject_path="$1"
+  local extras_csv="$2"
+  python - "$pyproject_path" "$extras_csv" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+
+try:
+    import tomllib  # py3.11+
+except ImportError:  # pragma: no cover - py3.10 setup env
+    import tomli as tomllib  # type: ignore
+
+pyproject_path = sys.argv[1]
+extras_csv = sys.argv[2]
+
+with open(pyproject_path, "rb") as handle:
+    data = tomllib.load(handle)
+
+project = data["project"]
+optional = project.get("optional-dependencies", {})
+deps = list(project.get("dependencies", []))
+for extra in [item for item in extras_csv.split(",") if item]:
+    deps.extend(optional.get(extra, []))
+
+seen_external: set[str] = set()
+seen_local: set[tuple[str, str]] = set()
+base_dir = os.path.dirname(pyproject_path)
+
+for dep in deps:
+    if "@ file:" in dep:
+        name, rel_path = dep.split("@ file:", 1)
+        dep_name = name.strip()
+        dep_path = os.path.normpath(os.path.join(base_dir, rel_path.strip()))
+        key = (dep_name, dep_path)
+        if key not in seen_local:
+            print(f"local\t{dep_name}\t{dep_path}")
+            seen_local.add(key)
+        continue
+    if dep not in seen_external:
+        print(f"external\t{dep}")
+        seen_external.add(dep)
+PY
+}
+
 # ------------------------- macOS deployment target ------------------------- #
 # Set early so it applies to all native builds (pip, cargo, maturin).
 # This avoids version mismatch errors where assembly/C code compiled for
@@ -385,7 +431,7 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
 
   pushd DeepFilterNet
 
-  pip_install -U pip setuptools wheel silero-vad
+  pip_install -U pip setuptools wheel silero-vad tomli
 
   all_extras=("${DEFAULT_EXTRAS[@]}")
   if [[ ${#USER_EXTRAS[@]} -gt 0 ]]; then
@@ -406,21 +452,48 @@ if [[ $BUILD_PYTHON -eq 1 ]]; then
     IFS=',' read -r extras_str <<<"$(printf "%s," "${uniq_extras[@]}" | sed 's/,$//')"
   fi
 
+  external_python_deps=()
+  while IFS=$'\t' read -r dep_kind dep_value dep_path; do
+    [[ -z "$dep_kind" ]] && continue
+    case "$dep_kind" in
+      external)
+        external_python_deps+=("$dep_value")
+        ;;
+      local)
+        case "$dep_value" in
+          deepfilterlib)
+            BUILD_PYDF=1
+            ;;
+          deepfilterdataloader)
+            BUILD_PYDF_DATA=1
+            ;;
+          *)
+            echo "ERROR: Unsupported local workspace dependency '$dep_value' ($dep_path)." >&2
+            echo "Update setup.sh to install this local package explicitly." >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  done < <(split_project_python_requirements "$ROOT_DIR/DeepFilterNet/pyproject.toml" "$extras_str")
+
   pip_install_args=()
   if [[ $PY_EDITABLE -eq 1 ]]; then
     pip_install_args+=(-e)
   fi
 
-  if [[ -n "$extras_str" ]]; then
-    edit_label=""; [[ $PY_EDITABLE -eq 1 ]] && edit_label=" (editable)"
-    echo "Installing project with extras: [$extras_str]${edit_label}"
-    pip_install_args+=(".[${extras_str}]")
-  else
-    edit_label=""; [[ $PY_EDITABLE -eq 1 ]] && edit_label=" (editable)"
-    echo "Installing project without extras${edit_label}"
-    pip_install_args+=(".")
+  if [[ ${#external_python_deps[@]} -gt 0 ]]; then
+    echo "Installing external Python dependencies (${#external_python_deps[@]})"
+    pip_install "${external_python_deps[@]}"
   fi
-  pip_install "${pip_install_args[@]}"
+
+  edit_label=""; [[ $PY_EDITABLE -eq 1 ]] && edit_label=" (editable)"
+  if [[ -n "$extras_str" ]]; then
+    echo "Installing local project metadata for extras [$extras_str]${edit_label} (dependencies handled separately)"
+  else
+    echo "Installing local project metadata${edit_label} (dependencies handled separately)"
+  fi
+  python -m pip install --no-deps "${pip_install_args[@]}" .
 
   popd
 fi
@@ -456,10 +529,9 @@ fi
 # ------------------------- Maturin bindings ------------------------- #
 if [[ $BUILD_PYDF -eq 1 || $BUILD_PYDF_DATA -eq 1 || $BUILD_PYDF_AUGMENT -eq 1 ]]; then
   echo "==> Maturin builds"
-  if ! command -v maturin >/dev/null 2>&1; then
-    echo "maturin not found; installing into current environment"
-    pip_install maturin
-  fi
+  MATURIN_REQUIREMENT="maturin>=1.3,<1.5"
+  echo "Ensuring compatible maturin (${MATURIN_REQUIREMENT}) is installed"
+  pip_install "$MATURIN_REQUIREMENT"
 fi
 
 if [[ $BUILD_PYDF -eq 1 ]]; then
