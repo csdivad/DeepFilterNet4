@@ -75,10 +75,12 @@ def main() -> int:
     filtered = [p for p in candidates if p.stem in allowed_ids]
 
     out = Path(args.list_dir) / "fsd50k_filtered.txt"
+    tmp_out = out.with_name(f"{out.name}.tmp.{os.getpid()}")
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w") as f:
+    with tmp_out.open("w") as f:
         for p in sorted(filtered):
             f.write(str(p) + "\n")
+    tmp_out.replace(out)
 
     print(f"[ok] wrote {len(filtered)} entries -> {out}")
     return 0

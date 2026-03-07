@@ -115,7 +115,67 @@ cat "$DATA_DIR/lists/air_rir.txt" \
     "$DATA_DIR/lists/acousticrooms_rir.txt" > "$DATA_DIR/lists/rir_all.txt"
 ```
 
-## Step 4: Build HDF5 files (48 kHz)
+## Step 4: Build the MLX datastore (recommended for `df_mlx` training)
+
+The MLX datastore caches **source** speech/noise/RIR audio into sharded NPZ
+files for faster loading, but training still does dynamic mixing (new SNR/noise/RIR
+combinations each epoch). That means you **do not** need to rebuild the datastore
+just to try a different loss profile or to get fresh random mixtures.
+
+You **do** need to rebuild the datastore when any of these change:
+
+- the clean/noise/RIR file lists,
+- the clean-speech preprocessing choice,
+- `--sample-rate` or `--segment-length`,
+- short-speech handling (`--min-duration` / `--merge-short`).
+
+Recommended build for Apple Silicon / vadlite-style training:
+
+```
+DATA_DIR=/path/to/data \
+OUTPUT_DIR=/path/to/cache \
+  bash scripts/datasets/build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short
+```
+
+If you want to inline the current DeepFilterNet3 clean-speech preprocessing step
+while rebuilding the datastore:
+
+```
+DATA_DIR=/path/to/data \
+OUTPUT_DIR=/path/to/cache \
+  bash scripts/datasets/build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short \
+    --preprocess-clean-speech
+```
+
+Notes:
+- `--merge-short` is recommended when you want to preserve more short utterances
+  instead of skipping speech clips shorter than `--min-duration`.
+- If you already ran standalone clean-speech preprocessing, you can point
+  `--clean-list` at the resulting list instead of enabling
+  `--preprocess-clean-speech` again.
+- If you are rebuilding into a new location to avoid duplicate disk usage,
+  delete the old cache directory first.
+
+Validate the datastore before a long run:
+
+```
+python -m df_mlx.validate_audio_cache /path/to/cache
+```
+
+Launch the full vadlite-style run with an explicit cache-dir override so the
+training command uses the datastore you just built:
+
+```
+python -m df_mlx.train_dynamic \
+  --run-config df_mlx/configs/run_profiles/baseline_dfn3_gan_vad_speech_full_vadlite.toml \
+  --cache-dir /path/to/cache
+```
+
+## Step 5: Build HDF5 files (48 kHz)
 
 From the `DeepFilterNet/` directory:
 
@@ -150,7 +210,7 @@ Notes:
 - The `prepare_data` script tags HDF5 files by group name (`speech`, `noise`, `rir`).
   The dataset loader uses these groups to mix clean speech and noise.
 
-## Step 5: Choose the dataset.cfg
+## Step 6: Choose the dataset.cfg
 
 Copy one of the templates to your data directory:
 

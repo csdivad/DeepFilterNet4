@@ -15,6 +15,7 @@ from typing import DefaultDict, Dict, List, Optional, Tuple
 
 import h5py
 from icecream import ic
+from tqdm import tqdm
 
 ic.includeContext = True
 
@@ -221,16 +222,19 @@ def copy_datasets(
                         os.remove(fn_tgt)  # Only remove if no other process has a readlock
                     elif have_read_locks and os.path.isfile(fn_tgt):
                         continue
-                    print("copying", fn_src, flush=True)
                     cur_b += new_b
                     futures[executor.submit(cp, fn_src, fn_tgt, try_other_hosts)] = fn_tgt
-    for future in concurrent.futures.as_completed(futures):
-        try:
-            cur_gb = float(du(target_dir)) / 1024**3
-        except ValueError as e:
-            print(e)
-            continue
-        print(f"Completed {futures[future]} (current dir size: {cur_gb:.1f} GB)", flush=True)
+    if futures:
+        with tqdm(total=len(futures), desc="Copying datasets", unit="file", dynamic_ncols=True) as pbar:
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    cur_gb = float(du(target_dir)) / 1024**3
+                except ValueError as e:
+                    print(e)
+                    pbar.update(1)
+                    continue
+                pbar.set_postfix_str(f"{cur_gb:.1f} GB")
+                pbar.update(1)
 
     if lock is not None:
         remove_lock(target_dir, lock, lock + "." + timestamp + ".read")
