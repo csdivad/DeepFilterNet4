@@ -265,14 +265,67 @@ def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
     return duration_seconds
 
 
-def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str) -> dict[Path, float]:
+def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_workers: int) -> dict[Path, float]:
+    ordered_paths = list(paths)
+    if not ordered_paths:
+        return {}
+
     durations: dict[Path, float] = {}
     failures: list[str] = []
-    for path in paths:
-        try:
-            durations[path] = probe_audio_duration_seconds(path, ffprobe_bin)
-        except Exception as exc:  # pragma: no cover - exercised via main guard path
-            failures.append(f"{path}: {exc}")
+    discovered_audio_seconds = 0.0
+    start_time = time.perf_counter()
+    max_inflight = max(1, min(len(ordered_paths), max(4, num_workers * 4)))
+
+    with ThreadPoolExecutor(max_workers=max(1, num_workers)) as probe_pool:
+        pending_futures: dict[Future[float], Path] = {}
+        path_iter = iter(ordered_paths)
+
+        def schedule_probe_jobs() -> None:
+            while len(pending_futures) < max_inflight:
+                try:
+                    path = next(path_iter)
+                except StopIteration:
+                    break
+                pending_futures[probe_pool.submit(probe_audio_duration_seconds, path, ffprobe_bin)] = path
+
+        with tqdm(
+            total=len(ordered_paths),
+            desc="ffprobe",
+            unit="file",
+            dynamic_ncols=True,
+            mininterval=0.5,
+            smoothing=0.05,
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+        ) as progress:
+            schedule_probe_jobs()
+            progress.set_postfix_str(
+                build_probe_postfix(0, len(ordered_paths), discovered_audio_seconds, 0, start_time=start_time),
+                refresh=False,
+            )
+            completed_files = 0
+            while pending_futures:
+                completed, _ = wait(set(pending_futures), return_when=FIRST_COMPLETED)
+                for future in completed:
+                    path = pending_futures.pop(future)
+                    try:
+                        duration_seconds = future.result()
+                        durations[path] = duration_seconds
+                        discovered_audio_seconds += duration_seconds
+                    except Exception as exc:  # pragma: no cover - exercised via main guard path
+                        failures.append(f"{path}: {exc}")
+                    completed_files += 1
+                schedule_probe_jobs()
+                progress.update(len(completed))
+                progress.set_postfix_str(
+                    build_probe_postfix(
+                        completed_files,
+                        len(ordered_paths),
+                        discovered_audio_seconds,
+                        len(failures),
+                        start_time=start_time,
+                    ),
+                    refresh=False,
+                )
     if failures:
         preview = "\n".join(f"  {item}" for item in failures[:10])
         remainder = len(failures) - min(len(failures), 10)
@@ -298,6 +351,11 @@ def choose_save_workers(loader_workers: int, effective_device: str) -> int:
     return max(2, min(8, max(1, loader_workers)))
 
 
+def choose_probe_workers(loader_workers: int) -> int:
+    cpu_count = os.cpu_count() or 4
+    return max(1, min(32, max(4, max(1, loader_workers) * 4, cpu_count // 2)))
+
+
 def _format_average_ms(total_seconds: float, count: int) -> str:
     if count <= 0:
         return "n/a"
@@ -312,6 +370,12 @@ def _format_audio_progress_value(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+def _format_probe_rate(files_per_second: float | None) -> str:
+    if files_per_second is None or not math.isfinite(files_per_second) or files_per_second <= 0.0:
+        return "warming"
+    return f"{files_per_second:.1f}/s"
+
+
 def _format_eta(seconds: float | None) -> str:
     if seconds is None or not math.isfinite(seconds):
         return "warming"
@@ -321,6 +385,34 @@ def _format_eta(seconds: float | None) -> str:
     if hours > 0:
         return f"{hours:d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def build_probe_postfix(
+    completed_files: int,
+    total_files: int,
+    discovered_audio_seconds: float,
+    failure_count: int,
+    *,
+    start_time: float,
+    now: float | None = None,
+) -> str:
+    current_time = time.perf_counter() if now is None else now
+    elapsed = max(current_time - start_time, 1e-9)
+    file_rate = completed_files / elapsed if completed_files > 0 else None
+    remaining_files = max(total_files - completed_files, 0)
+    eta_seconds = None
+    if file_rate is not None and file_rate > 0.0:
+        eta_seconds = remaining_files / file_rate
+    elif remaining_files <= 0:
+        eta_seconds = 0.0
+
+    return (
+        f"files={completed_files:,}/{total_files:,}, "
+        f"eta={_format_eta(eta_seconds)}, "
+        f"probe={_format_probe_rate(file_rate)}, "
+        f"audio={_format_audio_progress_value(discovered_audio_seconds)}, "
+        f"fail={failure_count}"
+    )
 
 
 def build_progress_postfix(
@@ -437,6 +529,12 @@ def parse_args() -> argparse.Namespace:
         help="DataLoader workers used while reading source audio (resume is default unless --overwrite is set).",
     )
     parser.add_argument(
+        "--probe-workers",
+        type=int,
+        default=None,
+        help="Parallel ffprobe workers used to estimate pending audio duration before enhancement (default: auto).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Rebuild outputs even when the mirrored file already exists.",
@@ -488,6 +586,7 @@ def main() -> int:
     pending_sources = [source for source, _ in pending_pairs]
     completed_count = len(sources) - len(pending_sources)
     save_workers = choose_save_workers(args.num_workers, effective_device)
+    probe_workers = max(1, getattr(args, "probe_workers", 0) or choose_probe_workers(args.num_workers))
 
     write_resumable_output_list(output_paths, completed_paths, output_list)
 
@@ -504,6 +603,7 @@ def main() -> int:
     print(f"Model:           {args.model_base_dir}")
     print(f"Device:          {effective_device}")
     print(f"Workers:         {args.num_workers}")
+    print(f"Probe workers:   {probe_workers}")
     print(f"Save workers:    {save_workers}")
     print(f"Mode:            {'overwrite' if args.overwrite else 'resume'}")
     print("=" * 60)
@@ -514,12 +614,10 @@ def main() -> int:
         return 0
 
     ffprobe_bin = resolve_ffprobe_bin()
-    source_durations = probe_audio_durations(sources, ffprobe_bin)
-    total_audio_seconds = sum(source_durations.values())
-    completed_audio_seconds = sum(
-        source_durations[source] for source, target in zip(sources, output_paths) if target in completed_paths
-    )
-    print(f"Audio duration:  {total_audio_seconds / 3600.0:.2f}h total")
+    print(f"Duration scan:   ffprobe over {len(pending_sources):,} pending files")
+    pending_source_durations = probe_audio_durations(pending_sources, ffprobe_bin, num_workers=probe_workers)
+    total_audio_seconds = sum(pending_source_durations.values())
+    print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 
     backend = resolve_backend(args.model_base_dir, args.device)
     print(f"Enhance backend: {backend.name}")
@@ -542,7 +640,7 @@ def main() -> int:
         with torch.inference_mode():
             with tqdm(
                 total=total_audio_seconds,
-                initial=completed_audio_seconds,
+                initial=0.0,
                 desc="Enhancing",
                 bar_format="{desc}: {percentage:3.0f}%|{bar}| {elapsed}{postfix}",
                 dynamic_ncols=True,
@@ -553,14 +651,14 @@ def main() -> int:
                     build_progress_postfix(
                         progress_stats,
                         len(inflight_saves),
-                        completed_audio_seconds,
+                        0.0,
                         total_audio_seconds,
                     )
                 )
                 for file_batch, audio_batch, orig_sr_batch in loader:
                     source = Path(file_batch[0]).expanduser().resolve()
                     target = build_output_path(source, output_root, base_dir)
-                    duration_seconds = source_durations[source]
+                    duration_seconds = pending_source_durations[source]
                     try:
                         audio = audio_batch.squeeze(0)
                         orig_sr = int(orig_sr_batch[0])
@@ -601,7 +699,7 @@ def main() -> int:
                             build_progress_postfix(
                                 progress_stats,
                                 len(inflight_saves),
-                                completed_audio_seconds + progress_stats.processed_audio_seconds,
+                                progress_stats.processed_audio_seconds,
                                 total_audio_seconds,
                             ),
                             refresh=False,
@@ -612,7 +710,7 @@ def main() -> int:
                             build_progress_postfix(
                                 progress_stats,
                                 len(inflight_saves),
-                                completed_audio_seconds + progress_stats.processed_audio_seconds,
+                                progress_stats.processed_audio_seconds,
                                 total_audio_seconds,
                             ),
                             refresh=False,
@@ -632,7 +730,7 @@ def main() -> int:
                     build_progress_postfix(
                         progress_stats,
                         len(inflight_saves),
-                        completed_audio_seconds + progress_stats.processed_audio_seconds,
+                        progress_stats.processed_audio_seconds,
                         total_audio_seconds,
                     ),
                     refresh=False,

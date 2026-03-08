@@ -61,6 +61,9 @@ Optional clean-speech preprocessing:
                               Apple Silicon auto-prefers df_mlx for MLX models)
   --preprocess-device DEV     cpu | cuda | mps | auto
   --preprocess-workers N      Input-loading workers for preprocessing (default: 2)
+  --preprocess-probe-workers N
+                              Parallel ffprobe workers used to estimate pending
+                              clean-speech duration before enhancement
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
 
 General:
@@ -106,6 +109,7 @@ CLI_PREPROCESS_OUTPUT_LIST=""
 CLI_PREPROCESS_MODEL=""
 CLI_PREPROCESS_DEVICE=""
 CLI_PREPROCESS_WORKERS=""
+CLI_PREPROCESS_PROBE_WORKERS=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
@@ -212,6 +216,10 @@ while [[ $# -gt 0 ]]; do
       CLI_PREPROCESS_WORKERS="$2"
       shift 2
       ;;
+    --preprocess-probe-workers)
+      CLI_PREPROCESS_PROBE_WORKERS="$2"
+      shift 2
+      ;;
     --preprocess-overwrite)
       PREPROCESS_OVERWRITE=1
       shift
@@ -249,6 +257,7 @@ PREPROCESS_OUTPUT_LIST="${CLI_PREPROCESS_OUTPUT_LIST:-${PREPROCESS_OUTPUT_LIST:-
 PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-DeepFilterNet3}}"
 PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
 PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-2}}"
+PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
 
 case "${PROFILE}" in
   prototype)
@@ -308,6 +317,11 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   echo "Preprocess base:    ${PREPROCESS_BASE_DIR}"
   echo "Preprocess list:    ${PREPROCESS_OUTPUT_LIST}"
   echo "Preprocess workers: ${PREPROCESS_WORKERS}"
+  if [[ -n "${PREPROCESS_PROBE_WORKERS}" ]]; then
+    echo "Preprocess probe workers: ${PREPROCESS_PROBE_WORKERS}"
+  else
+    echo "Preprocess probe workers: auto"
+  fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     echo "Preprocess device:  ${PREPROCESS_DEVICE}"
   else
@@ -354,6 +368,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     --model-base-dir "${PREPROCESS_MODEL}"
     --num-workers "${PREPROCESS_WORKERS}"
   )
+  if [[ -n "${PREPROCESS_PROBE_WORKERS}" ]]; then
+    preprocess_cmd+=(--probe-workers "${PREPROCESS_PROBE_WORKERS}")
+  fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")
   fi

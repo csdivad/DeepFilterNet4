@@ -110,12 +110,17 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
             model_base_dir="DeepFilterNet3",
             device=None,
             num_workers=2,
+            probe_workers=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
     )
     monkeypatch.setattr(module, "resolve_ffprobe_bin", lambda: "ffprobe")
-    monkeypatch.setattr(module, "probe_audio_durations", lambda paths, ffprobe_bin: dict(fake_durations))
+    monkeypatch.setattr(
+        module,
+        "probe_audio_durations",
+        lambda paths, ffprobe_bin, num_workers: {path: fake_durations[path] for path in paths},
+    )
     monkeypatch.setattr(module, "init_df", lambda **kwargs: (object(), object(), None, None))
     monkeypatch.setattr(module, "ModelParams", lambda: FakeParams())
     monkeypatch.setattr(module, "AudioDataset", FakeDataset)
@@ -137,12 +142,12 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
     assert saved_targets == [str(module.build_temp_output_path(target_b))]
     output_list_lines = output_list.read_text(encoding="utf-8").splitlines()
     assert output_list_lines == [str(target_a), str(target_b)]
-    assert progress_config["total"] == 4.0
-    assert progress_config["initial"] == 1.25
+    assert progress_config["total"] == 2.75
+    assert progress_config["initial"] == 0.0
     assert progress_config["updated"] == 2.75
     assert progress_config["bar_format"] == "{desc}: {percentage:3.0f}%|{bar}| {elapsed}{postfix}"
     postfix = str(progress_config["postfix"])
-    assert "audio=4.0s/4.0s" in postfix
+    assert "audio=2.8s/2.8s" in postfix
     assert "eta=00:00" in postfix
     assert "save=" in postfix
 
@@ -181,6 +186,7 @@ def test_main_fully_resumed_run_skips_ffprobe_and_backend_init(tmp_path: Path, m
             model_base_dir="DeepFilterNet3",
             device=None,
             num_workers=2,
+            probe_workers=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -233,6 +239,7 @@ def test_main_rejects_colliding_output_paths(tmp_path: Path, monkeypatch) -> Non
             model_base_dir="DeepFilterNet3",
             device=None,
             num_workers=0,
+            probe_workers=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -311,12 +318,17 @@ def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monk
             model_base_dir="DeepFilterNet3",
             device=None,
             num_workers=0,
+            probe_workers=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
     )
     monkeypatch.setattr(module, "resolve_ffprobe_bin", lambda: "ffprobe")
-    monkeypatch.setattr(module, "probe_audio_durations", lambda paths, ffprobe_bin: {noise_source.resolve(): 0.5})
+    monkeypatch.setattr(
+        module,
+        "probe_audio_durations",
+        lambda paths, ffprobe_bin, num_workers: {noise_source.resolve(): 0.5},
+    )
 
     try:
         module.main()
@@ -372,3 +384,86 @@ def test_build_progress_postfix_reports_rate_queue_and_stage_timings() -> None:
     )
 
     assert postfix == "audio=18.0s/30.0s, eta=00:04, rt=3.00x, save_q=3, enh=300ms, save=200ms"
+
+
+def test_build_probe_postfix_reports_probe_rate_eta_audio_and_failures() -> None:
+    module = _load_module()
+
+    postfix = module.build_probe_postfix(
+        completed_files=6,
+        total_files=10,
+        discovered_audio_seconds=12.4,
+        failure_count=1,
+        start_time=10.0,
+        now=12.0,
+    )
+
+    assert postfix == "files=6/10, eta=00:01, probe=3.0/s, audio=12.4s, fail=1"
+
+
+def test_probe_audio_durations_uses_requested_parallelism_and_updates_progress(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+
+    sources = [tmp_path / f"clip_{idx}.wav" for idx in range(3)]
+    for source in sources:
+        source.write_bytes(b"wav")
+
+    seen_executor: dict[str, int] = {}
+    progress_config: dict[str, object] = {}
+
+    class FakeProgress:
+        def __init__(self, iterable=None, **kwargs):
+            progress_config.update(kwargs)
+            self._iterable = [] if iterable is None else iterable
+            self._updated = 0
+
+        def __iter__(self):
+            return iter(self._iterable)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def set_postfix_str(self, value, refresh=True):
+            progress_config["postfix"] = value
+            progress_config["postfix_refresh"] = refresh
+
+        def update(self, amount):
+            self._updated += amount
+            progress_config["updated"] = self._updated
+
+    class FakeExecutor:
+        def __init__(self, max_workers: int):
+            seen_executor["max_workers"] = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, *args, **kwargs):
+            future = module.Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:  # pragma: no cover - defensive guard
+                future.set_exception(exc)
+            return future
+
+    duration_map = {source: float(idx + 1) for idx, source in enumerate(sources)}
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(module, "tqdm", FakeProgress)
+    monkeypatch.setattr(module, "probe_audio_duration_seconds", lambda path, ffprobe_bin: duration_map[path])
+
+    durations = module.probe_audio_durations(sources, "ffprobe", num_workers=7)
+
+    assert durations == duration_map
+    assert seen_executor["max_workers"] == 7
+    assert progress_config["total"] == 3
+    assert progress_config["unit"] == "file"
+    assert progress_config["updated"] == 3
+    assert "probe=" in str(progress_config["postfix"])
+    assert "audio=6.0s" in str(progress_config["postfix"])
