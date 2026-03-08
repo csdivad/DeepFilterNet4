@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import sys
 from pathlib import Path
 
 import torch
@@ -152,6 +153,12 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
     assert "save=" in postfix
 
 
+def test_module_prioritizes_repo_package_root_on_sys_path() -> None:
+    module = _load_module()
+
+    assert str(module.PACKAGE_ROOT) in sys.path
+
+
 def test_main_fully_resumed_run_skips_ffprobe_and_backend_init(tmp_path: Path, monkeypatch) -> None:
     module = _load_module()
 
@@ -268,6 +275,18 @@ def test_resolve_backend_prefers_mlx_for_mlx_models_on_apple_silicon(monkeypatch
     assert backend is mlx_backend
 
 
+def test_resolve_backend_prefers_mlx_for_dfnet3_mlx_on_apple_silicon(monkeypatch) -> None:
+    module = _load_module()
+    mlx_backend = module.EnhanceBackend(name="mlx", sample_rate=48_000, enhance_audio=lambda audio: audio)
+
+    monkeypatch.setattr(module, "running_on_apple_silicon", lambda: True)
+    monkeypatch.setattr(module, "load_mlx_backend", lambda model_base_dir: mlx_backend)
+
+    backend = module.resolve_backend("DeepFilterNet3-MLX", requested_device=None)
+
+    assert backend is mlx_backend
+
+
 def test_resolve_backend_uses_torch_for_default_deepfilternet3(monkeypatch) -> None:
     module = _load_module()
     torch_backend = module.EnhanceBackend(name="torch", sample_rate=48_000, enhance_audio=lambda audio: audio)
@@ -292,6 +311,30 @@ def test_resolve_backend_prefers_mlx_for_custom_model_dirs_on_apple_silicon(tmp_
     backend = module.resolve_backend(str(model_dir), requested_device=None)
 
     assert backend is mlx_backend
+
+
+def test_resolve_backend_falls_back_to_torch_dfnet3_when_mlx_init_fails(monkeypatch) -> None:
+    module = _load_module()
+    torch_backend = module.EnhanceBackend(name="torch", sample_rate=48_000, enhance_audio=lambda audio: audio)
+    seen: dict[str, str | None] = {}
+
+    monkeypatch.setattr(module, "running_on_apple_silicon", lambda: True)
+
+    def fake_load_mlx_backend(model_base_dir: str):
+        raise RuntimeError(f"cannot load {model_base_dir}")
+
+    def fake_load_torch_backend(model_base_dir: str, requested_device: str | None):
+        seen["model_base_dir"] = model_base_dir
+        seen["requested_device"] = requested_device
+        return torch_backend
+
+    monkeypatch.setattr(module, "load_mlx_backend", fake_load_mlx_backend)
+    monkeypatch.setattr(module, "load_torch_backend", fake_load_torch_backend)
+
+    backend = module.resolve_backend("DeepFilterNet3-MLX", requested_device=None)
+
+    assert backend is torch_backend
+    assert seen == {"model_base_dir": "DeepFilterNet3", "requested_device": None}
 
 
 def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -363,6 +406,16 @@ def test_save_enhanced_audio_atomically_cleans_partial_file_on_failure(tmp_path:
 
     assert not temp_target.exists()
     assert not target.exists()
+
+
+def test_build_temp_output_path_preserves_audio_extension(tmp_path: Path) -> None:
+    module = _load_module()
+    target = tmp_path / "out" / "sample.wav"
+
+    temp_target = module.build_temp_output_path(target)
+
+    assert temp_target.name.startswith(".sample.partial.")
+    assert temp_target.suffix == ".wav"
 
 
 def test_build_progress_postfix_reports_rate_queue_and_stage_timings() -> None:

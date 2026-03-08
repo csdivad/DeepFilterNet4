@@ -15,13 +15,23 @@ Key differences from DFNet4:
 - Skip connections between encoder and decoder
 """
 
+import configparser
+import math
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from .modules import Conv2dNormAct, ConvTranspose2dNormAct, DfOp, GroupedLinear, SqueezedGRU_S, erb_fb
+from .modules import Conv2dNormAct as BaseConv2dNormAct
+from .modules import ConvTranspose2dNormAct as BaseConvTranspose2dNormAct
+from .modules import (
+    DfOp,
+    GroupedLinear,
+    SqueezedGRU_S,
+    erb_fb,
+)
 
 
 @dataclass
@@ -36,6 +46,7 @@ class ModelParams3:
     nb_df: int = 96
     df_order: int = 5
     df_lookahead: int = 0
+    norm_tau: float = 1.0
     lsnr_min: float = -15.0
     lsnr_max: float = 40.0
     erb_widths: list = field(default_factory=lambda: [1] * 32)
@@ -71,6 +82,249 @@ class ModelParams3:
     pf_beta: float = 0.02
 
 
+def _parse_tuple(value: str) -> tuple[int, int]:
+    left, right = (part.strip() for part in value.split(",", maxsplit=1))
+    return int(left), int(right)
+
+
+def _freq2erb(freq: float) -> float:
+    return 9.265 * math.log(1.0 + freq / (24.7 * 9.265))
+
+
+def _erb2freq(n_erb: float) -> float:
+    return 24.7 * 9.265 * (math.exp(n_erb / 9.265) - 1.0)
+
+
+def compute_erb_fb(
+    sr: int = 48000,
+    fft_size: int = 960,
+    nb_bands: int = 32,
+    min_nb_freqs: int = 2,
+) -> list[int]:
+    """Compute ERB band widths matching the original Rust/libDF contract."""
+
+    freq_width = sr / fft_size
+    erb_low = _freq2erb(0.0)
+    erb_high = _freq2erb(sr / 2)
+    step = (erb_high - erb_low) / nb_bands
+
+    erb = [0] * nb_bands
+    prev_freq = 0
+    freq_over = 0
+    for i in range(1, nb_bands + 1):
+        f = _erb2freq(erb_low + i * step)
+        fb = round(f / freq_width)
+        nb_freqs = fb - prev_freq - freq_over
+        if nb_freqs < min_nb_freqs:
+            freq_over = min_nb_freqs - nb_freqs
+            nb_freqs = min_nb_freqs
+        else:
+            freq_over = 0
+        erb[i - 1] = nb_freqs
+        prev_freq = fb
+
+    erb[nb_bands - 1] += 1
+    too_large = sum(erb) - (fft_size // 2 + 1)
+    if too_large > 0:
+        erb[nb_bands - 1] -= too_large
+
+    assert sum(erb) == fft_size // 2 + 1, f"ERB band sum {sum(erb)} != {fft_size // 2 + 1}"
+    return erb
+
+
+def load_dfnet3_config(path: str | Path) -> ModelParams3:
+    """Load DFNet3 parameters from a PyTorch-style ``config.ini`` file."""
+
+    config = configparser.ConfigParser()
+    if not config.read(path):
+        raise FileNotFoundError(f"Could not read config file: {path}")
+
+    if "df" not in config:
+        raise KeyError(f"Missing [df] section in DFNet3 config: {path}")
+    if "deepfilternet" not in config:
+        raise KeyError(f"Missing [deepfilternet] section in DFNet3 config: {path}")
+
+    sec_df = config["df"]
+    sec_model = config["deepfilternet"]
+
+    params = ModelParams3()
+    params.sr = sec_df.getint("sr", fallback=params.sr)
+    params.fft_size = sec_df.getint("fft_size", fallback=params.fft_size)
+    params.hop_size = sec_df.getint("hop_size", fallback=params.hop_size)
+    params.nb_erb = sec_df.getint("nb_erb", fallback=params.nb_erb)
+    params.nb_df = sec_df.getint("nb_df", fallback=params.nb_df)
+    params.df_order = sec_df.getint("df_order", fallback=params.df_order)
+    params.df_lookahead = sec_df.getint("df_lookahead", fallback=params.df_lookahead)
+    params.norm_tau = sec_df.getfloat("norm_tau", fallback=params.norm_tau)
+    params.lsnr_min = sec_df.getfloat("lsnr_min", fallback=params.lsnr_min)
+    params.lsnr_max = sec_df.getfloat("lsnr_max", fallback=params.lsnr_max)
+    params.erb_widths = compute_erb_fb(
+        sr=params.sr,
+        fft_size=params.fft_size,
+        nb_bands=params.nb_erb,
+        min_nb_freqs=sec_df.getint("min_nb_erb_freqs", fallback=2),
+    )
+
+    params.conv_lookahead = sec_model.getint("conv_lookahead", fallback=params.conv_lookahead)
+    params.conv_ch = sec_model.getint("conv_ch", fallback=params.conv_ch)
+    params.conv_depthwise = sec_model.getboolean("conv_depthwise", fallback=params.conv_depthwise)
+    params.convt_depthwise = sec_model.getboolean("convt_depthwise", fallback=params.convt_depthwise)
+    if sec_model.get("conv_kernel", fallback=None):
+        params.conv_kernel = _parse_tuple(sec_model.get("conv_kernel"))
+    if sec_model.get("convt_kernel", fallback=None):
+        params.convt_kernel = _parse_tuple(sec_model.get("convt_kernel"))
+    if sec_model.get("conv_kernel_inp", fallback=None):
+        params.conv_kernel_inp = _parse_tuple(sec_model.get("conv_kernel_inp"))
+    params.emb_hidden_dim = sec_model.getint("emb_hidden_dim", fallback=params.emb_hidden_dim)
+    params.emb_num_layers = sec_model.getint("emb_num_layers", fallback=params.emb_num_layers)
+    params.emb_gru_skip_enc = sec_model.get("emb_gru_skip_enc", fallback=params.emb_gru_skip_enc)
+    params.emb_gru_skip = sec_model.get("emb_gru_skip", fallback=params.emb_gru_skip)
+    params.df_hidden_dim = sec_model.getint("df_hidden_dim", fallback=params.df_hidden_dim)
+    params.df_num_layers = sec_model.getint("df_num_layers", fallback=params.df_num_layers)
+    params.df_gru_skip = sec_model.get("df_gru_skip", fallback=params.df_gru_skip)
+    params.df_pathway_kernel_size_t = sec_model.getint(
+        "df_pathway_kernel_size_t",
+        fallback=params.df_pathway_kernel_size_t,
+    )
+    params.enc_concat = sec_model.getboolean("enc_concat", fallback=params.enc_concat)
+    params.linear_groups = sec_model.getint("linear_groups", fallback=params.linear_groups)
+    params.enc_linear_groups = sec_model.getint("enc_linear_groups", fallback=params.enc_linear_groups)
+    params.mask_pf = sec_model.getboolean("mask_pf", fallback=params.mask_pf)
+    params.pf_beta = sec_model.getfloat("pf_beta", fallback=params.pf_beta)
+
+    # The converted MLX DFNet3 checkpoint stores transposed-convolution weights
+    # in the separable layout (depthwise + pointwise). Keep the runtime loader
+    # aligned with the conversion script so strict MLX weight loading succeeds.
+    params.convt_depthwise = True
+    return params
+
+
+def build_dfnet3_model(params: ModelParams3, *, run_df: bool = True) -> "DFNet3":
+    """Construct a DFNet3 model from parsed parameters."""
+
+    from .ops import erb_fb_and_inverse
+
+    erb_fb_matrix, erb_inv_fb = erb_fb_and_inverse(
+        sr=params.sr,
+        fft_size=params.fft_size,
+        nb_bands=params.nb_erb,
+        min_width=max(1, min(params.erb_widths)),
+    )
+    return DFNet3(erb_fb_matrix, erb_inv_fb, run_df=run_df, p=params)
+
+
+def _apply_conv_lookahead(features: mx.array, lookahead: int) -> mx.array:
+    """Shift features left by ``lookahead`` frames and zero-pad the tail.
+
+    Mirrors the PyTorch DFNet3 ``ConstantPad2d((0, 0, -lookahead, lookahead), 0)``
+    behavior used on feature tensors before the encoder.
+    """
+
+    if lookahead <= 0:
+        return features
+
+    if lookahead >= features.shape[1]:
+        return mx.zeros_like(features)
+
+    shifted = features[:, lookahead:, ...]
+    pad_width = [(0, 0), (0, lookahead)] + [(0, 0)] * (features.ndim - 2)
+    return mx.pad(shifted, pad_width)
+
+
+def _as_pair(value: Union[int, Tuple[int, int]]) -> tuple[int, int]:
+    if isinstance(value, int):
+        return (value, value)
+    return value
+
+
+def _causal_time_pad(kernel_size: tuple[int, int], lookahead: int = 0) -> tuple[int, int, int, int]:
+    """Return NHWC pad widths for torch-style causal/asymmetric DF3 conv padding."""
+
+    kernel_t, _ = kernel_size
+    return (0, 0, max(0, kernel_t - 1 - lookahead), max(0, lookahead))
+
+
+class Conv2dNormAct(BaseConv2dNormAct):
+    """DF3-local conv wrapper matching the original torch time-padding contract."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, int]] = 3,
+        stride: Union[int, Tuple[int, int]] = 1,
+        dilation: Union[int, Tuple[int, int]] = 1,
+        bias: bool = True,
+        norm: Optional[str] = "batch",
+        activation: Optional[str] = "relu",
+        norm_groups: int = 8,
+        separable: bool = False,
+        lookahead: int = 0,
+    ):
+        kernel = _as_pair(kernel_size)
+        dilation_pair = _as_pair(dilation)
+        freq_pad = kernel[1] // 2 + dilation_pair[1] - 1
+        self._time_pad = _causal_time_pad(kernel, lookahead=lookahead)
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel,
+            stride=stride,
+            padding=(0, freq_pad),
+            dilation=dilation_pair,
+            bias=bias,
+            norm=norm,
+            activation=activation,
+            norm_groups=norm_groups,
+            separable=separable,
+        )
+
+    def __call__(self, x: mx.array) -> mx.array:
+        if any(self._time_pad):
+            x = mx.pad(x, [(0, 0), (self._time_pad[2], self._time_pad[3]), (0, 0), (0, 0)])
+        return super().__call__(x)
+
+
+class ConvTranspose2dNormAct(BaseConvTranspose2dNormAct):
+    """DF3-local transposed conv wrapper matching the original torch padding contract."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, int]] = 3,
+        stride: Union[int, Tuple[int, int]] = 1,
+        dilation: Union[int, Tuple[int, int]] = 1,
+        bias: bool = True,
+        norm: Optional[str] = "batch",
+        activation: Optional[str] = "relu",
+        separable: bool = False,
+        lookahead: int = 0,
+    ):
+        kernel = _as_pair(kernel_size)
+        dilation_pair = _as_pair(dilation)
+        stride_pair = _as_pair(stride)
+        freq_pad = kernel[1] // 2
+        self._time_pad = _causal_time_pad(kernel, lookahead=lookahead)
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel,
+            stride=stride_pair,
+            padding=(kernel[0] - 1, freq_pad + dilation_pair[1] - 1),
+            output_padding=(0, freq_pad),
+            bias=bias,
+            norm=norm,
+            activation=activation,
+            separable=separable,
+        )
+
+    def __call__(self, x: mx.array) -> mx.array:
+        if any(self._time_pad):
+            x = mx.pad(x, [(0, 0), (self._time_pad[2], self._time_pad[3]), (0, 0), (0, 0)])
+        return super().__call__(x)
+
+
 class Encoder3(nn.Module):
     """DeepFilterNet3 encoder with parallel ERB and DF pathways."""
 
@@ -85,7 +339,6 @@ class Encoder3(nn.Module):
             1,
             conv_ch,
             kernel_size=p.conv_kernel_inp,
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -96,7 +349,6 @@ class Encoder3(nn.Module):
             conv_ch,
             kernel_size=p.conv_kernel,
             stride=(1, 2),
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -107,7 +359,6 @@ class Encoder3(nn.Module):
             conv_ch,
             kernel_size=p.conv_kernel,
             stride=(1, 2),
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -117,7 +368,6 @@ class Encoder3(nn.Module):
             conv_ch,
             conv_ch,
             kernel_size=p.conv_kernel,
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -129,7 +379,6 @@ class Encoder3(nn.Module):
             2,
             conv_ch,
             kernel_size=p.conv_kernel_inp,
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -140,7 +389,6 @@ class Encoder3(nn.Module):
             conv_ch,
             kernel_size=p.conv_kernel,
             stride=(1, 2),
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -270,7 +518,6 @@ class ErbDecoder3(nn.Module):
             conv_ch,
             conv_ch,
             kernel_size=p.conv_kernel,
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -290,8 +537,6 @@ class ErbDecoder3(nn.Module):
             conv_ch,
             kernel_size=p.convt_kernel,
             stride=(1, 2),
-            padding=(0, 1),
-            output_padding=(0, 1),
             bias=False,
             norm="batch",
             activation="relu",
@@ -311,8 +556,6 @@ class ErbDecoder3(nn.Module):
             conv_ch,
             kernel_size=p.convt_kernel,
             stride=(1, 2),
-            padding=(0, 1),
-            output_padding=(0, 1),
             bias=False,
             norm="batch",
             activation="relu",
@@ -331,7 +574,6 @@ class ErbDecoder3(nn.Module):
             conv_ch,
             1,
             kernel_size=p.conv_kernel,
-            padding="same",
             bias=False,
             norm=None,
             activation="sigmoid",
@@ -389,7 +631,6 @@ class DfDecoder3(nn.Module):
             conv_ch,
             self.df_out_ch,
             kernel_size=(p.df_pathway_kernel_size_t, 1),
-            padding="same",
             bias=False,
             norm="batch",
             activation="relu",
@@ -524,6 +765,10 @@ class DFNet3(nn.Module):
             Enhanced spectrum as (real, imag)
         """
         spec_real, spec_imag = spec
+
+        if self.p.conv_lookahead > 0:
+            feat_erb = _apply_conv_lookahead(feat_erb, self.p.conv_lookahead)
+            feat_spec = _apply_conv_lookahead(feat_spec, self.p.conv_lookahead)
 
         # Encode
         e0, e1, e2, e3, emb, c0, lsnr = self.encoder(feat_erb, feat_spec)

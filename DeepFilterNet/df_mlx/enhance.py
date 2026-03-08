@@ -1,4 +1,4 @@
-"""Enhancement/inference module for MLX DeepFilterNet4.
+"""Enhancement/inference module for MLX DeepFilterNet models.
 
 This module provides:
 - Single-file and batch enhancement
@@ -10,7 +10,9 @@ Based on df/enhance.py but adapted for MLX on Apple Silicon.
 """
 
 import argparse
+import configparser
 import glob
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -22,12 +24,16 @@ import numpy as np
 from loguru import logger
 
 from .config import ModelParams4, load_config
+from .deepfilternet3 import DFNet3, ModelParams3, build_dfnet3_model, load_dfnet3_config
 from .model import DfNet4, StreamingDfNet4
 from .vad_silero import SileroVAD, SileroVADConfig
 
 # Default pretrained models
-PRETRAINED_MODELS = ("DeepFilterNet4-MLX",)
+PRETRAINED_MODELS = ("DeepFilterNet3-MLX", "DeepFilterNet4-MLX")
 DEFAULT_MODEL = "DeepFilterNet4-MLX"
+
+EnhanceModel = Union[DFNet3, DfNet4]
+EnhanceParams = Union[ModelParams3, ModelParams4]
 
 
 @dataclass
@@ -208,11 +214,24 @@ def resample(
     return resampled
 
 
+def detect_model_family(config_path: Path) -> str:
+    """Detect which MLX model family a config belongs to."""
+
+    parser = configparser.ConfigParser()
+    if not parser.read(config_path):
+        raise FileNotFoundError(f"Could not read config file: {config_path}")
+
+    model_name = parser.get("train", "model", fallback="deepfilternet4").strip().lower()
+    if model_name in {"deepfilternet3", "dfnet3"}:
+        return "deepfilternet3"
+    return "deepfilternet4"
+
+
 def load_model(
     model_path: Optional[str] = None,
     epoch: Union[str, int] = "best",
     device: Optional[str] = None,  # Ignored for MLX (always uses Metal)
-) -> Tuple[DfNet4, ModelParams4, str, int]:
+) -> Tuple[EnhanceModel, EnhanceParams, str, int]:
     """Load model and configuration.
 
     Args:
@@ -240,10 +259,13 @@ def load_model(
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
-    params = load_config(str(config_path))
-
-    # Initialize model
-    model = DfNet4(params)
+    model_family = detect_model_family(config_path)
+    if model_family == "deepfilternet3":
+        params = load_dfnet3_config(config_path)
+        model = build_dfnet3_model(params)
+    else:
+        params = load_config(str(config_path))
+        model = DfNet4(params)
 
     # Load checkpoint
     checkpoint_dir = model_dir / "checkpoints"
@@ -403,7 +425,7 @@ def enhance_frame_compiled(
 
 
 def enhance_frame(
-    model: DfNet4,
+    model: EnhanceModel,
     spec: Tuple[mx.array, mx.array],
     feat_erb: mx.array,
     feat_spec: mx.array,
@@ -411,7 +433,7 @@ def enhance_frame(
     """Enhanced forward pass.
 
     Args:
-        model: DfNet4 model
+        model: DFNet MLX model
         spec: Input spectrum (real, imag)
         feat_erb: ERB features
         feat_spec: DF features
@@ -422,17 +444,86 @@ def enhance_frame(
     return model(spec, feat_erb, feat_spec, training=False)
 
 
-def enhance(
-    model: DfNet4,
+def _enhance_dfnet3(
+    model: DFNet3,
     audio: mx.array,
-    params: ModelParams4,
+    params: ModelParams3,
+    compensate_delay: bool = True,
+    atten_lim_db: Optional[float] = None,
+) -> mx.array:
+    """Enhance audio with DFNet3 using the original libDF analysis/synthesis math."""
+
+    import torch
+    import torch.nn.functional as F
+
+    from libdf import DF, erb, erb_norm, unit_norm
+
+    input_1d = audio.ndim == 1
+    if input_1d:
+        audio = mx.expand_dims(audio, axis=0)
+
+    audio_np = np.asarray(audio)
+    audio_torch = torch.from_numpy(audio_np.copy())
+
+    orig_len = audio_torch.shape[-1]
+    n_fft = params.fft_size
+    hop = params.hop_size
+    if compensate_delay:
+        audio_torch = F.pad(audio_torch, (0, n_fft))
+
+    df_state = DF(
+        sr=params.sr,
+        fft_size=n_fft,
+        hop_size=hop,
+        nb_bands=params.nb_erb,
+        min_nb_erb_freqs=max(1, min(params.erb_widths)),
+    )
+    norm_alpha = math.exp(-(hop / params.sr) / params.norm_tau)
+    spec_complex = df_state.analysis(audio_torch.detach().cpu().numpy())
+    erb_feat = erb_norm(erb(spec_complex, df_state.erb_widths()), norm_alpha)
+    spec_feat = unit_norm(spec_complex[..., : params.nb_df], norm_alpha)
+
+    spec_np = np.asarray(spec_complex)
+    feat_erb_np = np.asarray(erb_feat)
+    feat_spec_np = np.stack([np.asarray(spec_feat).real, np.asarray(spec_feat).imag], axis=-1)
+
+    spec_real = mx.array(spec_np.real)
+    spec_imag = mx.array(spec_np.imag)
+    feat_erb = mx.array(feat_erb_np)
+    feat_spec = mx.array(feat_spec_np)
+
+    spec_out_real, spec_out_imag = enhance_frame(model, (spec_real, spec_imag), feat_erb, feat_spec)
+
+    if atten_lim_db is not None and abs(atten_lim_db) > 0:
+        lim = 10 ** (-abs(atten_lim_db) / 20)
+        spec_out_real = spec_real * lim + spec_out_real * (1 - lim)
+        spec_out_imag = spec_imag * lim + spec_out_imag * (1 - lim)
+
+    mx.eval(spec_out_real, spec_out_imag)
+    enhanced_spec = np.asarray(spec_out_real) + 1j * np.asarray(spec_out_imag)
+    enhanced_np = np.asarray(df_state.synthesis(enhanced_spec), dtype=np.float32)
+
+    if compensate_delay:
+        d = n_fft - hop
+        enhanced_np = enhanced_np[:, d : orig_len + d]
+
+    enhanced = mx.array(enhanced_np)
+    if input_1d:
+        enhanced = mx.squeeze(enhanced, axis=0)
+    return enhanced
+
+
+def enhance(
+    model: EnhanceModel,
+    audio: mx.array,
+    params: EnhanceParams,
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
 ) -> mx.array:
     """Enhance a single audio signal.
 
     Args:
-        model: Loaded DfNet4 model
+        model: Loaded DFNet MLX model
         audio: Audio waveform (samples,) or (batch, samples)
         params: Model parameters
         compensate_delay: Whether to pad for delay compensation
@@ -441,6 +532,15 @@ def enhance(
     Returns:
         Enhanced audio waveform
     """
+    if isinstance(model, DFNet3):
+        return _enhance_dfnet3(
+            model,
+            audio,
+            params,
+            compensate_delay=compensate_delay,
+            atten_lim_db=atten_lim_db,
+        )
+
     from .ops import istft, stft
 
     # Handle 1D input
@@ -497,15 +597,15 @@ def enhance(
 
 
 def enhance_streaming(
-    model: DfNet4,
+    model: EnhanceModel,
     audio_iterator: Iterator[mx.array],
-    params: ModelParams4,
+    params: EnhanceParams,
     chunk_size_samples: int,
 ) -> Iterator[mx.array]:
     """Stream-based enhancement for real-time processing.
 
     Args:
-        model: Loaded DfNet4 model
+        model: Loaded DFNet MLX model
         audio_iterator: Iterator yielding audio chunks
         params: Model parameters
         chunk_size_samples: Number of samples per chunk
@@ -515,6 +615,9 @@ def enhance_streaming(
     """
     if chunk_size_samples <= 0:
         raise ValueError(f"chunk_size_samples must be > 0, got {chunk_size_samples}")
+
+    if not isinstance(model, DfNet4):
+        raise TypeError("Streaming enhancement is currently supported only for DfNet4 models")
 
     streaming_model = StreamingDfNet4(model)
     state = streaming_model.init_state(batch_size=1)
@@ -550,8 +653,8 @@ def enhance_streaming(
 
 
 def enhance_file(
-    model: DfNet4,
-    params: ModelParams4,
+    model: EnhanceModel,
+    params: EnhanceParams,
     input_path: str,
     output_dir: Optional[str] = None,
     suffix: Optional[str] = None,
@@ -563,7 +666,7 @@ def enhance_file(
     """Enhance a single audio file.
 
     Args:
-        model: Loaded DfNet4 model
+        model: Loaded DFNet MLX model
         params: Model parameters
         input_path: Path to input audio file
         output_dir: Output directory
@@ -643,8 +746,8 @@ def enhance_file(
 
 
 def enhance_batch(
-    model: DfNet4,
-    params: ModelParams4,
+    model: EnhanceModel,
+    params: EnhanceParams,
     input_paths: List[str],
     output_dir: Optional[str] = None,
     suffix: Optional[str] = None,
@@ -656,7 +759,7 @@ def enhance_batch(
     """Enhance multiple audio files.
 
     Args:
-        model: Loaded DfNet4 model
+        model: Loaded DFNet MLX model
         params: Model parameters
         input_paths: List of input file paths
         output_dir: Output directory
@@ -693,8 +796,8 @@ def enhance_batch(
 
 
 def enhance_file_streaming(
-    model: DfNet4,
-    params: ModelParams4,
+    model: EnhanceModel,
+    params: EnhanceParams,
     input_path: str,
     output_dir: Optional[str] = None,
     suffix: Optional[str] = None,
@@ -786,8 +889,8 @@ def enhance_file_streaming(
 
 
 def enhance_batch_streaming(
-    model: DfNet4,
-    params: ModelParams4,
+    model: EnhanceModel,
+    params: EnhanceParams,
     input_paths: List[str],
     output_dir: Optional[str] = None,
     suffix: Optional[str] = None,
@@ -823,7 +926,7 @@ def enhance_batch_streaming(
 def setup_argument_parser() -> argparse.ArgumentParser:
     """Set up command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="DeepFilterNet4 MLX - Speech Enhancement",
+        description="DeepFilterNet MLX - Speech Enhancement",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 

@@ -44,6 +44,7 @@ def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
     assert result.returncode == 0, result.stderr
     assert "--preprocess-clean-speech" in result.stdout
     assert "--preprocess-probe-workers" in result.stdout
+    assert "DeepFilterNet3-MLX" in result.stdout
     assert "--merge-short" in result.stdout
     assert "Examples:" in result.stdout
 

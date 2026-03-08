@@ -22,6 +22,13 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   fi
 fi
 
+DEFAULT_MLX_PREPROCESS_MODEL="${ROOT_DIR}/models/mlx/DeepFilterNet3-MLX"
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" && -f "${DEFAULT_MLX_PREPROCESS_MODEL}/config.ini" ]]; then
+  DEFAULT_PREPROCESS_MODEL="${DEFAULT_MLX_PREPROCESS_MODEL}"
+else
+  DEFAULT_PREPROCESS_MODEL="DeepFilterNet3"
+fi
+
 usage_helptext() {
   cat <<EOF
 Usage:
@@ -57,8 +64,9 @@ Optional clean-speech preprocessing:
   --preprocess-output-root P  Directory for preprocessed speech mirror tree
   --preprocess-base-dir P     Base dir used to preserve relative paths
   --preprocess-output-list P  File list written for preprocessed outputs
-  --preprocess-model NAME     Model name or model dir (default: DeepFilterNet3;
-                              Apple Silicon auto-prefers df_mlx for MLX models)
+  --preprocess-model NAME     Model name or model dir (default: repo-local
+                              models/mlx/DeepFilterNet3-MLX on Apple Silicon
+                              when available, otherwise DeepFilterNet3)
   --preprocess-device DEV     cpu | cuda | mps | auto
   --preprocess-workers N      Input-loading workers for preprocessing (default: 2)
   --preprocess-probe-workers N
@@ -254,7 +262,7 @@ RIR_LIST="${CLI_RIR_LIST:-${RIR_LIST:-${LIST_DIR}/rir_all.txt}}"
 PREPROCESS_OUTPUT_ROOT="${CLI_PREPROCESS_OUTPUT_ROOT:-${PREPROCESS_OUTPUT_ROOT:-${DATA_DIR}/preprocessed/dfn3_speech_clean}}"
 PREPROCESS_BASE_DIR="${CLI_PREPROCESS_BASE_DIR:-${PREPROCESS_BASE_DIR:-${DATA_DIR}/raw}}"
 PREPROCESS_OUTPUT_LIST="${CLI_PREPROCESS_OUTPUT_LIST:-${PREPROCESS_OUTPUT_LIST:-${LIST_DIR}/clean_all.preprocessed.txt}}"
-PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-DeepFilterNet3}}"
+PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-${DEFAULT_PREPROCESS_MODEL}}}"
 PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
 PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-2}}"
 PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
@@ -312,7 +320,7 @@ echo "Max pending budget: ${MAX_PENDING_BYTES} GB"
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   echo "Preprocess speech:  enabled"
   echo "Preprocess model:   ${PREPROCESS_MODEL}"
-  echo "Preprocess backend: auto (Apple Silicon prefers df_mlx for MLX models)"
+  echo "Preprocess backend: auto (Apple Silicon uses df_mlx for MLX bundles; torch otherwise)"
   echo "Preprocess root:    ${PREPROCESS_OUTPUT_ROOT}"
   echo "Preprocess base:    ${PREPROCESS_BASE_DIR}"
   echo "Preprocess list:    ${PREPROCESS_OUTPUT_LIST}"

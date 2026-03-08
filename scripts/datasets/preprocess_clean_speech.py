@@ -25,9 +25,13 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from df.enhance import AudioDataset, enhance, init_df
-from df.io import resample, save_audio
-from df.model import ModelParams
+PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "DeepFilterNet"
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
+
+from df.enhance import AudioDataset, enhance, init_df  # noqa: E402
+from df.io import resample, save_audio  # noqa: E402
+from df.model import ModelParams  # noqa: E402
 
 NON_SPEECH_PATH_MARKERS = frozenset(
     {
@@ -42,7 +46,7 @@ NON_SPEECH_PATH_MARKERS = frozenset(
     }
 )
 
-KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet4-mlx"})
+KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet3-mlx", "deepfilternet4-mlx"})
 KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
 
 
@@ -163,12 +167,26 @@ def model_requests_mlx(model_base_dir: str | None) -> bool:
     return "mlx" in lowered or path.name.lower() in KNOWN_MLX_MODEL_NAMES or path.is_dir()
 
 
+def model_explicitly_requests_mlx(model_base_dir: str | None) -> bool:
+    if not model_base_dir:
+        return False
+    lowered = str(model_base_dir).strip().lower()
+    path = Path(model_base_dir).expanduser()
+    return lowered in KNOWN_MLX_MODEL_NAMES or "mlx" in lowered or path.name.lower() in KNOWN_MLX_MODEL_NAMES
+
+
 def should_prefer_mlx_backend(model_base_dir: str | None, requested_device: str | None) -> bool:
     if not running_on_apple_silicon():
         return False
     if requested_device and requested_device.lower() not in {"mps"}:
         return False
     return model_requests_mlx(model_base_dir)
+
+
+def resolve_torch_fallback_model(model_base_dir: str | None) -> str:
+    if model_explicitly_requests_mlx(model_base_dir):
+        return "DeepFilterNet3"
+    return model_base_dir or "DeepFilterNet3"
 
 
 def is_complete_output(path: Path) -> bool:
@@ -179,7 +197,7 @@ def is_complete_output(path: Path) -> bool:
 
 
 def build_temp_output_path(target: Path) -> Path:
-    return target.with_name(f".{target.name}.partial.{os.getpid()}")
+    return target.with_name(f".{target.stem}.partial.{os.getpid()}{target.suffix}")
 
 
 def resolve_ffprobe_bin() -> str:
@@ -233,7 +251,7 @@ def resolve_backend(model_base_dir: str, requested_device: str | None) -> Enhanc
             return load_mlx_backend(model_base_dir)
         except Exception as exc:
             print(f"[warn] Failed to initialize MLX preprocessing backend, falling back to torch: {exc}")
-    return load_torch_backend(model_base_dir, requested_device)
+    return load_torch_backend(resolve_torch_fallback_model(model_base_dir), requested_device)
 
 
 def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
