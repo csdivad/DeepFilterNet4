@@ -84,9 +84,46 @@ class Conv2dNormAct(nn.Module):
         self.padding = padding
         self.stride = stride
 
+        class GroupedConv2d(nn.Module):
+            def __init__(
+                self,
+                in_channels: int,
+                out_channels: int,
+                kernel_size: Tuple[int, int],
+                stride: Tuple[int, int],
+                padding: Tuple[int, int],
+                dilation: Tuple[int, int],
+                groups: int,
+                bias: bool,
+            ):
+                super().__init__()
+                scale = (2 / (in_channels * kernel_size[0] * kernel_size[1])) ** 0.5
+                self.weight = (
+                    mx.random.normal((out_channels, kernel_size[0], kernel_size[1], in_channels // groups)) * scale
+                )
+                self.bias = mx.zeros((out_channels,)) if bias else None
+                self.stride = stride
+                self.padding = padding
+                self.dilation = dilation
+                self.groups = groups
+
+            def __call__(self, x: mx.array) -> mx.array:
+                y = mx.conv2d(
+                    x,
+                    self.weight,
+                    stride=self.stride,
+                    padding=self.padding,
+                    dilation=self.dilation,
+                    groups=self.groups,
+                )
+                if self.bias is not None:
+                    y = y + self.bias.reshape(1, 1, 1, -1)
+                return y
+
         # Handle separable convolution
         # Separable: use groups = gcd(in, out), then add 1x1 pointwise conv
         self.pointwise_conv = None
+        grouped_conv = None
         if separable:
             groups = math.gcd(in_channels, out_channels)
             # Disable separable if groups is 1 or kernel is 1x1
@@ -103,13 +140,26 @@ class Conv2dNormAct(nn.Module):
                     bias=False,
                 )
 
+        if groups > 1:
+            grouped_conv = GroupedConv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                bias=bias and norm is None,
+            )
+
         # Convolution
-        self.conv = nn.Conv2d(
+        self.conv = grouped_conv or nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
+            groups=groups,
             bias=bias and norm is None,  # No bias if using norm
         )
 
@@ -205,8 +255,45 @@ class ConvTranspose2dNormAct(nn.Module):
         self.stride = stride
         self.output_padding = output_padding
 
+        class GroupedConvTranspose2d(nn.Module):
+            def __init__(
+                self,
+                in_channels: int,
+                out_channels: int,
+                kernel_size: Tuple[int, int],
+                stride: Tuple[int, int],
+                padding: Tuple[int, int],
+                output_padding: Tuple[int, int],
+                groups: int,
+                bias: bool,
+            ):
+                super().__init__()
+                scale = (2 / (in_channels * kernel_size[0] * kernel_size[1])) ** 0.5
+                self.weight = (
+                    mx.random.normal((out_channels, kernel_size[0], kernel_size[1], in_channels // groups)) * scale
+                )
+                self.bias = mx.zeros((out_channels,)) if bias else None
+                self.stride = stride
+                self.padding = padding
+                self.output_padding = output_padding
+                self.groups = groups
+
+            def __call__(self, x: mx.array) -> mx.array:
+                y = mx.conv_transpose2d(
+                    x,
+                    self.weight,
+                    stride=self.stride,
+                    padding=self.padding,
+                    output_padding=self.output_padding,
+                    groups=self.groups,
+                )
+                if self.bias is not None:
+                    y = y + self.bias.reshape(1, 1, 1, -1)
+                return y
+
         # Handle separable convolution
         self.pointwise_conv = None
+        grouped_transpose = None
         if separable:
             groups = math.gcd(in_channels, out_channels)
             if groups == 1 or max(kernel_size) == 1:
@@ -220,9 +307,19 @@ class ConvTranspose2dNormAct(nn.Module):
                     padding=(0, 0),
                     bias=False,
                 )
+                grouped_transpose = GroupedConvTranspose2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    output_padding=output_padding,
+                    groups=groups,
+                    bias=bias and norm is None,
+                )
 
         # Transposed convolution
-        self.conv = nn.ConvTranspose2d(
+        self.conv = grouped_transpose or nn.ConvTranspose2d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
@@ -1054,6 +1151,7 @@ class SqueezedGRU_S(nn.Module):
         output_size: Optional[int] = None,
         num_layers: int = 1,
         linear_groups: int = 8,
+        linear_bias: bool = True,
         batch_first: bool = True,
         gru_skip: bool = False,
         linear_act: Optional[str] = None,
@@ -1064,9 +1162,10 @@ class SqueezedGRU_S(nn.Module):
         self.hidden_size = hidden_size
         self.output_size = output_size or hidden_size
         self.gru_skip = gru_skip
+        self.num_layers = max(1, num_layers)
 
         # Input projection
-        self.linear_in = GroupedLinear(input_size, hidden_size, linear_groups)
+        self.linear_in = GroupedLinear(input_size, hidden_size, linear_groups, bias=linear_bias)
 
         # Activation
         if linear_act == "relu":
@@ -1084,10 +1183,13 @@ class SqueezedGRU_S(nn.Module):
             hidden_size=hidden_size,
             bias=True,
         )
+        self.gru_layers = [
+            nn.GRU(input_size=hidden_size, hidden_size=hidden_size, bias=True) for _ in range(self.num_layers - 1)
+        ]
 
         # Output projection
         if output_size is not None and output_size != hidden_size:
-            self.linear_out = GroupedLinear(hidden_size, output_size, linear_groups)
+            self.linear_out = GroupedLinear(hidden_size, output_size, linear_groups, bias=linear_bias)
         else:
             self.linear_out = None
 
@@ -1113,9 +1215,21 @@ class SqueezedGRU_S(nn.Module):
         if self.linear_act is not None:
             projected = self.linear_act(projected)
 
-        # GRU - MLX GRU returns output, not tuple
-        out = self.gru(projected, h)  # (batch, time, hidden)
-        h_out = out[:, -1, :]  # (batch, hidden) - last timestep
+        # GRU stack - MLX GRU returns output, not tuple
+        hidden_inputs = []
+        if isinstance(h, (list, tuple)):
+            hidden_inputs = list(h)
+        elif h is not None:
+            hidden_inputs = [h]
+
+        out = self.gru(projected, hidden_inputs[0] if hidden_inputs else None)  # (batch, time, hidden)
+        hidden_states = [out[:, -1, :]]
+        for layer_idx, gru_layer in enumerate(self.gru_layers, start=1):
+            layer_h = hidden_inputs[layer_idx] if layer_idx < len(hidden_inputs) else None
+            out = gru_layer(out, layer_h)
+            hidden_states.append(out[:, -1, :])
+
+        h_out = hidden_states[0] if len(hidden_states) == 1 else mx.stack(hidden_states, axis=0)
 
         # Output projection
         if self.linear_out is not None:

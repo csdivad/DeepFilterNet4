@@ -43,17 +43,21 @@ class ModelParams3:
     # Convolution settings
     conv_lookahead: int = 0
     conv_ch: int = 16
+    conv_depthwise: bool = True
+    convt_depthwise: bool = True
     conv_kernel: Tuple[int, int] = (1, 3)
     convt_kernel: Tuple[int, int] = (1, 3)
     conv_kernel_inp: Tuple[int, int] = (3, 3)
 
     # Embedding settings
     emb_hidden_dim: int = 256
+    emb_num_layers: int = 2
     emb_gru_skip_enc: str = "none"
     emb_gru_skip: str = "none"
 
     # DF settings
     df_hidden_dim: int = 256
+    df_num_layers: int = 3
     df_gru_skip: str = "none"
     df_pathway_kernel_size_t: int = 1
 
@@ -78,24 +82,69 @@ class Encoder3(nn.Module):
         # ERB pathway convolutions (NHWC format for MLX)
         # Use padding="same" on stride-2 convs to get clean dimension halving
         self.erb_conv0 = Conv2dNormAct(
-            1, conv_ch, kernel_size=p.conv_kernel_inp, padding="same", norm="batch", activation="relu"
+            1,
+            conv_ch,
+            kernel_size=p.conv_kernel_inp,
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
         self.erb_conv1 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=p.conv_kernel, stride=(1, 2), padding="same", norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=p.conv_kernel,
+            stride=(1, 2),
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
         self.erb_conv2 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=p.conv_kernel, stride=(1, 2), padding="same", norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=p.conv_kernel,
+            stride=(1, 2),
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
         self.erb_conv3 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=p.conv_kernel, padding="same", norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=p.conv_kernel,
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
 
         # DF pathway convolutions
         self.df_conv0 = Conv2dNormAct(
-            2, conv_ch, kernel_size=p.conv_kernel_inp, padding="same", norm="batch", activation="relu"
+            2,
+            conv_ch,
+            kernel_size=p.conv_kernel_inp,
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
         self.df_conv1 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=p.conv_kernel, stride=(1, 2), padding="same", norm="batch", activation="relu"
+            conv_ch,
+            conv_ch,
+            kernel_size=p.conv_kernel,
+            stride=(1, 2),
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
 
         # Dimension calculations with "same" padding:
@@ -108,7 +157,7 @@ class Encoder3(nn.Module):
         # DF pathway projection to match ERB embedding dimension
         df_emb_in = conv_ch * p.nb_df // 2
         self.df_fc_emb = nn.Sequential(
-            GroupedLinear(df_emb_in, self.emb_in_dim, p.enc_linear_groups),
+            GroupedLinear(df_emb_in, self.emb_in_dim, p.enc_linear_groups, bias=False),
             nn.ReLU(),
         )
 
@@ -120,7 +169,9 @@ class Encoder3(nn.Module):
             input_size=gru_input_dim,
             hidden_size=self.emb_dim,
             output_size=self.emb_out_dim,
+            num_layers=1,
             linear_groups=p.linear_groups,
+            linear_bias=False,
             gru_skip=(p.emb_gru_skip_enc != "none"),
             linear_act="relu",
         )
@@ -197,18 +248,43 @@ class ErbDecoder3(nn.Module):
             input_size=self.emb_in_dim,
             hidden_size=self.emb_dim,
             output_size=self.emb_in_dim,
+            num_layers=max(1, p.emb_num_layers - 1),
             linear_groups=p.linear_groups,
+            linear_bias=False,
             gru_skip=(p.emb_gru_skip != "none"),
             linear_act="relu",
         )
 
         # Decoder convolutions
         # For transposed conv with stride=2, kernel=3: padding=1, output_padding=1 gives exact 2x upsample
-        self.conv3p = Conv2dNormAct(conv_ch, conv_ch, kernel_size=1, norm="batch", activation="relu")
-        self.convt3 = Conv2dNormAct(
-            conv_ch, conv_ch, kernel_size=p.conv_kernel, padding="same", norm="batch", activation="relu"
+        self.conv3p = Conv2dNormAct(
+            conv_ch,
+            conv_ch,
+            kernel_size=1,
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
-        self.conv2p = Conv2dNormAct(conv_ch, conv_ch, kernel_size=1, norm="batch", activation="relu")
+        self.convt3 = Conv2dNormAct(
+            conv_ch,
+            conv_ch,
+            kernel_size=p.conv_kernel,
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
+        )
+        self.conv2p = Conv2dNormAct(
+            conv_ch,
+            conv_ch,
+            kernel_size=1,
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
+        )
         self.convt2 = ConvTranspose2dNormAct(
             conv_ch,
             conv_ch,
@@ -216,10 +292,20 @@ class ErbDecoder3(nn.Module):
             stride=(1, 2),
             padding=(0, 1),
             output_padding=(0, 1),
+            bias=False,
             norm="batch",
             activation="relu",
+            separable=p.convt_depthwise,
         )
-        self.conv1p = Conv2dNormAct(conv_ch, conv_ch, kernel_size=1, norm="batch", activation="relu")
+        self.conv1p = Conv2dNormAct(
+            conv_ch,
+            conv_ch,
+            kernel_size=1,
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
+        )
         self.convt1 = ConvTranspose2dNormAct(
             conv_ch,
             conv_ch,
@@ -227,12 +313,29 @@ class ErbDecoder3(nn.Module):
             stride=(1, 2),
             padding=(0, 1),
             output_padding=(0, 1),
+            bias=False,
             norm="batch",
             activation="relu",
+            separable=p.convt_depthwise,
         )
-        self.conv0p = Conv2dNormAct(conv_ch, conv_ch, kernel_size=1, norm="batch", activation="relu")
+        self.conv0p = Conv2dNormAct(
+            conv_ch,
+            conv_ch,
+            kernel_size=1,
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
+        )
         self.conv0_out = Conv2dNormAct(
-            conv_ch, 1, kernel_size=p.conv_kernel, padding="same", norm=None, activation="sigmoid"
+            conv_ch,
+            1,
+            kernel_size=p.conv_kernel,
+            padding="same",
+            bias=False,
+            norm=None,
+            activation="sigmoid",
+            separable=p.conv_depthwise,
         )
 
         self.erb_bins_downsampled = p.nb_erb // 4
@@ -283,14 +386,23 @@ class DfDecoder3(nn.Module):
 
         # Pathway convolution
         self.df_convp = Conv2dNormAct(
-            conv_ch, self.df_out_ch, kernel_size=(p.df_pathway_kernel_size_t, 1), norm="batch", activation="relu"
+            conv_ch,
+            self.df_out_ch,
+            kernel_size=(p.df_pathway_kernel_size_t, 1),
+            padding="same",
+            bias=False,
+            norm="batch",
+            activation="relu",
+            separable=p.conv_depthwise,
         )
 
         # DF GRU
         self.df_gru = SqueezedGRU_S(
             input_size=self.emb_in_dim,
             hidden_size=self.emb_dim,
-            linear_groups=p.linear_groups,
+            num_layers=p.df_num_layers,
+            linear_groups=8,
+            linear_bias=False,
             gru_skip=False,
             linear_act="relu",
         )
@@ -298,11 +410,13 @@ class DfDecoder3(nn.Module):
         # Optional skip
         self.df_skip: Optional[nn.Module] = None
         if p.df_gru_skip == "groupedlinear":
-            self.df_skip = GroupedLinear(self.emb_in_dim, self.emb_dim, p.linear_groups)
+            self.df_skip = GroupedLinear(self.emb_in_dim, self.emb_dim, p.linear_groups, bias=False)
+        elif p.df_gru_skip == "identity":
+            self.df_skip = nn.Identity()
 
         # Output
         self.df_out = nn.Sequential(
-            GroupedLinear(self.emb_dim, self.df_bins * self.df_out_ch, p.linear_groups),
+            GroupedLinear(self.emb_dim, self.df_bins * self.df_out_ch, p.linear_groups, bias=False),
             nn.Tanh(),
         )
 
@@ -418,7 +532,7 @@ class DFNet3(nn.Module):
         erb_mask = self.erb_decoder(emb, e3, e2, e1, e0)  # (B, T, nb_erb)
 
         # Expand ERB mask to full spectrum
-        mask = mx.matmul(erb_mask, self._erb_fb)  # (B, T, freq)
+        mask = mx.matmul(erb_mask, self._erb_inv_fb)  # (B, T, freq)
 
         # Apply mask to non-DF frequencies
         masked_real = spec_real * mask

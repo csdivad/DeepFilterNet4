@@ -22,6 +22,14 @@ import mlx.nn as nn
 import numpy as np
 
 
+def _first_present(pytorch_state: Dict[str, np.ndarray], *keys: str) -> Optional[np.ndarray]:
+    for key in keys:
+        value = pytorch_state.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def transpose_conv_weight(weight: np.ndarray) -> np.ndarray:
     """Transpose convolution weight from PyTorch to MLX format.
 
@@ -50,6 +58,8 @@ def transpose_conv_transpose_weight(weight: np.ndarray) -> np.ndarray:
     """
     if weight.ndim != 4:
         return weight
+    if weight.shape[1] == 1 and weight.shape[0] > 1:
+        return np.transpose(weight, (0, 2, 3, 1))
     # PyTorch (in, out, H, W) → MLX (out, H, W, in)
     return np.transpose(weight, (1, 2, 3, 0))
 
@@ -118,32 +128,80 @@ def convert_squeezed_gru_weights(
     result = {}
 
     # Linear input
-    lin_in_w = pytorch_state.get(f"{prefix}.linear_in.weight")
-    lin_in_b = pytorch_state.get(f"{prefix}.linear_in.bias")
+    lin_in_w = _first_present(pytorch_state, f"{prefix}.linear_in.weight", f"{prefix}.linear_in.0.weight")
+    lin_in_b = _first_present(pytorch_state, f"{prefix}.linear_in.bias", f"{prefix}.linear_in.0.bias")
     if lin_in_w is not None:
-        # PyTorch Linear: (out, in), MLX expects same but with groups: (groups, in/groups, out)
-        # For single group, reshape to (1, in, out)
-        result[f"{mlx_prefix}.linear_in.weight"] = lin_in_w.T.reshape(1, -1, lin_in_w.shape[0])
+        if lin_in_w.ndim == 3:
+            result[f"{mlx_prefix}.linear_in.weight"] = lin_in_w
+        else:
+            result[f"{mlx_prefix}.linear_in.weight"] = lin_in_w.T.reshape(1, -1, lin_in_w.shape[0])
         if lin_in_b is not None:
             result[f"{mlx_prefix}.linear_in.bias"] = lin_in_b
 
-    # GRU
-    gru_ih = pytorch_state.get(f"{prefix}.gru.weight_ih_l0")
-    gru_hh = pytorch_state.get(f"{prefix}.gru.weight_hh_l0")
-    gru_bih = pytorch_state.get(f"{prefix}.gru.bias_ih_l0")
-    gru_bhh = pytorch_state.get(f"{prefix}.gru.bias_hh_l0")
-    if gru_ih is not None:
+    # GRU layers
+    layer_idx = 0
+    while True:
+        gru_ih = pytorch_state.get(f"{prefix}.gru.weight_ih_l{layer_idx}")
+        gru_hh = pytorch_state.get(f"{prefix}.gru.weight_hh_l{layer_idx}")
+        if gru_ih is None or gru_hh is None:
+            break
+        gru_bih = pytorch_state.get(f"{prefix}.gru.bias_ih_l{layer_idx}")
+        gru_bhh = pytorch_state.get(f"{prefix}.gru.bias_hh_l{layer_idx}")
         gru_weights = convert_gru_weights(gru_ih, gru_hh, gru_bih, gru_bhh)
+        target_prefix = f"{mlx_prefix}.gru" if layer_idx == 0 else f"{mlx_prefix}.gru_layers.{layer_idx - 1}"
         for k, v in gru_weights.items():
-            result[f"{mlx_prefix}.gru.{k}"] = v
+            result[f"{target_prefix}.{k}"] = v
+        layer_idx += 1
 
     # Linear output (if exists)
-    lin_out_w = pytorch_state.get(f"{prefix}.linear_out.weight")
-    lin_out_b = pytorch_state.get(f"{prefix}.linear_out.bias")
+    lin_out_w = _first_present(pytorch_state, f"{prefix}.linear_out.weight", f"{prefix}.linear_out.0.weight")
+    lin_out_b = _first_present(pytorch_state, f"{prefix}.linear_out.bias", f"{prefix}.linear_out.0.bias")
     if lin_out_w is not None:
-        result[f"{mlx_prefix}.linear_out.weight"] = lin_out_w.T.reshape(1, -1, lin_out_w.shape[0])
+        if lin_out_w.ndim == 3:
+            result[f"{mlx_prefix}.linear_out.weight"] = lin_out_w
+        else:
+            result[f"{mlx_prefix}.linear_out.weight"] = lin_out_w.T.reshape(1, -1, lin_out_w.shape[0])
         if lin_out_b is not None:
             result[f"{mlx_prefix}.linear_out.bias"] = lin_out_b
+
+    return result
+
+
+def convert_df3_conv_block(
+    pytorch_state: Dict[str, np.ndarray],
+    prefix: str,
+    mlx_prefix: str,
+    *,
+    conv_index: int,
+    norm_index: Optional[int],
+    pointwise_index: Optional[int] = None,
+    is_transposed: bool = False,
+) -> Dict[str, np.ndarray]:
+    result = {}
+
+    conv_w = pytorch_state.get(f"{prefix}.{conv_index}.weight")
+    conv_b = pytorch_state.get(f"{prefix}.{conv_index}.bias")
+    if conv_w is not None:
+        if is_transposed:
+            result[f"{mlx_prefix}.conv.weight"] = transpose_conv_transpose_weight(conv_w)
+        else:
+            result[f"{mlx_prefix}.conv.weight"] = transpose_conv_weight(conv_w)
+    if conv_b is not None:
+        result[f"{mlx_prefix}.conv.bias"] = conv_b
+
+    if pointwise_index is not None:
+        pointwise_w = pytorch_state.get(f"{prefix}.{pointwise_index}.weight")
+        if pointwise_w is not None:
+            result[f"{mlx_prefix}.pointwise_conv.weight"] = transpose_conv_weight(pointwise_w)
+
+    if norm_index is not None:
+        bn_prefix = f"{prefix}.{norm_index}"
+        bn_w = pytorch_state.get(f"{bn_prefix}.weight")
+        if bn_w is not None:
+            result[f"{mlx_prefix}.norm_layer.weight"] = bn_w
+            result[f"{mlx_prefix}.norm_layer.bias"] = pytorch_state.get(f"{bn_prefix}.bias")
+            result[f"{mlx_prefix}.norm_layer.running_mean"] = pytorch_state.get(f"{bn_prefix}.running_mean")
+            result[f"{mlx_prefix}.norm_layer.running_var"] = pytorch_state.get(f"{bn_prefix}.running_var")
 
     return result
 
@@ -199,18 +257,19 @@ def convert_grouped_linear(
     """
     result = {}
 
-    weight = pytorch_state.get(f"{prefix}.weight")
-    bias = pytorch_state.get(f"{prefix}.bias")
+    weight = _first_present(pytorch_state, f"{prefix}.weight", f"{prefix}.0.weight")
+    bias = _first_present(pytorch_state, f"{prefix}.bias", f"{prefix}.0.bias")
 
     if weight is not None:
-        # PyTorch: (out, in) → MLX GroupedLinear: (groups, in/groups, out)
-        out_features, in_features = weight.shape
-        group_in = in_features // num_groups
-
-        # Reshape and transpose
-        weight_grouped = weight.reshape(num_groups, out_features // num_groups, group_in)
-        weight_grouped = np.transpose(weight_grouped, (0, 2, 1))  # (groups, in/groups, out/groups)
-        result[f"{mlx_prefix}.weight"] = weight_grouped
+        if weight.ndim == 3:
+            result[f"{mlx_prefix}.weight"] = weight
+        else:
+            # PyTorch: (out, in) → MLX GroupedLinear: (groups, in/groups, out)
+            out_features, in_features = weight.shape
+            group_in = in_features // num_groups
+            weight_grouped = weight.reshape(num_groups, out_features // num_groups, group_in)
+            weight_grouped = np.transpose(weight_grouped, (0, 2, 1))
+            result[f"{mlx_prefix}.weight"] = weight_grouped
 
     if bias is not None:
         result[f"{mlx_prefix}.bias"] = bias
@@ -231,19 +290,31 @@ def convert_dfnet3_checkpoint(
     """
     mlx_state = {}
 
-    # Encoder convolutions
-    for conv_name in ["erb_conv0", "erb_conv1", "erb_conv2", "erb_conv3", "df_conv0", "df_conv1"]:
-        pt_prefix = f"enc.{conv_name}"
-        mlx_prefix = f"encoder.{conv_name}"
-        mlx_state.update(convert_conv2d_norm_act(pytorch_state, pt_prefix, mlx_prefix))
+    encoder_conv_specs = [
+        ("enc.erb_conv0", "encoder.erb_conv0", 1, 2, None, False),
+        ("enc.erb_conv1", "encoder.erb_conv1", 0, 2, 1, False),
+        ("enc.erb_conv2", "encoder.erb_conv2", 0, 2, 1, False),
+        ("enc.erb_conv3", "encoder.erb_conv3", 0, 2, 1, False),
+        ("enc.df_conv0", "encoder.df_conv0", 1, 3, 2, False),
+        ("enc.df_conv1", "encoder.df_conv1", 0, 2, 1, False),
+    ]
+    for pt_prefix, mlx_prefix, conv_index, norm_index, pointwise_index, is_transposed in encoder_conv_specs:
+        mlx_state.update(
+            convert_df3_conv_block(
+                pytorch_state,
+                pt_prefix,
+                mlx_prefix,
+                conv_index=conv_index,
+                norm_index=norm_index,
+                pointwise_index=pointwise_index,
+                is_transposed=is_transposed,
+            )
+        )
 
     # Encoder DF embedding projection
     df_emb_w = pytorch_state.get("enc.df_fc_emb.weight")
-    if df_emb_w is not None:
-        # GroupedLinear with enc_lin_groups
-        mlx_state.update(
-            convert_grouped_linear(pytorch_state, "enc.df_fc_emb", "encoder.df_fc_emb.layers.0", num_groups=16)
-        )
+    if df_emb_w is not None or pytorch_state.get("enc.df_fc_emb.0.weight") is not None:
+        mlx_state.update(convert_grouped_linear(pytorch_state, "enc.df_fc_emb", "encoder.df_fc_emb.layers.0"))
 
     # Encoder embedding GRU (SqueezedGRU_S)
     mlx_state.update(convert_squeezed_gru_weights(pytorch_state, "enc.emb_gru", "encoder.emb_gru"))
@@ -251,43 +322,59 @@ def convert_dfnet3_checkpoint(
     # LSNR output
     lsnr_w = pytorch_state.get("enc.lsnr_fc.0.weight")
     if lsnr_w is not None:
-        mlx_state["encoder.lsnr_fc.layers.0.weight"] = lsnr_w.T
+        mlx_state["encoder.lsnr_fc.layers.0.weight"] = lsnr_w
         mlx_state["encoder.lsnr_fc.layers.0.bias"] = pytorch_state.get("enc.lsnr_fc.0.bias")
 
-    # ERB Decoder
-    erb_fc_w = pytorch_state.get("erb_dec.fc_emb.0.weight")
-    if erb_fc_w is not None:
+    # ERB Decoder GRU
+    mlx_state.update(convert_squeezed_gru_weights(pytorch_state, "erb_dec.emb_gru", "erb_decoder.emb_gru"))
+
+    # ERB decoder convolutions
+    erb_decoder_specs = [
+        ("erb_dec.conv3p", "erb_decoder.conv3p", 0, 1, None, False),
+        ("erb_dec.convt3", "erb_decoder.convt3", 0, 2, 1, False),
+        ("erb_dec.conv2p", "erb_decoder.conv2p", 0, 1, None, False),
+        ("erb_dec.convt2", "erb_decoder.convt2", 0, 2, 1, True),
+        ("erb_dec.conv1p", "erb_decoder.conv1p", 0, 1, None, False),
+        ("erb_dec.convt1", "erb_decoder.convt1", 0, 2, 1, True),
+        ("erb_dec.conv0p", "erb_decoder.conv0p", 0, 1, None, False),
+        ("erb_dec.conv0_out", "erb_decoder.conv0_out", 0, None, None, False),
+    ]
+    for pt_prefix, mlx_prefix, conv_index, norm_index, pointwise_index, is_transposed in erb_decoder_specs:
         mlx_state.update(
-            convert_grouped_linear(
-                pytorch_state, "erb_dec.fc_emb.0", "erb_decoder.fc_emb.layers.0.layers.0", num_groups=1
+            convert_df3_conv_block(
+                pytorch_state,
+                pt_prefix,
+                mlx_prefix,
+                conv_index=conv_index,
+                norm_index=norm_index,
+                pointwise_index=pointwise_index,
+                is_transposed=is_transposed,
             )
         )
 
-    # ERB decoder convolutions
-    for conv_idx in range(4):
-        pt_prefix = f"erb_dec.conv{conv_idx}p"
-        mlx_prefix = f"erb_decoder.conv{conv_idx}p"
-        mlx_state.update(convert_conv2d_norm_act(pytorch_state, pt_prefix, mlx_prefix))
-
-        if conv_idx < 3:
-            pt_prefix = f"erb_dec.convt{conv_idx + 1}"
-            mlx_prefix = f"erb_decoder.convt{conv_idx + 1}"
-            mlx_state.update(convert_conv2d_norm_act(pytorch_state, pt_prefix, mlx_prefix, is_transposed=True))
-
-    # ERB output conv
-    mlx_state.update(convert_conv2d_norm_act(pytorch_state, "erb_dec.conv_out", "erb_decoder.conv_out"))
-
     # DF Decoder
-    mlx_state.update(convert_conv2d_norm_act(pytorch_state, "df_dec.df_convp", "df_decoder.df_convp"))
+    mlx_state.update(
+        convert_df3_conv_block(
+            pytorch_state,
+            "df_dec.df_convp",
+            "df_decoder.df_convp",
+            conv_index=1,
+            norm_index=3,
+            pointwise_index=2,
+            is_transposed=False,
+        )
+    )
 
     # DF GRU
     mlx_state.update(convert_squeezed_gru_weights(pytorch_state, "df_dec.df_gru", "df_decoder.df_gru"))
 
+    # DF skip
+    mlx_state.update(convert_grouped_linear(pytorch_state, "df_dec.df_skip", "df_decoder.df_skip"))
+
     # DF output
-    df_out_w = pytorch_state.get("df_dec.df_out.0.weight")
+    df_out_w = _first_present(pytorch_state, "df_dec.df_out.weight", "df_dec.df_out.0.weight")
     if df_out_w is not None:
-        mlx_state["df_decoder.df_out.layers.0.weight"] = df_out_w.T.reshape(1, -1, df_out_w.shape[0])
-        mlx_state["df_decoder.df_out.layers.0.bias"] = pytorch_state.get("df_dec.df_out.0.bias")
+        mlx_state.update(convert_grouped_linear(pytorch_state, "df_dec.df_out", "df_decoder.df_out.layers.0"))
 
     # Convert all to mx.array
     return {k: mx.array(v) for k, v in mlx_state.items() if v is not None}

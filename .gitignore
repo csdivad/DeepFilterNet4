@@ -17,6 +17,12 @@ data/
 .dolt/
 *.db
 models/
+!models/
+models/*
+!models/mlx/
+models/mlx/*
+!models/mlx/DeepFilterNet3-MLX/
+!models/mlx/DeepFilterNet3-MLX/**
 *.npz
 
 ### Rust gitignore ###
