@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 import torch
@@ -339,6 +340,70 @@ def test_resolve_backend_falls_back_to_torch_dfnet3_when_mlx_init_fails(monkeypa
 
     assert backend is torch_backend
     assert seen == {"model_base_dir": "DeepFilterNet3", "requested_device": None}
+
+
+def test_load_mlx_backend_retries_after_resource_limit_and_clears_cache(monkeypatch) -> None:
+    module = _load_module()
+    clear_calls: list[str] = []
+    run_calls = {"count": 0}
+
+    class FakeMx:
+        def array(self, value):
+            return value
+
+        def clear_cache(self):
+            clear_calls.append("clear")
+
+    fake_mlx_enhance = types.SimpleNamespace(
+        mx=FakeMx(),
+        load_model=lambda model_path, epoch: (object(), types.SimpleNamespace(sr=48_000), None, None),
+    )
+
+    def fake_run(mlx_enhance_mod, model, audio_mx, params):
+        run_calls["count"] += 1
+        if run_calls["count"] == 1:
+            raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+        return torch.tensor([0.25, -0.5], dtype=torch.float32).numpy()
+
+    gc_calls: list[str] = []
+    monkeypatch.setattr(module, "_import_mlx_enhance_module", lambda: fake_mlx_enhance)
+    monkeypatch.setattr(module, "_run_mlx_enhancement", fake_run)
+    monkeypatch.setattr(module.gc, "collect", lambda: gc_calls.append("gc"))
+
+    backend = module.load_mlx_backend("DeepFilterNet3-MLX")
+    enhanced = backend.enhance_audio(torch.tensor([1.0, -1.0], dtype=torch.float32))
+
+    assert torch.allclose(enhanced, torch.tensor([0.25, -0.5], dtype=torch.float32))
+    assert run_calls["count"] == 2
+    assert clear_calls == ["clear"]
+    assert gc_calls == ["gc"]
+
+
+def test_load_mlx_backend_periodically_clears_cache(monkeypatch) -> None:
+    module = _load_module()
+    clear_calls: list[str] = []
+
+    class FakeMx:
+        def array(self, value):
+            return value
+
+        def clear_cache(self):
+            clear_calls.append("clear")
+
+    fake_mlx_enhance = types.SimpleNamespace(
+        mx=FakeMx(),
+        load_model=lambda model_path, epoch: (object(), types.SimpleNamespace(sr=48_000), None, None),
+    )
+
+    monkeypatch.setattr(module, "_import_mlx_enhance_module", lambda: fake_mlx_enhance)
+    monkeypatch.setattr(module, "_run_mlx_enhancement", lambda *args, **kwargs: torch.tensor([0.1]).numpy())
+    monkeypatch.setattr(module, "MLX_CLEAR_CACHE_INTERVAL", 2)
+
+    backend = module.load_mlx_backend("DeepFilterNet3-MLX")
+    _ = backend.enhance_audio(torch.tensor([1.0], dtype=torch.float32))
+    _ = backend.enhance_audio(torch.tensor([2.0], dtype=torch.float32))
+
+    assert clear_calls == ["clear"]
 
 
 def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monkeypatch) -> None:

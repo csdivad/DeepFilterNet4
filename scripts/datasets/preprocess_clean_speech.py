@@ -9,6 +9,7 @@ be fed directly into ``build_mlx_datastore.sh`` / ``df_mlx.build_audio_cache``.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -49,6 +50,7 @@ NON_SPEECH_PATH_MARKERS = frozenset(
 
 KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet3-mlx", "deepfilternet4-mlx"})
 KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
+MLX_CLEAR_CACHE_INTERVAL = 32
 
 
 class PreprocessProgressStats:
@@ -302,20 +304,84 @@ def load_torch_backend(model_base_dir: str, requested_device: str | None) -> Enh
     return EnhanceBackend(name="torch", sample_rate=df_sr, enhance_audio=enhance_audio)
 
 
-def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
+def _import_mlx_enhance_module():
     from df_mlx import enhance as mlx_enhance_mod
 
+    return mlx_enhance_mod
+
+
+def clear_mlx_cache(mx_module) -> None:
+    clear_cache = getattr(mx_module, "clear_cache", None)
+    if callable(clear_cache):
+        clear_cache()
+        return
+    metal = getattr(mx_module, "metal", None)
+    if metal is not None:
+        metal_clear_cache = getattr(metal, "clear_cache", None)
+        if callable(metal_clear_cache):
+            metal_clear_cache()
+
+
+def is_mlx_resource_limit_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "metal::malloc" in message or ("resource limit" in message and "metal" in message)
+
+
+def _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params):
+    enhanced = mlx_enhance_mod.enhance(
+        model,
+        audio_mx,
+        params,
+        compensate_delay=True,
+    )
+    mlx_enhance_mod.mx.eval(enhanced)
+    return enhanced
+
+
+def _mlx_output_to_torch(enhanced) -> torch.Tensor:
+    enhanced_np = np.array(enhanced, copy=True)
+    return torch.from_numpy(enhanced_np)
+
+
+def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
+    mlx_enhance_mod = _import_mlx_enhance_module()
+
     model, params, _, _ = mlx_enhance_mod.load_model(model_path=model_base_dir, epoch="best")
+    inference_calls = 0
 
     def enhance_audio(audio: torch.Tensor) -> torch.Tensor:
-        enhanced = mlx_enhance_mod.enhance(
-            model,
-            mlx_enhance_mod.mx.array(audio.detach().cpu().numpy()),
-            params,
-            compensate_delay=True,
-        )
-        mlx_enhance_mod.mx.eval(enhanced)
-        return torch.from_numpy(np.asarray(enhanced))
+        nonlocal inference_calls
+
+        audio_np = audio.detach().cpu().numpy()
+        audio_mx = None
+        enhanced = None
+        result = None
+        try:
+            audio_mx = mlx_enhance_mod.mx.array(audio_np)
+            try:
+                enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
+            except Exception as exc:
+                if not is_mlx_resource_limit_error(exc):
+                    raise
+                clear_mlx_cache(mlx_enhance_mod.mx)
+                gc.collect()
+                audio_mx = mlx_enhance_mod.mx.array(audio_np)
+                try:
+                    enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
+                except Exception:
+                    clear_mlx_cache(mlx_enhance_mod.mx)
+                    gc.collect()
+                    raise
+            result = _mlx_output_to_torch(enhanced)
+            return result
+        finally:
+            inference_calls += 1
+            if inference_calls % MLX_CLEAR_CACHE_INTERVAL == 0:
+                clear_mlx_cache(mlx_enhance_mod.mx)
+                gc.collect()
+            del audio_mx
+            del enhanced
+            del result
 
     return EnhanceBackend(name="mlx", sample_rate=params.sr, enhance_audio=enhance_audio)
 
