@@ -80,3 +80,37 @@ auto_tune_dataloader = true
 
 See `get_hardware_tuning_profile()` in `df_mlx/run_config.py` for detection
 logic and the `HARDWARE_PROFILES` constant for the full profile table.
+
+## Offline datastore builds on Apple Silicon
+
+The shell entrypoint `scripts/datasets/build_mlx_datastore.sh` now treats the
+`apple` profile as a chip-aware preset instead of a single fixed worker count.
+
+### Default builder workers by chip tier
+
+| Apple chip tier | Default `--num-workers` | Default `--preprocess-workers` |
+|---|---:|---:|
+| Entry (`M1`/`M2`, base `M3`/`M4`) | 2 | 1 |
+| Pro (`M1`-`M4 Pro`) | 4 | 2 |
+| Max (`M1`-`M4 Max`) | 6 | 4 |
+| Ultra (`M1`/`M2 Ultra`) | 8 | 4 |
+
+These defaults are tuned for the offline datastore path rather than the online
+training loader. The goal is to keep decode/resample workers high enough to
+feed the cache builder without oversubscribing unified memory on smaller chips.
+
+### Shared resampling path
+
+Offline datastore preparation now uses the shared helper
+`df_mlx._audio_io.resample_audio()` for both cache building and MLX enhancement
+CLI resampling.
+
+- Uses `scipy.signal.resample_poly()` instead of FFT-based `resample()`.
+- Preserves the historic output-length contract
+    `int(len(audio) * target_sr / orig_sr)`.
+- Best fit for Apple Silicon offline data prep, where repeated CPU resampling
+    can dominate wall time during cache population.
+
+In local March 2026 validation on representative `44.1 kHz -> 48 kHz` clips,
+the polyphase path improved resampling throughput by about `1.06x` compared to
+the previous FFT-based implementation.

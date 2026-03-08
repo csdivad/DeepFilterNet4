@@ -23,6 +23,7 @@ import mlx.core as mx
 import numpy as np
 from loguru import logger
 
+from ._audio_io import resample_audio
 from .config import ModelParams4, load_config
 from .deepfilternet3 import DFNet3, ModelParams3, build_dfnet3_model, load_dfnet3_config
 from .model import DfNet4, StreamingDfNet4
@@ -185,7 +186,7 @@ def resample(
     orig_sr: int,
     target_sr: int,
 ) -> np.ndarray:
-    """Resample audio using scipy.
+    """Resample audio using the shared polyphase helper.
 
     Args:
         audio: Input audio
@@ -198,20 +199,9 @@ def resample(
     if orig_sr == target_sr:
         return np.array(audio) if isinstance(audio, mx.array) else audio
 
-    try:
-        from scipy import signal
-    except ImportError:
-        raise ImportError("scipy is required for resampling: pip install scipy")
-
     if isinstance(audio, mx.array):
         audio = np.array(audio)
-
-    # Compute resampling ratio
-    ratio = target_sr / orig_sr
-    new_length = int(len(audio) * ratio)
-
-    resampled: np.ndarray = signal.resample(audio, new_length)  # type: ignore[assignment]
-    return resampled
+    return resample_audio(audio, orig_sr, target_sr)
 
 
 def detect_model_family(config_path: Path) -> str:

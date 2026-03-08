@@ -6,6 +6,35 @@ DEFAULT_DATA_DIR="/Volumes/TrainingData/datasets"
 if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
+
+detect_apple_silicon_tier() {
+  if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "non-apple"
+    return
+  fi
+
+  local brand_string
+  brand_string="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  case "${brand_string}" in
+    *Ultra*)
+      echo "ultra"
+      ;;
+    *Max*)
+      echo "max"
+      ;;
+    *Pro*)
+      echo "pro"
+      ;;
+    Apple*)
+      echo "entry"
+      ;;
+    *)
+      echo "entry"
+      ;;
+  esac
+}
+
+APPLE_SILICON_TIER="$(detect_apple_silicon_tier)"
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "${PYTHON_BIN}" ]]; then
   if [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
@@ -41,6 +70,7 @@ Core options:
   --output-dir PATH           Output cache directory
   --list-dir PATH             Directory containing clean/noise/RIR file lists
   --profile NAME              prototype | production | apple
+                              (apple auto-tunes worker defaults by chip class)
   --clean-list PATH           Clean speech file list
   --noise-list PATH           Noise/music file list
   --rir-list PATH             Optional RIR file list
@@ -68,7 +98,8 @@ Optional clean-speech preprocessing:
                               models/mlx/DeepFilterNet3-MLX on Apple Silicon
                               when available, otherwise DeepFilterNet3)
   --preprocess-device DEV     cpu | cuda | mps | auto
-  --preprocess-workers N      Input-loading workers for preprocessing (default: 2)
+  --preprocess-workers N      Input-loading workers for preprocessing
+                              (default: chip-aware under apple profile)
   --preprocess-probe-workers N
                               Parallel ffprobe workers used to estimate pending
                               clean-speech duration before enhancement
@@ -271,7 +302,6 @@ PREPROCESS_BASE_DIR="${CLI_PREPROCESS_BASE_DIR:-${PREPROCESS_BASE_DIR:-${DATA_DI
 PREPROCESS_OUTPUT_LIST="${CLI_PREPROCESS_OUTPUT_LIST:-${PREPROCESS_OUTPUT_LIST:-${LIST_DIR}/clean_all.preprocessed.txt}}"
 PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-${DEFAULT_PREPROCESS_MODEL}}}"
 PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
-PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-2}}"
 PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
 PREPROCESS_PROBE_CACHE="${CLI_PREPROCESS_PROBE_CACHE:-${PREPROCESS_PROBE_CACHE:-}}"
 
@@ -285,7 +315,24 @@ case "${PROFILE}" in
     SHARD_SIZE_DEFAULT=500
     ;;
   apple)
-    NUM_WORKERS_DEFAULT=4
+    case "${APPLE_SILICON_TIER}" in
+      ultra)
+        NUM_WORKERS_DEFAULT=8
+        PREPROCESS_WORKERS_DEFAULT=4
+        ;;
+      max)
+        NUM_WORKERS_DEFAULT=6
+        PREPROCESS_WORKERS_DEFAULT=4
+        ;;
+      pro)
+        NUM_WORKERS_DEFAULT=4
+        PREPROCESS_WORKERS_DEFAULT=2
+        ;;
+      *)
+        NUM_WORKERS_DEFAULT=2
+        PREPROCESS_WORKERS_DEFAULT=1
+        ;;
+    esac
     SHARD_SIZE_DEFAULT=500
     ;;
   *)
@@ -294,16 +341,24 @@ case "${PROFILE}" in
     ;;
 esac
 
+if [[ "${PROFILE}" != "apple" ]]; then
+  PREPROCESS_WORKERS_DEFAULT=2
+fi
+
 NUM_WORKERS="${CLI_NUM_WORKERS:-${NUM_WORKERS:-${NUM_WORKERS_DEFAULT}}}"
 SHARD_SIZE="${CLI_SHARD_SIZE:-${SHARD_SIZE:-${SHARD_SIZE_DEFAULT}}}"
 MAX_PENDING_BYTES="${CLI_MAX_PENDING_BYTES:-${MAX_PENDING_BYTES:-8}}"
 MIN_DURATION="${CLI_MIN_DURATION:-${MIN_DURATION:-${SEGMENT_LENGTH}}}"
 MERGE_SHORT="${CLI_MERGE_SHORT:-${MERGE_SHORT:-false}}"
+PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-${PREPROCESS_WORKERS_DEFAULT}}}"
 
 echo "=============================================="
 echo "DeepFilterNet MLX Audio Cache Builder"
 echo "=============================================="
 echo "Profile:            ${PROFILE}"
+if [[ "${PROFILE}" == "apple" ]]; then
+  echo "Apple tier:         ${APPLE_SILICON_TIER}"
+fi
 echo "Root dir:           ${ROOT_DIR}"
 echo "Python:             ${PYTHON_BIN}"
 echo "Data dir:           ${DATA_DIR}"
