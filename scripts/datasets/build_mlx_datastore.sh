@@ -72,6 +72,8 @@ Optional clean-speech preprocessing:
   --preprocess-probe-workers N
                               Parallel ffprobe workers used to estimate pending
                               clean-speech duration before enhancement
+  --preprocess-probe-cache P  Optional JSON cache for ffprobe duration results
+                              (default: auto path derived from the preprocess output list)
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
 
 General:
@@ -118,6 +120,7 @@ CLI_PREPROCESS_MODEL=""
 CLI_PREPROCESS_DEVICE=""
 CLI_PREPROCESS_WORKERS=""
 CLI_PREPROCESS_PROBE_WORKERS=""
+CLI_PREPROCESS_PROBE_CACHE=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
@@ -228,6 +231,10 @@ while [[ $# -gt 0 ]]; do
       CLI_PREPROCESS_PROBE_WORKERS="$2"
       shift 2
       ;;
+    --preprocess-probe-cache)
+      CLI_PREPROCESS_PROBE_CACHE="$2"
+      shift 2
+      ;;
     --preprocess-overwrite)
       PREPROCESS_OVERWRITE=1
       shift
@@ -266,6 +273,7 @@ PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-${DEFAULT_PREPROCE
 PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
 PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-2}}"
 PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
+PREPROCESS_PROBE_CACHE="${CLI_PREPROCESS_PROBE_CACHE:-${PREPROCESS_PROBE_CACHE:-}}"
 
 case "${PROFILE}" in
   prototype)
@@ -330,6 +338,11 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   else
     echo "Preprocess probe workers: auto"
   fi
+  if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
+    echo "Preprocess probe cache: ${PREPROCESS_PROBE_CACHE}"
+  else
+    echo "Preprocess probe cache: auto"
+  fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     echo "Preprocess device:  ${PREPROCESS_DEVICE}"
   else
@@ -378,6 +391,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   )
   if [[ -n "${PREPROCESS_PROBE_WORKERS}" ]]; then
     preprocess_cmd+=(--probe-workers "${PREPROCESS_PROBE_WORKERS}")
+  fi
+  if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
+    preprocess_cmd+=(--probe-cache "${PREPROCESS_PROBE_CACHE}")
   fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")

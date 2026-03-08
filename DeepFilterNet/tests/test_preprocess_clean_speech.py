@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -112,6 +113,7 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
             device=None,
             num_workers=2,
             probe_workers=None,
+            probe_cache=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -120,7 +122,7 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(
         module,
         "probe_audio_durations",
-        lambda paths, ffprobe_bin, num_workers: {path: fake_durations[path] for path in paths},
+        lambda paths, ffprobe_bin, num_workers, cache_path=None: {path: fake_durations[path] for path in paths},
     )
     monkeypatch.setattr(module, "init_df", lambda **kwargs: (object(), object(), None, None))
     monkeypatch.setattr(module, "ModelParams", lambda: FakeParams())
@@ -194,6 +196,7 @@ def test_main_fully_resumed_run_skips_ffprobe_and_backend_init(tmp_path: Path, m
             device=None,
             num_workers=2,
             probe_workers=None,
+            probe_cache=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -247,6 +250,7 @@ def test_main_rejects_colliding_output_paths(tmp_path: Path, monkeypatch) -> Non
             device=None,
             num_workers=0,
             probe_workers=None,
+            probe_cache=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -362,6 +366,7 @@ def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monk
             device=None,
             num_workers=0,
             probe_workers=None,
+            probe_cache=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -370,7 +375,7 @@ def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monk
     monkeypatch.setattr(
         module,
         "probe_audio_durations",
-        lambda paths, ffprobe_bin, num_workers: {noise_source.resolve(): 0.5},
+        lambda paths, ffprobe_bin, num_workers, cache_path=None: {noise_source.resolve(): 0.5},
     )
 
     try:
@@ -520,3 +525,109 @@ def test_probe_audio_durations_uses_requested_parallelism_and_updates_progress(t
     assert progress_config["updated"] == 3
     assert "probe=" in str(progress_config["postfix"])
     assert "audio=6.0s" in str(progress_config["postfix"])
+
+
+def test_probe_audio_durations_reuses_cache_for_unchanged_files(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+
+    cached_source = tmp_path / "cached.wav"
+    uncached_source = tmp_path / "uncached.wav"
+    cached_source.write_bytes(b"cached")
+    uncached_source.write_bytes(b"uncached")
+    cache_path = tmp_path / "probe-cache.json"
+
+    cached_entry = module._build_probe_cache_entry(cached_source, 1.5)
+    module.write_probe_cache(cache_path, {cached_source: cached_entry})
+
+    seen_probes: list[Path] = []
+
+    class FakeExecutor:
+        def __init__(self, max_workers: int):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, *args, **kwargs):
+            future = module.Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:  # pragma: no cover - defensive guard
+                future.set_exception(exc)
+            return future
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        module,
+        "probe_audio_duration_seconds",
+        lambda path, ffprobe_bin: seen_probes.append(path) or 2.25,
+    )
+
+    durations = module.probe_audio_durations(
+        [cached_source, uncached_source],
+        "ffprobe",
+        num_workers=3,
+        cache_path=cache_path,
+    )
+
+    assert durations == {cached_source: 1.5, uncached_source: 2.25}
+    assert seen_probes == [uncached_source]
+
+    cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert cache_payload["entries"][str(cached_source)]["duration_seconds"] == 1.5
+    assert cache_payload["entries"][str(uncached_source)]["duration_seconds"] == 2.25
+
+
+def test_probe_audio_durations_reprobes_when_file_stat_changes(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+
+    source = tmp_path / "clip.wav"
+    source.write_bytes(b"old")
+    cache_path = tmp_path / "probe-cache.json"
+    module.write_probe_cache(cache_path, {source: module._build_probe_cache_entry(source, 1.0)})
+
+    source.write_bytes(b"new-content")
+    seen_probes: list[Path] = []
+
+    class FakeExecutor:
+        def __init__(self, max_workers: int):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, *args, **kwargs):
+            future = module.Future()
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except Exception as exc:  # pragma: no cover - defensive guard
+                future.set_exception(exc)
+            return future
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        module,
+        "probe_audio_duration_seconds",
+        lambda path, ffprobe_bin: seen_probes.append(path) or 3.5,
+    )
+
+    durations = module.probe_audio_durations([source], "ffprobe", num_workers=1, cache_path=cache_path)
+
+    assert durations == {source: 3.5}
+    assert seen_probes == [source]
+
+
+def test_resolve_probe_cache_path_defaults_next_to_output_list(tmp_path: Path) -> None:
+    module = _load_module()
+
+    output_list = tmp_path / "clean_all.preprocessed.txt"
+
+    cache_path = module.resolve_probe_cache_path(output_list, explicit_cache_path=None)
+
+    assert cache_path == tmp_path / "clean_all.preprocessed.ffprobe-cache.json"

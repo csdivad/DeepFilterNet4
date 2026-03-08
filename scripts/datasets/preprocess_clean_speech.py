@@ -9,6 +9,7 @@ be fed directly into ``build_mlx_datastore.sh`` / ``df_mlx.build_audio_cache``.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import platform
@@ -18,7 +19,7 @@ import sys
 import time
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, NamedTuple
 
 import numpy as np
 import torch
@@ -68,6 +69,12 @@ class EnhanceBackend:
         self.enhance_audio = enhance_audio
 
 
+class ProbeCacheEntry(NamedTuple):
+    duration_seconds: float
+    size_bytes: int
+    mtime_ns: int
+
+
 def read_file_list(path: Path) -> List[Path]:
     files: List[Path] = []
     with path.open() as handle:
@@ -98,6 +105,74 @@ def write_output_list(paths: Iterable[Path], output_list: Path) -> None:
 
 def write_resumable_output_list(output_paths: list[Path], completed_paths: set[Path], output_list: Path) -> None:
     write_output_list((path for path in output_paths if path in completed_paths), output_list)
+
+
+def resolve_probe_cache_path(output_list: Path, explicit_cache_path: str | None) -> Path:
+    if explicit_cache_path:
+        return Path(explicit_cache_path).expanduser().resolve()
+    cache_stem = output_list.stem if output_list.suffix else output_list.name
+    return output_list.with_name(f"{cache_stem}.ffprobe-cache.json")
+
+
+def _build_probe_cache_entry(path: Path, duration_seconds: float) -> ProbeCacheEntry:
+    stat = path.stat()
+    return ProbeCacheEntry(
+        duration_seconds=duration_seconds,
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+    )
+
+
+def load_probe_cache(path: Path) -> dict[Path, ProbeCacheEntry]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[warn] Ignoring unreadable ffprobe cache {path}: {exc}", file=sys.stderr)
+        return {}
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+
+    cache: dict[Path, ProbeCacheEntry] = {}
+    for raw_path, raw_entry in entries.items():
+        if not isinstance(raw_path, str) or not isinstance(raw_entry, dict):
+            continue
+        try:
+            duration_seconds = float(raw_entry["duration_seconds"])
+            size_bytes = int(raw_entry["size_bytes"])
+            mtime_ns = int(raw_entry["mtime_ns"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(duration_seconds) or duration_seconds < 0.0 or size_bytes < 0 or mtime_ns < 0:
+            continue
+        cache[Path(raw_path)] = ProbeCacheEntry(
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            mtime_ns=mtime_ns,
+        )
+    return cache
+
+
+def write_probe_cache(path: Path, entries: dict[Path, ProbeCacheEntry]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "entries": {
+            str(source_path): {
+                "duration_seconds": entry.duration_seconds,
+                "size_bytes": entry.size_bytes,
+                "mtime_ns": entry.mtime_ns,
+            }
+            for source_path, entry in sorted(entries.items(), key=lambda item: str(item[0]))
+        },
+    }
+    temp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(path)
 
 
 def find_output_path_collisions(sources: list[Path], output_paths: list[Path]) -> dict[Path, list[Path]]:
@@ -283,20 +358,49 @@ def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
     return duration_seconds
 
 
-def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_workers: int) -> dict[Path, float]:
+def probe_audio_durations(
+    paths: Iterable[Path],
+    ffprobe_bin: str,
+    *,
+    num_workers: int,
+    cache_path: Path | None = None,
+) -> dict[Path, float]:
     ordered_paths = list(paths)
     if not ordered_paths:
         return {}
 
+    cache_entries = load_probe_cache(cache_path) if cache_path is not None else {}
     durations: dict[Path, float] = {}
     failures: list[str] = []
     discovered_audio_seconds = 0.0
     start_time = time.perf_counter()
-    max_inflight = max(1, min(len(ordered_paths), max(4, num_workers * 4)))
+    probe_paths: list[Path] = []
+
+    for path in ordered_paths:
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+            continue
+        cached = cache_entries.get(path)
+        if (
+            cached is not None
+            and cached.size_bytes == stat.st_size
+            and cached.mtime_ns == stat.st_mtime_ns
+            and math.isfinite(cached.duration_seconds)
+            and cached.duration_seconds >= 0.0
+        ):
+            durations[path] = cached.duration_seconds
+            discovered_audio_seconds += cached.duration_seconds
+        else:
+            probe_paths.append(path)
+
+    max_inflight = max(1, min(len(probe_paths), max(4, num_workers * 4))) if probe_paths else 1
+    completed_files = len(durations)
 
     with ThreadPoolExecutor(max_workers=max(1, num_workers)) as probe_pool:
         pending_futures: dict[Future[float], Path] = {}
-        path_iter = iter(ordered_paths)
+        path_iter = iter(probe_paths)
 
         def schedule_probe_jobs() -> None:
             while len(pending_futures) < max_inflight:
@@ -308,6 +412,7 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
 
         with tqdm(
             total=len(ordered_paths),
+            initial=completed_files,
             desc="ffprobe",
             unit="file",
             dynamic_ncols=True,
@@ -317,10 +422,15 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
         ) as progress:
             schedule_probe_jobs()
             progress.set_postfix_str(
-                build_probe_postfix(0, len(ordered_paths), discovered_audio_seconds, 0, start_time=start_time),
+                build_probe_postfix(
+                    completed_files,
+                    len(ordered_paths),
+                    discovered_audio_seconds,
+                    len(failures),
+                    start_time=start_time,
+                ),
                 refresh=False,
             )
-            completed_files = 0
             while pending_futures:
                 completed, _ = wait(set(pending_futures), return_when=FIRST_COMPLETED)
                 for future in completed:
@@ -329,6 +439,7 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
                         duration_seconds = future.result()
                         durations[path] = duration_seconds
                         discovered_audio_seconds += duration_seconds
+                        cache_entries[path] = _build_probe_cache_entry(path, duration_seconds)
                     except Exception as exc:  # pragma: no cover - exercised via main guard path
                         failures.append(f"{path}: {exc}")
                     completed_files += 1
@@ -344,6 +455,9 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
                     ),
                     refresh=False,
                 )
+
+    if cache_path is not None and cache_entries:
+        write_probe_cache(cache_path, cache_entries)
     if failures:
         preview = "\n".join(f"  {item}" for item in failures[:10])
         remainder = len(failures) - min(len(failures), 10)
@@ -553,6 +667,11 @@ def parse_args() -> argparse.Namespace:
         help="Parallel ffprobe workers used to estimate pending audio duration before enhancement (default: auto).",
     )
     parser.add_argument(
+        "--probe-cache",
+        default=None,
+        help="Optional JSON cache for ffprobe duration results; unchanged files reuse cached durations on reruns.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Rebuild outputs even when the mirrored file already exists.",
@@ -605,6 +724,7 @@ def main() -> int:
     completed_count = len(sources) - len(pending_sources)
     save_workers = choose_save_workers(args.num_workers, effective_device)
     probe_workers = max(1, getattr(args, "probe_workers", 0) or choose_probe_workers(args.num_workers))
+    probe_cache_path = resolve_probe_cache_path(output_list, getattr(args, "probe_cache", None))
 
     write_resumable_output_list(output_paths, completed_paths, output_list)
 
@@ -617,6 +737,7 @@ def main() -> int:
     print(f"Pending files:   {len(pending_sources):,}")
     print(f"Output root:     {output_root}")
     print(f"Output list:     {output_list}")
+    print(f"Probe cache:     {probe_cache_path}")
     print(f"Base dir:        {base_dir}")
     print(f"Model:           {args.model_base_dir}")
     print(f"Device:          {effective_device}")
@@ -633,7 +754,12 @@ def main() -> int:
 
     ffprobe_bin = resolve_ffprobe_bin()
     print(f"Duration scan:   ffprobe over {len(pending_sources):,} pending files")
-    pending_source_durations = probe_audio_durations(pending_sources, ffprobe_bin, num_workers=probe_workers)
+    pending_source_durations = probe_audio_durations(
+        pending_sources,
+        ffprobe_bin,
+        num_workers=probe_workers,
+        cache_path=probe_cache_path,
+    )
     total_audio_seconds = sum(pending_source_durations.values())
     print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 
