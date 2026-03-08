@@ -53,10 +53,12 @@ Audio/cache options:
 
 Optional clean-speech preprocessing:
   --preprocess-clean-speech   Enhance clean speech with DeepFilterNet3 before caching
+                              (speech list only; obvious noise/RIR inputs are rejected)
   --preprocess-output-root P  Directory for preprocessed speech mirror tree
   --preprocess-base-dir P     Base dir used to preserve relative paths
   --preprocess-output-list P  File list written for preprocessed outputs
-  --preprocess-model NAME     Model name or model dir (default: DeepFilterNet3)
+  --preprocess-model NAME     Model name or model dir (default: DeepFilterNet3;
+                              Apple Silicon auto-prefers df_mlx for MLX models)
   --preprocess-device DEV     cpu | cuda | mps | auto
   --preprocess-workers N      Input-loading workers for preprocessing (default: 2)
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
@@ -301,6 +303,7 @@ echo "Max pending budget: ${MAX_PENDING_BYTES} GB"
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   echo "Preprocess speech:  enabled"
   echo "Preprocess model:   ${PREPROCESS_MODEL}"
+  echo "Preprocess backend: auto (Apple Silicon prefers df_mlx for MLX models)"
   echo "Preprocess root:    ${PREPROCESS_OUTPUT_ROOT}"
   echo "Preprocess base:    ${PREPROCESS_BASE_DIR}"
   echo "Preprocess list:    ${PREPROCESS_OUTPUT_LIST}"
@@ -340,6 +343,7 @@ cd "${ROOT_DIR}/DeepFilterNet"
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   echo ""
   echo "Running clean-speech preprocessing before cache build..."
+  echo "Only the clean/speech list is eligible; noise and RIR lists are left untouched."
   preprocess_cmd=(
     "${PYTHON_BIN}"
     "${ROOT_DIR}/scripts/datasets/preprocess_clean_speech.py"

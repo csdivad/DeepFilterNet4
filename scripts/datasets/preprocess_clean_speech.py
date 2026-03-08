@@ -9,13 +9,18 @@ be fed directly into ``build_mlx_datastore.sh`` / ``df_mlx.build_audio_cache``.
 from __future__ import annotations
 
 import argparse
+import math
 import os
+import platform
+import shutil
+import subprocess
 import sys
 import time
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Iterable, List
+from typing import Callable, Iterable, List
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -24,15 +29,39 @@ from df.enhance import AudioDataset, enhance, init_df
 from df.io import resample, save_audio
 from df.model import ModelParams
 
+NON_SPEECH_PATH_MARKERS = frozenset(
+    {
+        "noise",
+        "music",
+        "musan",
+        "fsd50k",
+        "rir",
+        "openair",
+        "acousticrooms",
+        "air",
+    }
+)
+
+KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet4-mlx"})
+KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
+
 
 class PreprocessProgressStats:
     def __init__(self, start_time: float) -> None:
         self.start_time = start_time
         self.enhance_count = 0
         self.enhance_seconds = 0.0
+        self.processed_audio_seconds = 0.0
         self.save_count = 0
         self.save_seconds = 0.0
         self.queue_high_water = 0
+
+
+class EnhanceBackend:
+    def __init__(self, name: str, sample_rate: int, enhance_audio: Callable[[torch.Tensor], torch.Tensor]) -> None:
+        self.name = name
+        self.sample_rate = sample_rate
+        self.enhance_audio = enhance_audio
 
 
 def read_file_list(path: Path) -> List[Path]:
@@ -63,6 +92,85 @@ def write_output_list(paths: Iterable[Path], output_list: Path) -> None:
     temp_output_list.replace(output_list)
 
 
+def write_resumable_output_list(output_paths: list[Path], completed_paths: set[Path], output_list: Path) -> None:
+    write_output_list((path for path in output_paths if path in completed_paths), output_list)
+
+
+def find_output_path_collisions(sources: list[Path], output_paths: list[Path]) -> dict[Path, list[Path]]:
+    collisions: dict[Path, list[Path]] = {}
+    mapped_sources: dict[Path, list[Path]] = {}
+    for source, output_path in zip(sources, output_paths):
+        existing_sources = mapped_sources.setdefault(output_path, [])
+        if source not in existing_sources:
+            existing_sources.append(source)
+    for output_path, output_sources in mapped_sources.items():
+        if len(output_sources) > 1:
+            collisions[output_path] = output_sources
+    return collisions
+
+
+def raise_on_output_path_collisions(sources: list[Path], output_paths: list[Path]) -> None:
+    collisions = find_output_path_collisions(sources, output_paths)
+    if not collisions:
+        return
+    preview_lines: list[str] = []
+    for output_path, output_sources in list(collisions.items())[:10]:
+        joined_sources = ", ".join(str(source) for source in output_sources[:3])
+        if len(output_sources) > 3:
+            joined_sources = f"{joined_sources}, ..."
+        preview_lines.append(f"  {output_path} <- {joined_sources}")
+    remainder = len(collisions) - min(len(collisions), 10)
+    if remainder > 0:
+        preview_lines.append(f"  ... and {remainder} more")
+    raise SystemExit(
+        "Multiple source files map to the same preprocess output path. "
+        "Use a broader --base-dir or a different --output-root so each source mirrors uniquely.\n"
+        + "\n".join(preview_lines)
+    )
+
+
+def path_labels(path: Path) -> set[str]:
+    labels: set[str] = set()
+    anchor = path.anchor.lower()
+    for part in path.parts:
+        lower_part = part.lower()
+        if lower_part == anchor:
+            continue
+        labels.add(lower_part)
+        stem = Path(lower_part).stem
+        if stem:
+            labels.add(stem)
+    return labels
+
+
+def find_ineligible_sources(paths: Iterable[Path]) -> List[Path]:
+    return [path for path in paths if path_labels(path) & NON_SPEECH_PATH_MARKERS]
+
+
+def running_on_apple_silicon() -> bool:
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+def model_requests_mlx(model_base_dir: str | None) -> bool:
+    if not model_base_dir:
+        return False
+    lowered = str(model_base_dir).strip().lower()
+    if lowered in KNOWN_MLX_MODEL_NAMES:
+        return True
+    path = Path(model_base_dir).expanduser()
+    if lowered in KNOWN_TORCH_MODEL_NAMES:
+        return False
+    return "mlx" in lowered or path.name.lower() in KNOWN_MLX_MODEL_NAMES or path.is_dir()
+
+
+def should_prefer_mlx_backend(model_base_dir: str | None, requested_device: str | None) -> bool:
+    if not running_on_apple_silicon():
+        return False
+    if requested_device and requested_device.lower() not in {"mps"}:
+        return False
+    return model_requests_mlx(model_base_dir)
+
+
 def is_complete_output(path: Path) -> bool:
     try:
         return path.is_file() and path.stat().st_size > 0
@@ -72,6 +180,106 @@ def is_complete_output(path: Path) -> bool:
 
 def build_temp_output_path(target: Path) -> Path:
     return target.with_name(f".{target.name}.partial.{os.getpid()}")
+
+
+def resolve_ffprobe_bin() -> str:
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffprobe_bin is None:
+        raise SystemExit("ffprobe is required for duration-based preprocessing progress but was not found on PATH")
+    return ffprobe_bin
+
+
+def load_torch_backend(model_base_dir: str, requested_device: str | None) -> EnhanceBackend:
+    model, df_state, _, _ = init_df(
+        model_base_dir=model_base_dir,
+        post_filter=False,
+        log_level="INFO",
+        log_file=None,
+        config_allow_defaults=True,
+        epoch="best",
+        default_model="DeepFilterNet3",
+        mask_only=False,
+        device=requested_device,
+    )
+    df_sr = ModelParams().sr
+
+    def enhance_audio(audio: torch.Tensor) -> torch.Tensor:
+        return enhance(model, df_state, audio, pad=True, device=requested_device).detach().cpu()
+
+    return EnhanceBackend(name="torch", sample_rate=df_sr, enhance_audio=enhance_audio)
+
+
+def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
+    from df_mlx import enhance as mlx_enhance_mod
+
+    model, params, _, _ = mlx_enhance_mod.load_model(model_path=model_base_dir, epoch="best")
+
+    def enhance_audio(audio: torch.Tensor) -> torch.Tensor:
+        enhanced = mlx_enhance_mod.enhance(
+            model,
+            mlx_enhance_mod.mx.array(audio.detach().cpu().numpy()),
+            params,
+            compensate_delay=True,
+        )
+        mlx_enhance_mod.mx.eval(enhanced)
+        return torch.from_numpy(np.asarray(enhanced))
+
+    return EnhanceBackend(name="mlx", sample_rate=params.sr, enhance_audio=enhance_audio)
+
+
+def resolve_backend(model_base_dir: str, requested_device: str | None) -> EnhanceBackend:
+    if should_prefer_mlx_backend(model_base_dir, requested_device):
+        try:
+            return load_mlx_backend(model_base_dir)
+        except Exception as exc:
+            print(f"[warn] Failed to initialize MLX preprocessing backend, falling back to torch: {exc}")
+    return load_torch_backend(model_base_dir, requested_device)
+
+
+def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
+    result = subprocess.run(
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "unknown ffprobe error"
+        raise RuntimeError(stderr)
+    raw_duration = result.stdout.strip()
+    try:
+        duration_seconds = float(raw_duration)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid ffprobe duration output: {raw_duration!r}") from exc
+    if not math.isfinite(duration_seconds) or duration_seconds < 0.0:
+        raise RuntimeError(f"invalid non-finite duration: {duration_seconds!r}")
+    return duration_seconds
+
+
+def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str) -> dict[Path, float]:
+    durations: dict[Path, float] = {}
+    failures: list[str] = []
+    for path in paths:
+        try:
+            durations[path] = probe_audio_duration_seconds(path, ffprobe_bin)
+        except Exception as exc:  # pragma: no cover - exercised via main guard path
+            failures.append(f"{path}: {exc}")
+    if failures:
+        preview = "\n".join(f"  {item}" for item in failures[:10])
+        remainder = len(failures) - min(len(failures), 10)
+        if remainder > 0:
+            preview = f"{preview}\n  ... and {remainder} more"
+        raise SystemExit(f"ffprobe failed while probing source durations:\n{preview}")
+    return durations
 
 
 def resolve_effective_device(requested_device: str | None) -> str:
@@ -92,21 +300,57 @@ def choose_save_workers(loader_workers: int, effective_device: str) -> int:
 
 def _format_average_ms(total_seconds: float, count: int) -> str:
     if count <= 0:
-        return "-"
+        return "n/a"
     return f"{(total_seconds / count) * 1000.0:.0f}ms"
 
 
+def _format_audio_progress_value(seconds: float) -> str:
+    if seconds >= 3600.0:
+        return f"{seconds / 3600.0:.1f}h"
+    if seconds >= 60.0:
+        return f"{seconds / 60.0:.1f}m"
+    return f"{seconds:.1f}s"
+
+
+def _format_eta(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(seconds):
+        return "warming"
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def build_progress_postfix(
-    stats: PreprocessProgressStats, inflight_saves: int, *, now: float | None = None
-) -> dict[str, str]:
+    stats: PreprocessProgressStats,
+    inflight_saves: int,
+    completed_audio_seconds: float,
+    total_audio_seconds: float,
+    *,
+    now: float | None = None,
+) -> str:
     current_time = time.perf_counter() if now is None else now
     elapsed = max(current_time - stats.start_time, 1e-9)
-    return {
-        "fps": f"{stats.enhance_count / elapsed:.2f}",
-        "save_q": str(inflight_saves),
-        "enh": _format_average_ms(stats.enhance_seconds, stats.enhance_count),
-        "save": _format_average_ms(stats.save_seconds, stats.save_count),
-    }
+    realtime_factor = stats.processed_audio_seconds / elapsed if stats.processed_audio_seconds > 0.0 else None
+    remaining_audio_seconds = max(total_audio_seconds - completed_audio_seconds, 0.0)
+    eta_seconds = None
+    if realtime_factor is not None and realtime_factor > 0.0:
+        eta_seconds = remaining_audio_seconds / realtime_factor
+    elif remaining_audio_seconds <= 0.0:
+        eta_seconds = 0.0
+
+    rt_text = f"{realtime_factor:.2f}x" if realtime_factor is not None else "warming"
+    return (
+        f"audio={_format_audio_progress_value(completed_audio_seconds)}/"
+        f"{_format_audio_progress_value(total_audio_seconds)}, "
+        f"eta={_format_eta(eta_seconds)}, "
+        f"rt={rt_text}, "
+        f"save_q={inflight_saves}, "
+        f"enh={_format_average_ms(stats.enhance_seconds, stats.enhance_count)}, "
+        f"save={_format_average_ms(stats.save_seconds, stats.save_count)}"
+    )
 
 
 def save_enhanced_audio_atomically(target: Path, enhanced_audio: torch.Tensor, df_sr: int, orig_sr: int) -> float:
@@ -129,23 +373,37 @@ def save_enhanced_audio_atomically(target: Path, enhanced_audio: torch.Tensor, d
 
 
 def collect_completed_saves(
-    inflight_saves: dict[Future[float], Path],
+    inflight_saves: dict[Future[float], tuple[Path, Path, float]],
     failures: list[str],
     stats: PreprocessProgressStats,
+    completed_paths: set[Path],
     *,
+    wait_for_completion: bool = False,
     block_until_all: bool = False,
-) -> None:
+) -> tuple[int, float]:
     if not inflight_saves:
-        return
-    return_when = ALL_COMPLETED if block_until_all else FIRST_COMPLETED
-    completed, _ = wait(set(inflight_saves), return_when=return_when)
+        return 0, 0.0
+    if wait_for_completion:
+        return_when = ALL_COMPLETED if block_until_all else FIRST_COMPLETED
+        completed, _ = wait(set(inflight_saves), return_when=return_when)
+    else:
+        completed = {future for future in inflight_saves if future.done()}
+        if not completed:
+            return 0, 0.0
+    completed_count = 0
+    completed_audio_seconds = 0.0
     for future in completed:
-        source = inflight_saves.pop(future)
+        source, target, duration_seconds = inflight_saves.pop(future)
         try:
             stats.save_seconds += future.result()
             stats.save_count += 1
+            stats.processed_audio_seconds += duration_seconds
+            completed_paths.add(target)
+            completed_count += 1
+            completed_audio_seconds += duration_seconds
         except Exception as exc:  # pragma: no cover - operational safeguard
             failures.append(f"{source}: {exc}")
+    return completed_count, completed_audio_seconds
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,6 +441,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Rebuild outputs even when the mirrored file already exists.",
     )
+    parser.add_argument(
+        "--allow-non-speech-paths",
+        action="store_true",
+        help="Bypass the default guard that rejects obvious noise/music/RIR paths.",
+    )
     return parser.parse_args()
 
 
@@ -199,19 +462,41 @@ def main() -> int:
     if not sources:
         raise SystemExit(f"No input files found in {file_list}")
 
+    if not args.allow_non_speech_paths:
+        ineligible_sources = find_ineligible_sources(sources)
+        if ineligible_sources:
+            preview = "\n".join(f"  {path}" for path in ineligible_sources[:10])
+            remainder = len(ineligible_sources) - min(len(ineligible_sources), 10)
+            if remainder > 0:
+                preview = f"{preview}\n  ... and {remainder} more"
+            raise SystemExit(
+                "Refusing to preprocess obvious non-speech inputs. "
+                "Pass a clean speech list instead, or use --allow-non-speech-paths to override.\n"
+                f"{preview}"
+            )
+
     output_root.mkdir(parents=True, exist_ok=True)
 
     output_paths = [build_output_path(source, output_root, base_dir) for source in sources]
-    pending_sources = [
-        source for source, target in zip(sources, output_paths) if args.overwrite or not is_complete_output(target)
+    raise_on_output_path_collisions(sources, output_paths)
+    completed_paths = set() if args.overwrite else {path for path in output_paths if is_complete_output(path)}
+    pending_pairs = [
+        (source, target)
+        for source, target in zip(sources, output_paths)
+        if args.overwrite or target not in completed_paths
     ]
+    pending_sources = [source for source, _ in pending_pairs]
+    completed_count = len(sources) - len(pending_sources)
     save_workers = choose_save_workers(args.num_workers, effective_device)
+
+    write_resumable_output_list(output_paths, completed_paths, output_list)
 
     print("=" * 60)
     print("Clean Speech Preprocessor")
     print("=" * 60)
     print(f"Input list:      {file_list}")
     print(f"Input files:     {len(sources):,}")
+    print(f"Completed:       {completed_count:,}")
     print(f"Pending files:   {len(pending_sources):,}")
     print(f"Output root:     {output_root}")
     print(f"Output list:     {output_list}")
@@ -223,87 +508,157 @@ def main() -> int:
     print(f"Mode:            {'overwrite' if args.overwrite else 'resume'}")
     print("=" * 60)
 
-    if pending_sources:
-        model, df_state, _, _ = init_df(
-            model_base_dir=args.model_base_dir,
-            post_filter=False,
-            log_level="INFO",
-            log_file=None,
-            config_allow_defaults=True,
-            epoch="best",
-            default_model="DeepFilterNet3",
-            mask_only=False,
-            device=args.device,
-        )
-
-        df_sr = ModelParams().sr
-        dataset = AudioDataset([str(path) for path in pending_sources], df_sr)
-        loader_kwargs: dict[str, object] = {
-            "num_workers": max(0, args.num_workers),
-            "pin_memory": effective_device.startswith("cuda"),
-        }
-        if args.num_workers > 0:
-            loader_kwargs["persistent_workers"] = True
-            loader_kwargs["prefetch_factor"] = min(8, max(2, args.num_workers))
-        loader = DataLoader(dataset, **loader_kwargs)
-
-        failures: list[str] = []
-        inflight_saves: dict[Future[float], Path] = {}
-        max_inflight_saves = max(2, save_workers * 2)
-        progress_stats = PreprocessProgressStats(start_time=time.perf_counter())
-        with ThreadPoolExecutor(max_workers=save_workers) as save_pool:
-            with torch.inference_mode():
-                with tqdm(
-                    loader,
-                    total=len(dataset),
-                    desc="Enhancing",
-                    unit="file",
-                    dynamic_ncols=True,
-                ) as progress:
-                    for file_batch, audio_batch, orig_sr_batch in progress:
-                        source = Path(file_batch[0]).expanduser().resolve()
-                        target = build_output_path(source, output_root, base_dir)
-                        try:
-                            audio = audio_batch.squeeze(0)
-                            orig_sr = int(orig_sr_batch[0])
-                            enhance_started = time.perf_counter()
-                            enhanced = enhance(model, df_state, audio, pad=True, device=effective_device).detach().cpu()
-                            progress_stats.enhance_seconds += time.perf_counter() - enhance_started
-                            progress_stats.enhance_count += 1
-                            future = save_pool.submit(save_enhanced_audio_atomically, target, enhanced, df_sr, orig_sr)
-                            inflight_saves[future] = source
-                            progress_stats.queue_high_water = max(progress_stats.queue_high_water, len(inflight_saves))
-                            if len(inflight_saves) >= max_inflight_saves:
-                                collect_completed_saves(inflight_saves, failures, progress_stats)
-                            progress.set_postfix(build_progress_postfix(progress_stats, len(inflight_saves)))
-                        except Exception as exc:  # pragma: no cover - operational safeguard
-                            failures.append(f"{source}: {exc}")
-                            progress.set_postfix(build_progress_postfix(progress_stats, len(inflight_saves)))
-                    collect_completed_saves(inflight_saves, failures, progress_stats, block_until_all=True)
-                    progress.set_postfix(build_progress_postfix(progress_stats, len(inflight_saves)))
-
-        elapsed = max(time.perf_counter() - progress_stats.start_time, 1e-9)
-        print(
-            "Preprocess summary: "
-            f"{progress_stats.enhance_count:,} enhanced in {elapsed:.1f}s "
-            f"({progress_stats.enhance_count / elapsed:.2f} files/s) | "
-            f"avg enhance {_format_average_ms(progress_stats.enhance_seconds, progress_stats.enhance_count)} | "
-            f"avg save {_format_average_ms(progress_stats.save_seconds, progress_stats.save_count)} | "
-            f"save queue high-water {progress_stats.queue_high_water}"
-        )
-
-        if failures:
-            print("The following files failed to preprocess:", file=sys.stderr)
-            for item in failures[:20]:
-                print(f"  {item}", file=sys.stderr)
-            if len(failures) > 20:
-                print(f"  ... and {len(failures) - 20} more", file=sys.stderr)
-            raise SystemExit(1)
-    else:
+    if not pending_sources:
         print("All mirrored outputs already exist; reusing them.")
+        print(f"Wrote output list with {len(completed_paths):,} entries -> {output_list}")
+        return 0
 
-    write_output_list(output_paths, output_list)
-    print(f"Wrote output list with {len(output_paths):,} entries -> {output_list}")
+    ffprobe_bin = resolve_ffprobe_bin()
+    source_durations = probe_audio_durations(sources, ffprobe_bin)
+    total_audio_seconds = sum(source_durations.values())
+    completed_audio_seconds = sum(
+        source_durations[source] for source, target in zip(sources, output_paths) if target in completed_paths
+    )
+    print(f"Audio duration:  {total_audio_seconds / 3600.0:.2f}h total")
+
+    backend = resolve_backend(args.model_base_dir, args.device)
+    print(f"Enhance backend: {backend.name}")
+
+    dataset = AudioDataset([str(path) for path in pending_sources], backend.sample_rate)
+    loader_kwargs: dict[str, object] = {
+        "num_workers": max(0, args.num_workers),
+        "pin_memory": effective_device.startswith("cuda"),
+    }
+    if args.num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = min(8, max(2, args.num_workers))
+    loader = DataLoader(dataset, **loader_kwargs)
+
+    failures: list[str] = []
+    inflight_saves: dict[Future[float], tuple[Path, Path, float]] = {}
+    max_inflight_saves = max(2, save_workers * 2)
+    progress_stats = PreprocessProgressStats(start_time=time.perf_counter())
+    with ThreadPoolExecutor(max_workers=save_workers) as save_pool:
+        with torch.inference_mode():
+            with tqdm(
+                total=total_audio_seconds,
+                initial=completed_audio_seconds,
+                desc="Enhancing",
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {elapsed}{postfix}",
+                dynamic_ncols=True,
+                mininterval=0.5,
+                smoothing=0.05,
+            ) as progress:
+                progress.set_postfix_str(
+                    build_progress_postfix(
+                        progress_stats,
+                        len(inflight_saves),
+                        completed_audio_seconds,
+                        total_audio_seconds,
+                    )
+                )
+                for file_batch, audio_batch, orig_sr_batch in loader:
+                    source = Path(file_batch[0]).expanduser().resolve()
+                    target = build_output_path(source, output_root, base_dir)
+                    duration_seconds = source_durations[source]
+                    try:
+                        audio = audio_batch.squeeze(0)
+                        orig_sr = int(orig_sr_batch[0])
+                        enhance_started = time.perf_counter()
+                        enhanced = backend.enhance_audio(audio)
+                        progress_stats.enhance_seconds += time.perf_counter() - enhance_started
+                        progress_stats.enhance_count += 1
+                        future = save_pool.submit(
+                            save_enhanced_audio_atomically,
+                            target,
+                            enhanced,
+                            backend.sample_rate,
+                            orig_sr,
+                        )
+                        inflight_saves[future] = (source, target, duration_seconds)
+                        progress_stats.queue_high_water = max(progress_stats.queue_high_water, len(inflight_saves))
+                        completed_save_count, completed_duration_seconds = collect_completed_saves(
+                            inflight_saves,
+                            failures,
+                            progress_stats,
+                            completed_paths,
+                        )
+                        if completed_save_count:
+                            write_resumable_output_list(output_paths, completed_paths, output_list)
+                            progress.update(completed_duration_seconds)
+                        if len(inflight_saves) >= max_inflight_saves:
+                            completed_save_count, completed_duration_seconds = collect_completed_saves(
+                                inflight_saves,
+                                failures,
+                                progress_stats,
+                                completed_paths,
+                                wait_for_completion=True,
+                            )
+                            if completed_save_count:
+                                write_resumable_output_list(output_paths, completed_paths, output_list)
+                                progress.update(completed_duration_seconds)
+                        progress.set_postfix_str(
+                            build_progress_postfix(
+                                progress_stats,
+                                len(inflight_saves),
+                                completed_audio_seconds + progress_stats.processed_audio_seconds,
+                                total_audio_seconds,
+                            ),
+                            refresh=False,
+                        )
+                    except Exception as exc:  # pragma: no cover - operational safeguard
+                        failures.append(f"{source}: {exc}")
+                        progress.set_postfix_str(
+                            build_progress_postfix(
+                                progress_stats,
+                                len(inflight_saves),
+                                completed_audio_seconds + progress_stats.processed_audio_seconds,
+                                total_audio_seconds,
+                            ),
+                            refresh=False,
+                        )
+                completed_save_count, completed_duration_seconds = collect_completed_saves(
+                    inflight_saves,
+                    failures,
+                    progress_stats,
+                    completed_paths,
+                    wait_for_completion=True,
+                    block_until_all=True,
+                )
+                if completed_save_count:
+                    write_resumable_output_list(output_paths, completed_paths, output_list)
+                    progress.update(completed_duration_seconds)
+                progress.set_postfix_str(
+                    build_progress_postfix(
+                        progress_stats,
+                        len(inflight_saves),
+                        completed_audio_seconds + progress_stats.processed_audio_seconds,
+                        total_audio_seconds,
+                    ),
+                    refresh=False,
+                )
+
+    elapsed = max(time.perf_counter() - progress_stats.start_time, 1e-9)
+    print(
+        "Preprocess summary: "
+        f"{progress_stats.enhance_count:,} files / {progress_stats.processed_audio_seconds / 3600.0:.2f}h audio "
+        f"enhanced in {elapsed:.1f}s "
+        f"({progress_stats.processed_audio_seconds / elapsed:.2f}x realtime) | "
+        f"avg enhance {_format_average_ms(progress_stats.enhance_seconds, progress_stats.enhance_count)} | "
+        f"avg save {_format_average_ms(progress_stats.save_seconds, progress_stats.save_count)} | "
+        f"save queue high-water {progress_stats.queue_high_water}"
+    )
+
+    if failures:
+        print("The following files failed to preprocess:", file=sys.stderr)
+        for item in failures[:20]:
+            print(f"  {item}", file=sys.stderr)
+        if len(failures) > 20:
+            print(f"  ... and {len(failures) - 20} more", file=sys.stderr)
+        raise SystemExit(1)
+
+    write_resumable_output_list(output_paths, completed_paths, output_list)
+    print(f"Wrote output list with {len(completed_paths):,} entries -> {output_list}")
     return 0
 
 
