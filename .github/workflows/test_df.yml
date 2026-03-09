@@ -137,10 +137,15 @@ jobs:
       - name: Create virtualenv and install maturin
         run: |
           python -m venv .venv
-          source .venv/bin/activate
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            source .venv/Scripts/activate
+            echo "$PWD/.venv/Scripts" >> $GITHUB_PATH
+          else
+            source .venv/bin/activate
+            echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          fi
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install 'maturin>=1.3,<1.5'
-          echo "$PWD/.venv/bin" >> $GITHUB_PATH
 
       - name: Build pyDF (deepfilterlib) via maturin
         run: |
@@ -161,13 +166,15 @@ jobs:
             torch torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements_dnsmos.txt
 
-      # Run tests
+      # Run tests (Python tests require the Linux/macOS install step above)
       - name: Run DF Test
+        if: matrix.os != 'windows-latest'
         working-directory: DeepFilterNet
         run: |
           python -m df.scripts.test_df
 
       - name: Test python deepFilter script
+        if: matrix.os != 'windows-latest'
         working-directory: DeepFilterNet
         run: |
           mkdir ../out
@@ -183,7 +190,10 @@ jobs:
       - name: Test rust deep-filter script
         run: |
           cargo run -p deep_filter --profile=release --features=tract,bin,wav-utils,transforms --bin deep-filter -- ./assets/noisy_snr0.wav -m ./models/DeepFilterNet3_onnx.tar.gz -o out_DeepFilterNet3 -vvvv
-          cd DeepFilterNet
+      - name: Evaluate rust deep-filter output
+        if: matrix.os != 'windows-latest'
+        working-directory: DeepFilterNet
+        run: |
           python df/scripts/dnsmos_dns5.py eval-sample ../out_DeepFilterNet3/noisy_snr0.wav -t 3.385834652850639 4.130096419832765 3.153399733642353 3.594115
 
       - uses: actions/upload-artifact@v4
