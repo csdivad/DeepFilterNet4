@@ -49,7 +49,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
