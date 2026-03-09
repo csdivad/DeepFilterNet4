@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DEFAULT_DATA_DIR="/Volumes/TrainingData/datasets"
+DEFAULT_CHAINS_DIR="/Volumes/TrainingData/CHAINS"
 if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
@@ -58,6 +59,49 @@ else
   DEFAULT_PREPROCESS_MODEL="DeepFilterNet3"
 fi
 
+write_atomic_stream() {
+  local out_file="$1"
+  local tmp_file="${out_file}.tmp.$$"
+  cat > "${tmp_file}"
+  mv "${tmp_file}" "${out_file}"
+}
+
+merge_unique_file_lists() {
+  local out_file="$1"
+  shift
+  {
+    for list_file in "$@"; do
+      if [[ -f "${list_file}" ]]; then
+        cat "${list_file}"
+      fi
+    done
+  } | awk 'NF && $0 !~ /^#/ && !seen[$0]++' | write_atomic_stream "${out_file}"
+  echo "[ok] wrote $(wc -l < "${out_file}") entries -> ${out_file}"
+}
+
+compute_common_base_dir() {
+  local list_file="$1"
+  "${PYTHON_BIN}" - "${list_file}" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+list_path = Path(sys.argv[1]).expanduser().resolve()
+parent_dirs: list[str] = []
+with list_path.open() as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parent_dirs.append(str(Path(line).expanduser().resolve().parent))
+
+if not parent_dirs:
+    raise SystemExit(f"No speech entries found in {list_path}")
+
+print(os.path.commonpath(parent_dirs))
+PY
+}
+
 usage_helptext() {
   cat <<EOF
 Usage:
@@ -74,6 +118,9 @@ Core options:
   --clean-list PATH           Clean speech file list
   --noise-list PATH           Noise/music file list
   --rir-list PATH             Optional RIR file list
+  --include-chains            Append CHAINS speaking-style recordings to the clean list
+                              (mono styles + extracted RSI speaker channel)
+  --chains-dir PATH           CHAINS corpus root (default: ${DEFAULT_CHAINS_DIR})
 
 Audio/cache options:
   --sample-rate HZ            Target sample rate (default: 48000)
@@ -125,6 +172,14 @@ Examples:
     --profile apple \
     --merge-short \
     --preprocess-clean-speech
+
+  # Append CHAINS speaking-style speech and preprocess it in the same pass.
+  ./build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short \
+    --include-chains \
+    --chains-dir /Volumes/TrainingData/CHAINS \
+    --preprocess-clean-speech
 EOF
 }
 
@@ -135,6 +190,7 @@ CLI_PROFILE=""
 CLI_CLEAN_LIST=""
 CLI_NOISE_LIST=""
 CLI_RIR_LIST=""
+CLI_CHAINS_DIR=""
 CLI_SR=""
 CLI_SEGMENT_LENGTH=""
 CLI_SNR_MIN=""
@@ -155,6 +211,7 @@ CLI_PREPROCESS_PROBE_CACHE=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
+INCLUDE_CHAINS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -184,6 +241,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rir-list)
       CLI_RIR_LIST="$2"
+      shift 2
+      ;;
+    --include-chains)
+      INCLUDE_CHAINS=1
+      shift
+      ;;
+    --chains-dir)
+      CLI_CHAINS_DIR="$2"
       shift 2
       ;;
     --sample-rate)
@@ -282,6 +347,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+PREPROCESS_BASE_DIR_WAS_SET=0
+if [[ -n "${CLI_PREPROCESS_BASE_DIR}" || -n "${PREPROCESS_BASE_DIR:-}" ]]; then
+  PREPROCESS_BASE_DIR_WAS_SET=1
+fi
+
 DATA_DIR="${CLI_DATA_DIR:-${DATA_DIR:-${DEFAULT_DATA_DIR}}}"
 OUTPUT_DIR="${CLI_OUTPUT_DIR:-${OUTPUT_DIR:-${DATA_DIR}/mlx_audio_cache}}"
 LIST_DIR="${CLI_LIST_DIR:-${LIST_DIR:-${DATA_DIR}/lists}}"
@@ -296,6 +366,10 @@ RIR_PROB="${CLI_RIR_PROB:-${RIR_PROB:-0.5}}"
 CLEAN_LIST="${CLI_CLEAN_LIST:-${CLEAN_LIST:-${LIST_DIR}/clean_all.txt}}"
 NOISE_LIST="${CLI_NOISE_LIST:-${NOISE_LIST:-${LIST_DIR}/noise_music.txt}}"
 RIR_LIST="${CLI_RIR_LIST:-${RIR_LIST:-${LIST_DIR}/rir_all.txt}}"
+CHAINS_DIR="${CLI_CHAINS_DIR:-${CHAINS_DIR:-${DEFAULT_CHAINS_DIR}}}"
+CHAINS_PREPARED_ROOT="${CHAINS_PREPARED_ROOT:-${DATA_DIR}/prepared/chains_speech}"
+CHAINS_LIST="${CHAINS_LIST:-${LIST_DIR}/chains_clean.txt}"
+COMBINED_CLEAN_LIST="${COMBINED_CLEAN_LIST:-${LIST_DIR}/clean_all.with_chains.txt}"
 
 PREPROCESS_OUTPUT_ROOT="${CLI_PREPROCESS_OUTPUT_ROOT:-${PREPROCESS_OUTPUT_ROOT:-${DATA_DIR}/preprocessed/dfn3_speech_clean}}"
 PREPROCESS_BASE_DIR="${CLI_PREPROCESS_BASE_DIR:-${PREPROCESS_BASE_DIR:-${DATA_DIR}/raw}}"
@@ -364,6 +438,12 @@ echo "Python:             ${PYTHON_BIN}"
 echo "Data dir:           ${DATA_DIR}"
 echo "Output dir:         ${OUTPUT_DIR}"
 echo "List dir:           ${LIST_DIR}"
+echo "CHAINS speech:      $([[ ${INCLUDE_CHAINS} -eq 1 ]] && echo "enabled" || echo "disabled")"
+if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
+  echo "CHAINS dir:         ${CHAINS_DIR}"
+  echo "CHAINS prepared:    ${CHAINS_PREPARED_ROOT}"
+  echo "CHAINS list:        ${CHAINS_LIST}"
+fi
 echo "Clean list:         ${CLEAN_LIST}"
 echo "Noise list:         ${NOISE_LIST}"
 if [[ -f "${RIR_LIST}" ]]; then
@@ -430,16 +510,47 @@ mkdir -p "${LIST_DIR}"
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
+if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
+  if [[ ! -d "${CHAINS_DIR}" ]]; then
+    echo "Error: CHAINS corpus root not found: ${CHAINS_DIR}" >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "Preparing CHAINS clean-speech additions..."
+  chains_cmd=(
+    "${PYTHON_BIN}"
+    "${ROOT_DIR}/scripts/datasets/prepare_chains_speech.py"
+    --chains-dir "${CHAINS_DIR}"
+    --prepared-root "${CHAINS_PREPARED_ROOT}"
+    --output-list "${CHAINS_LIST}"
+  )
+  "${chains_cmd[@]}"
+  if [[ ! -f "${CHAINS_LIST}" ]]; then
+    echo "Error: CHAINS preparation did not produce list ${CHAINS_LIST}" >&2
+    exit 1
+  fi
+  merge_unique_file_lists "${COMBINED_CLEAN_LIST}" "${CLEAN_LIST}" "${CHAINS_LIST}"
+  CLEAN_LIST_TO_USE="${COMBINED_CLEAN_LIST}"
+fi
+
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
+  PREPROCESS_BASE_DIR_TO_USE="${PREPROCESS_BASE_DIR}"
+  if [[ ${INCLUDE_CHAINS} -eq 1 && ${PREPROCESS_BASE_DIR_WAS_SET} -eq 0 ]]; then
+    PREPROCESS_BASE_DIR_TO_USE="$(compute_common_base_dir "${CLEAN_LIST_TO_USE}")"
+  fi
   echo ""
   echo "Running clean-speech preprocessing before cache build..."
   echo "Only the clean/speech list is eligible; noise and RIR lists are left untouched."
+  if [[ "${PREPROCESS_BASE_DIR_TO_USE}" != "${PREPROCESS_BASE_DIR}" ]]; then
+    echo "Preprocess base auto-adjusted for combined speech roots: ${PREPROCESS_BASE_DIR_TO_USE}"
+  fi
   preprocess_cmd=(
     "${PYTHON_BIN}"
     "${ROOT_DIR}/scripts/datasets/preprocess_clean_speech.py"
-    --file-list "${CLEAN_LIST}"
+    --file-list "${CLEAN_LIST_TO_USE}"
     --output-root "${PREPROCESS_OUTPUT_ROOT}"
-    --base-dir "${PREPROCESS_BASE_DIR}"
+    --base-dir "${PREPROCESS_BASE_DIR_TO_USE}"
     --output-list "${PREPROCESS_OUTPUT_LIST}"
     --model-base-dir "${PREPROCESS_MODEL}"
     --num-workers "${PREPROCESS_WORKERS}"

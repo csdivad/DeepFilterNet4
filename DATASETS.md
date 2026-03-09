@@ -151,12 +151,30 @@ OUTPUT_DIR=/path/to/cache \
     --preprocess-clean-speech
 ```
 
+To append the CHAINS speaking-style corpus to the clean-speech list during the
+same build, enable it explicitly:
+
+```
+DATA_DIR=/path/to/data \
+OUTPUT_DIR=/path/to/cache \
+  bash scripts/datasets/build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short \
+    --include-chains \
+    --chains-dir /Volumes/TrainingData/CHAINS \
+    --preprocess-clean-speech
+```
+
 Notes:
 - `--merge-short` is recommended when you want to preserve more short utterances
   instead of skipping speech clips shorter than `--min-duration`.
 - If you already ran standalone clean-speech preprocessing, you can point
   `--clean-list` at the resulting list instead of enabling
   `--preprocess-clean-speech` again.
+- `--include-chains` keeps the released mono CHAINS styles (`solo`, `sync`,
+  `retell`, `whsp`, `fast`) as-is and extracts only the RSI speaker channel;
+  the RSI target channel is excluded so the datastore does not duplicate the
+  repeated prompt speaker recordings.
 - If you are rebuilding into a new location to avoid duplicate disk usage,
   delete the old cache directory first.
 
