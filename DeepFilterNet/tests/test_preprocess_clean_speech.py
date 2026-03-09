@@ -359,7 +359,7 @@ def test_load_mlx_backend_retries_after_resource_limit_and_clears_cache(monkeypa
         load_model=lambda model_path, epoch: (object(), types.SimpleNamespace(sr=48_000), None, None),
     )
 
-    def fake_run(mlx_enhance_mod, model, audio_mx, params, df_state=None):
+    def fake_run(mlx_enhance_mod, model, audio_mx, params):
         run_calls["count"] += 1
         if run_calls["count"] == 1:
             raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")

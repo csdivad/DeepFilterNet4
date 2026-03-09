@@ -65,7 +65,7 @@ def test_enhance_dispatches_dfnet3_to_specialized_path(monkeypatch):
     params = ModelParams3()
     sentinel = object()
 
-    def fake_enhance_dfnet3(model_arg, audio_arg, params_arg, compensate_delay, atten_lim_db, df_state=None):
+    def fake_enhance_dfnet3(model_arg, audio_arg, params_arg, compensate_delay, atten_lim_db):
         assert model_arg is model
         assert params_arg is params
         assert compensate_delay is False

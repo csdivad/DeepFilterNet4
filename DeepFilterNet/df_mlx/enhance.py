@@ -440,16 +440,8 @@ def _enhance_dfnet3(
     params: ModelParams3,
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
-    df_state=None,
 ) -> mx.array:
-    """Enhance audio with DFNet3 using the original libDF analysis/synthesis math.
-
-    Args:
-        df_state: Optional reusable ``libdf.DF`` instance.  When *None* a
-            throwaway instance is created per call (kept for backward compat).
-            Callers that process many files should pre-create one and pass it
-            in to avoid Rust-side resource accumulation.
-    """
+    """Enhance audio with DFNet3 using the original libDF analysis/synthesis math."""
 
     import torch
     import torch.nn.functional as F
@@ -469,14 +461,13 @@ def _enhance_dfnet3(
     if compensate_delay:
         audio_torch = F.pad(audio_torch, (0, n_fft))
 
-    if df_state is None:
-        df_state = DF(
-            sr=params.sr,
-            fft_size=n_fft,
-            hop_size=hop,
-            nb_bands=params.nb_erb,
-            min_nb_erb_freqs=max(1, min(params.erb_widths)),
-        )
+    df_state = DF(
+        sr=params.sr,
+        fft_size=n_fft,
+        hop_size=hop,
+        nb_bands=params.nb_erb,
+        min_nb_erb_freqs=max(1, min(params.erb_widths)),
+    )
     norm_alpha = math.exp(-(hop / params.sr) / params.norm_tau)
     spec_complex = df_state.analysis(audio_torch.detach().cpu().numpy())
     erb_feat = erb_norm(erb(spec_complex, df_state.erb_widths()), norm_alpha)
@@ -505,7 +496,7 @@ def _enhance_dfnet3(
     del spec_real, spec_imag, feat_erb, feat_spec, spec_out_real, spec_out_imag
 
     enhanced_np = np.asarray(df_state.synthesis(enhanced_spec), dtype=np.float32)
-    del enhanced_spec
+    del enhanced_spec, df_state
 
     if compensate_delay:
         d = n_fft - hop
@@ -523,7 +514,6 @@ def enhance(
     params: EnhanceParams,
     compensate_delay: bool = True,
     atten_lim_db: Optional[float] = None,
-    df_state=None,
 ) -> mx.array:
     """Enhance a single audio signal.
 
@@ -533,8 +523,6 @@ def enhance(
         params: Model parameters
         compensate_delay: Whether to pad for delay compensation
         atten_lim_db: Optional attenuation limit in dB
-        df_state: Optional reusable ``libdf.DF`` for DFNet3.  Avoids
-            per-call Rust resource allocation during batch processing.
 
     Returns:
         Enhanced audio waveform
@@ -546,7 +534,6 @@ def enhance(
             params,
             compensate_delay=compensate_delay,
             atten_lim_db=atten_lim_db,
-            df_state=df_state,
         )
 
     from .ops import istft, stft

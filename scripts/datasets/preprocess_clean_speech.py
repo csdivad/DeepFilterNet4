@@ -327,13 +327,12 @@ def is_mlx_resource_limit_error(exc: BaseException) -> bool:
     return "metal::malloc" in message or ("resource limit" in message and "metal" in message)
 
 
-def _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params, df_state=None):
+def _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params):
     enhanced = mlx_enhance_mod.enhance(
         model,
         audio_mx,
         params,
         compensate_delay=True,
-        df_state=df_state,
     )
     mlx_enhance_mod.mx.eval(enhanced)
     return enhanced
@@ -344,30 +343,11 @@ def _mlx_output_to_torch(enhanced) -> torch.Tensor:
     return torch.from_numpy(enhanced_np)
 
 
-def _create_dfnet3_df_state(params):
-    """Pre-create a reusable libDF DF state for DFNet3 models."""
-    from libdf import DF
-
-    return DF(
-        sr=params.sr,
-        fft_size=params.fft_size,
-        hop_size=params.hop_size,
-        nb_bands=params.nb_erb,
-        min_nb_erb_freqs=max(1, min(params.erb_widths)),
-    )
-
-
 def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
     mlx_enhance_mod = _import_mlx_enhance_module()
 
     model, params, _, _ = mlx_enhance_mod.load_model(model_path=model_base_dir, epoch="best")
     inference_calls = 0
-
-    # Pre-create reusable DF state for DFNet3 to avoid per-file Rust allocation
-    df_state = None
-    _DFNet3 = getattr(mlx_enhance_mod, "DFNet3", None)
-    if _DFNet3 is not None and isinstance(model, _DFNet3):
-        df_state = _create_dfnet3_df_state(params)
 
     def enhance_audio(audio: torch.Tensor) -> torch.Tensor:
         nonlocal inference_calls
@@ -379,7 +359,7 @@ def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
         try:
             audio_mx = mlx_enhance_mod.mx.array(audio_np)
             try:
-                enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params, df_state=df_state)
+                enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
             except Exception as exc:
                 if not is_mlx_resource_limit_error(exc):
                     raise
@@ -387,7 +367,7 @@ def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
                 gc.collect()
                 audio_mx = mlx_enhance_mod.mx.array(audio_np)
                 try:
-                    enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params, df_state=df_state)
+                    enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
                 except Exception:
                     clear_mlx_cache(mlx_enhance_mod.mx)
                     gc.collect()
