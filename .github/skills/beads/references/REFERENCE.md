@@ -86,11 +86,24 @@ bd label list <id> --json
 bd label list-all --json
 ```
 
-### Database & Sync
+### Dolt Server & Replication
 
 ```bash
-# Sync to git
-bd sync
+# Inspect local Dolt/server state
+bd dolt show
+bd dolt status
+bd dolt start
+bd dolt stop
+
+# Configure or inspect remotes
+bd dolt remote list
+bd dolt remote add <name> <url>
+bd dolt remote remove <name>
+
+# Replicate Beads state (only when a Dolt remote is configured)
+bd dolt pull
+bd dolt commit -m "Sync beads state"
+bd dolt push
 
 # Import/export
 bd import -i .beads/issues.jsonl
@@ -99,12 +112,6 @@ bd import -i .beads/issues.jsonl --dry-run     # Preview
 
 # Database info
 bd info --json
-
-# Daemon management
-bd daemons list --json
-bd daemons health --json
-bd daemons restart /path/to/workspace --json
-bd daemons killall --json
 ```
 
 ### Global Flags
@@ -191,7 +198,10 @@ bd update bd-42 --notes "Progress: completed step 1" --json
 
 # End of day
 bd update bd-42 --notes "EOD: steps 1-3 done, tomorrow: step 4" --json
-bd sync
+bd dolt remote list
+# If a Dolt remote is configured:
+bd dolt commit -m "EOD beads update"
+bd dolt push
 ```
 
 ### Epic Decomposition
@@ -293,7 +303,10 @@ bd create "TODO: Found during work" --deps discovered-from:bd-42 --json
 bd close bd-42 --reason "Completed and tested" --json
 
 # 4. ALWAYS sync and push
-bd sync
+# If a Dolt remote is configured:
+bd dolt pull
+bd dolt commit -m "Sync beads state"   # when there are pending Dolt changes
+bd dolt push
 git push
 
 # 5. Verify
@@ -372,7 +385,7 @@ BLOCKED BY: None
 |------|---------|
 | `.beads/beads.db` | SQLite database |
 | `.beads/issues.jsonl` | JSONL export (git-tracked) |
-| `.beads/config.toml` | Local configuration |
+| `.beads/config.yaml` | Repo-local Beads configuration |
 
 ---
 
@@ -442,6 +455,6 @@ TodoWrite (for login endpoint):
 
 ### Session Discipline
 
-1. **Always sync at session end**: `bd sync && git push`
+1. **Use the current CLI at session end**: `bd dolt pull|commit|push` when a Dolt remote is configured, then `git push`
 2. **Write for future you**: Notes should be self-contained
 3. **Close what's done**: Don't leave completed work open

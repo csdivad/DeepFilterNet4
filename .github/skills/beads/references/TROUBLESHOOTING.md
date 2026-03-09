@@ -56,14 +56,15 @@ bd create "Initial issue" -p 3 --json
 
 **Solution**:
 ```bash
-# Find locking process
-lsof .beads/beads.db
+# Check whether the Dolt server is already running
+bd dolt status
 
-# If daemon, restart it
-bd daemons restart /path/to/workspace --json
+# Restart the local Dolt server if needed
+bd dolt stop
+bd dolt start
 
-# Or kill and retry
-bd daemons killall --json
+# Or kill orphaned servers and retry
+bd dolt killall
 ```
 
 ### Staleness Error
@@ -99,22 +100,29 @@ bd import -i .beads/issues.jsonl
 
 ## Sync Issues
 
-### Sync fails with git error
+### Dolt push/pull fails
 
-**Problem**: bd sync can't push/pull.
+**Problem**: `bd dolt pull` or `bd dolt push` fails.
 
 **Solution**:
 ```bash
-# Check git status
-git status
+# Check whether a Dolt remote is configured
+bd dolt remote list
 
-# Resolve any conflicts
-git add .beads/issues.jsonl
-git commit -m "Resolve bd sync conflict"
+# Check local Dolt configuration / connectivity
+bd dolt show
+bd dolt status
 
-# Retry sync
-bd sync
+# If there are pending Dolt changes, commit them first
+bd dolt commit -m "Sync beads state"
+
+# Retry replication
+bd dolt pull
+bd dolt push
 ```
+
+If `bd dolt remote list` shows no remotes, local Beads issue tracking still
+works; only remote Dolt replication is unavailable until you add a remote.
 
 ### JSONL conflicts
 
@@ -133,52 +141,54 @@ git checkout --theirs .beads/issues.jsonl
 bd import -i .beads/issues.jsonl
 ```
 
-### Changes not syncing
+### Changes not replicated remotely
 
-**Problem**: Changes made but not appearing in git.
+**Problem**: Changes made in Beads but not appearing on a Dolt remote.
 
 **Solution**:
 ```bash
-# Force immediate sync
-bd sync
+# Inspect local Dolt state
+bd dolt status
+bd dolt remote list
 
-# Check daemon status
-bd info --json
+# If a remote exists, commit then push
+bd dolt commit -m "Sync beads state"
+bd dolt push
 
-# If daemon not running, changes may be batched
-# Wait for auto-sync or manually sync
+# If no remote exists, local Beads issue tracking is still working; add a
+# Dolt remote before expecting remote replication.
 ```
 
-## Daemon Issues
+## Dolt Server Issues
 
-### Daemon not starting
+### Dolt server not starting
 
-**Problem**: bd daemon fails to start.
+**Problem**: the local Beads Dolt server fails to start.
 
 **Solution**:
 ```bash
 # Check logs
-bd daemons logs /path/to/workspace
+bd dolt status
 
 # Check for port conflicts
-lsof -i :7890  # Default daemon port
+lsof -i :13357  # Replace with the port shown by `bd dolt show` if needed
 
 # Start manually
-bd daemons restart /path/to/workspace --json
+bd dolt start
 ```
 
-### Daemon version mismatch
+### Embedded mode concurrency warning
 
-**Problem**: Daemon running old version.
+**Problem**: `bd doctor` warns about embedded-mode concurrency or a Dolt lock.
 
 **Solution**:
 ```bash
-# Check health
-bd daemons health --json
+# Confirm the Dolt server is running
+bd dolt status
 
-# Restart with new version
-bd daemons killall --json
-# Next command will start new daemon
+# Restart the server if needed
+bd dolt stop
+bd dolt start
 ```
 
 ### Sandbox mode not detected
@@ -191,9 +201,7 @@ bd daemons killall --json
 bd --sandbox ready --json
 
 # Or set environment
-export BD_NO_DAEMON=true
-export BD_NO_AUTO_FLUSH=true
-export BD_NO_AUTO_IMPORT=true
+export BEADS_DOLT_AUTO_COMMIT=off
 ```
 
 ## Command Issues
@@ -336,19 +344,20 @@ bd import -i .beads/issues.jsonl
 bd import --force -i .beads/issues.jsonl
 ```
 
-### "Daemon connection refused"
+### "Dolt server connection refused"
 
-Can't connect to bd daemon.
+Can't connect to the Beads Dolt server.
 
 ```bash
 # Check if running
-bd info --json
+bd dolt status
 
 # Restart if needed
-bd daemons restart /path/to/workspace --json
+bd dolt stop
+bd dolt start
 
-# Or run without daemon
-bd --no-daemon ready --json
+# Or inspect configuration
+bd dolt show
 ```
 
 ### "Permission denied" on sync
@@ -375,8 +384,8 @@ For detailed debugging:
 # Enable verbose logging
 RUST_LOG=debug bd ready --json
 
-# Check daemon logs
-bd daemons logs /path/to/workspace -f
+# Check Dolt server log
+tail -f .beads/dolt-server.log
 
 # Get full system info
 bd info --schema --json
@@ -388,8 +397,8 @@ If issues persist:
 
 1. Check bd version: `bd --version`
 2. Check database info: `bd info --json`
-3. Check daemon health: `bd daemons health --json`
-4. Review daemon logs: `bd daemons logs . -n 100`
+3. Check Dolt server health: `bd dolt status`
+4. Review Dolt log: `.beads/dolt-server.log`
 5. Try sandbox mode: `bd --sandbox ready --json`
 
 ## See Also

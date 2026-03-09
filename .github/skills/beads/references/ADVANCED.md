@@ -201,7 +201,11 @@ bd dep tree bd-42
 bd update bd-42 --notes "Agent session: completed X, Y pending" --json
 
 # 6. ALWAYS end with
-bd sync && git push
+# If a Dolt remote is configured:
+bd dolt pull
+bd dolt commit -m "Sync beads state"   # when there are pending Dolt changes
+bd dolt push
+git push
 ```
 
 ### Agent-Specific Patterns
@@ -251,7 +255,7 @@ When multiple agents work in same repo:
 
 2. **Coordinate via issues**: Each agent claims specific issues
 3. **Avoid conflicts**: Only one agent per issue at a time
-4. **Sync frequently**: `bd sync` after each significant change
+4. **Replicate Beads state when needed**: use `bd dolt commit` / `bd dolt push` after significant changes if a Dolt remote is configured
 
 ---
 
@@ -348,7 +352,10 @@ jobs:
 ```bash
 # In CI script
 bd update bd-42 --notes "CI: Build ${{ github.run_id }} passed" --json
-bd sync
+bd dolt remote list
+# If a Dolt remote is configured:
+bd dolt commit -m "CI beads update"
+bd dolt push
 ```
 
 ### External Tool Integration
@@ -388,9 +395,9 @@ bd close bd-42 --json
       "problemMatcher": []
     },
     {
-      "label": "bd: sync",
+      "label": "bd: beads-push",
       "type": "shell",
-      "command": "bd sync && git push",
+      "command": "bd dolt remote list && git push",
       "problemMatcher": []
     }
   ]
@@ -461,8 +468,8 @@ BD_LOG_LEVEL=debug bd list --json
 # Direct SQLite access (emergency only)
 sqlite3 .beads/beads.db "SELECT * FROM issues WHERE status='open'"
 
-# Check daemon health
-bd daemons health --json
+# Check Dolt server health
+bd dolt status
 ```
 
 ---
@@ -476,12 +483,12 @@ bd daemons health --json
 - **Incremental sync**: Append-friendly format
 - **Human readable**: Can inspect with standard tools
 
-### Why SQLite + Daemon
+### Why Dolt + SQL Server
 
-- **Fast queries**: SQLite indexes for complex queries
-- **Concurrent access**: Daemon serializes writes
+- **Fast queries**: SQL indexes support complex issue queries
+- **Concurrent access**: the Dolt SQL server avoids embedded single-writer conflicts
 - **Atomic operations**: Transaction safety
-- **Rich queries**: Full SQL when needed via direct access
+- **Versioned state**: Dolt can replicate issue state when a remote is configured
 
 ### Data Flow
 

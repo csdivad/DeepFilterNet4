@@ -187,19 +187,23 @@ the exclusion list in `setup.sh` and add a `--with-<crate>` maturin flag.
 
 - Use `bd` for issue tracking, not GitHub Issues directly.
 - Run `bd prime` at session start for workflow context.
-- Run `bd sync` before ending a work session.
+- Enable the repo-managed Beads hook shims with `./setup.sh` or `scripts/install-hooks.sh`.
+- Use `bd dolt remote list` to check whether remote replication is configured.
+- If a Dolt remote is configured, use `bd dolt pull`, `bd dolt commit`, and `bd dolt push` before ending a work session.
+- Do **not** use `bd sync`; the current local CLI uses `bd dolt ...` commands instead.
 - Reference issue IDs in commit messages when applicable.
 
 **Rationale:**
 
 - Git-backed issues stay with the repository and work offline.
 - AI agents get structured context injection via bd.
-- See `.claude/skills/beads/` for comprehensive AI integration patterns.
+- The repo-managed hook shims avoid drift between `bd hooks install` and the checked-in `.githooks/` behavior.
+- See `.github/skills/beads/` for repo-local AI integration patterns.
 
 **Related Files:**
 
 - [.beads/](../.beads/)
-- [.claude/skills/beads/](../.claude/skills/beads/)
+- [.github/skills/beads/](../.github/skills/beads/)
 - [AGENTS.md](../AGENTS.md)
 
 ---
