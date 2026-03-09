@@ -128,7 +128,8 @@ def compute_erb_fb(
     if too_large > 0:
         erb[nb_bands - 1] -= too_large
 
-    assert sum(erb) == fft_size // 2 + 1, f"ERB band sum {sum(erb)} != {fft_size // 2 + 1}"
+    if sum(erb) != fft_size // 2 + 1:
+        raise ValueError(f"ERB band sum {sum(erb)} != {fft_size // 2 + 1}")
     return erb
 
 

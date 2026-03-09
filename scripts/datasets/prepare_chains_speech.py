@@ -186,7 +186,7 @@ def main() -> int:
             rsi_reused += 1
         rsi_outputs.append(target)
 
-    all_paths = sorted({path.resolve() for path in (*mono_files, *rsi_outputs)}, key=lambda path: str(path))
+    all_paths = sorted({path.resolve() for path in (*mono_files, *rsi_outputs)}, key=str)
     write_output_list(all_paths, output_list)
 
     print("=" * 60)

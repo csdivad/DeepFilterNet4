@@ -1,7 +1,7 @@
 {
-  "archive": "/Users/andrew/zRepos/DeepFilterNet/models/DeepFilterNet3.zip",
-  "source_checkpoint": "/var/folders/b8/br9qpd7x3md9qcdzps_58h240000gn/T/dfn3_mlx_convert_brw3obt7/DeepFilterNet3/checkpoints/model_120.ckpt.best",
-  "output_checkpoint": "/Users/andrew/zRepos/DeepFilterNet/models/mlx/DeepFilterNet3-MLX/checkpoints/model_120.safetensors",
+  "archive": "models/DeepFilterNet3.zip",
+  "source_checkpoint": "(extracted from archive to temp dir)/DeepFilterNet3/checkpoints/model_120.ckpt.best",
+  "output_checkpoint": "models/mlx/DeepFilterNet3-MLX/checkpoints/model_120.safetensors",
   "converted_keys": 114,
   "output_shapes": {
     "real": [

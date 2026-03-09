@@ -3,9 +3,10 @@
 ## Overview
 
 This document tracks the investigation into quality regression in the MLX
-DFNet3 implementation compared to the reference PyTorch model. The MLX model
-should produce output identical (within float32 precision) to the PyTorch
-DFNet3 pretrained model.
+DFNet3 implementation compared to the reference PyTorch model. After fixes,
+the MLX model produces output that is numerically close to the PyTorch
+DFNet3 pretrained model, with minor float32 precision drift from GRU
+evaluation order differences (see **Root Cause** below).
 
 **Branch:** `feat/dfn3-on-df_mlx-fix`
 **Test audio:** `p225_001_mic1.flac` from VCTK-Corpus-0.92
@@ -159,18 +160,22 @@ port.
 | Initial (broken conv_transpose)    | ~0.10         | All-zeros from GroupedConvTranspose2d  |
 | After convt2d workaround           | ~0.985        | Per-group split workaround             |
 | After sigmoid fix                  | ~0.981        | Correct mask range [0,1]               |
+| After ERB filterbank fix           | ~1.000        | Boxcar filters matching PT/libDF       |
 
 Note: corr slightly decreased after sigmoid fix because the unbounded mask
 happened to produce values that correlated better with the reference through
 coincidental cancellation. The 0.981 value is **more correct** because the mask
-is now properly bounded.
+is now properly bounded. The ERB filterbank fix resolved the remaining gap
+by replacing smooth triangular filters with rectangular boxcar filters that
+match the PyTorch/libDF contract exactly.
 
 ---
 
-## Files Modified (Uncommitted)
+## Files Modified
 
 1. `DeepFilterNet/df_mlx/enhance.py` — `model.eval()` in `load_model()`
-2. `DeepFilterNet/df_mlx/deepfilternet3.py` — `conv0_out` norm="batch"
+2. `DeepFilterNet/df_mlx/deepfilternet3.py` — `conv0_out` norm="batch", `compute_erb_fb()`, `build_dfnet3_model()` passes widths
 3. `DeepFilterNet/df_mlx/convert.py` — `conv0_out` norm_index=1
 4. `DeepFilterNet/df_mlx/modules.py` — convt2d workaround + sigmoid activation
-5. `models/mlx/DeepFilterNet3-MLX/` — re-converted model (114 keys)
+5. `DeepFilterNet/df_mlx/ops.py` — boxcar ERB filterbank path via `widths` parameter
+6. `models/mlx/DeepFilterNet3-MLX/` — re-converted model (114 keys)

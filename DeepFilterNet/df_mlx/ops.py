@@ -449,7 +449,10 @@ def erb_fb_and_inverse(
     """
     if widths is not None:
         n_freqs = fft_size // 2 + 1
-        assert sum(widths) == n_freqs, f"ERB widths sum {sum(widths)} != {n_freqs}"
+        if len(widths) != nb_bands:
+            raise ValueError(f"len(widths) {len(widths)} != nb_bands {nb_bands}")
+        if sum(widths) != n_freqs:
+            raise ValueError(f"ERB widths sum {sum(widths)} != n_freqs {n_freqs}")
 
         fb_np = np.zeros((n_freqs, nb_bands), dtype=np.float32)
         b = 0

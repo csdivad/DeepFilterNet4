@@ -262,6 +262,7 @@ def should_prefer_mlx_backend(model_base_dir: str | None, requested_device: str 
 
 def resolve_torch_fallback_model(model_base_dir: str | None) -> str:
     if model_explicitly_requests_mlx(model_base_dir):
+        print("[warn] MLX model requested but MLX backend unavailable; falling back to DeepFilterNet3 (torch).")
         return "DeepFilterNet3"
     return model_base_dir or "DeepFilterNet3"
 
@@ -358,17 +359,16 @@ def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
         result = None
         try:
             audio_mx = mlx_enhance_mod.mx.array(audio_np)
-            try:
-                enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
-            except Exception as exc:
-                if not is_mlx_resource_limit_error(exc):
-                    raise
-                clear_mlx_cache(mlx_enhance_mod.mx)
-                gc.collect()
-                audio_mx = mlx_enhance_mod.mx.array(audio_np)
+            for attempt in range(2):
                 try:
                     enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
-                except Exception:
+                    break
+                except Exception as exc:
+                    if attempt == 0 and is_mlx_resource_limit_error(exc):
+                        clear_mlx_cache(mlx_enhance_mod.mx)
+                        gc.collect()
+                        audio_mx = mlx_enhance_mod.mx.array(audio_np)
+                        continue
                     clear_mlx_cache(mlx_enhance_mod.mx)
                     gc.collect()
                     raise
@@ -381,7 +381,6 @@ def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
                 gc.collect()
             del audio_mx
             del enhanced
-            del result
 
     return EnhanceBackend(name="mlx", sample_rate=params.sr, enhance_audio=enhance_audio)
 
@@ -735,7 +734,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--probe-cache",
         default=None,
-        help="Optional JSON cache for ffprobe duration results; unchanged files reuse cached durations on reruns.",
+        help="JSON cache for ffprobe duration results; defaults to a sibling of --output-list. Unchanged files reuse cached durations on reruns.",
     )
     parser.add_argument(
         "--overwrite",
