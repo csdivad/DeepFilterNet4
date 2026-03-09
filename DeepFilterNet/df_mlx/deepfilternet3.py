@@ -209,6 +209,7 @@ def build_dfnet3_model(params: ModelParams3, *, run_df: bool = True) -> "DFNet3"
         fft_size=params.fft_size,
         nb_bands=params.nb_erb,
         min_width=max(1, min(params.erb_widths)),
+        widths=params.erb_widths,
     )
     return DFNet3(erb_fb_matrix, erb_inv_fb, run_df=run_df, p=params)
 
