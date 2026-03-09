@@ -184,6 +184,8 @@ class Conv2dNormAct(nn.Module):
             self.activation = nn.PReLU()
         elif activation == "leaky_relu":
             self.activation = nn.LeakyReLU()
+        elif activation == "sigmoid":
+            self.activation = nn.Sigmoid()
 
     def __call__(self, x: mx.array) -> mx.array:
         """Forward pass.
@@ -279,14 +281,35 @@ class ConvTranspose2dNormAct(nn.Module):
                 self.groups = groups
 
             def __call__(self, x: mx.array) -> mx.array:
-                y = mx.conv_transpose2d(
-                    x,
-                    self.weight,
-                    stride=self.stride,
-                    padding=self.padding,
-                    output_padding=self.output_padding,
-                    groups=self.groups,
-                )
+                # Workaround: mx.conv_transpose2d with groups>1 and stride>1
+                # produces incorrect (zero) output. Split into per-group ops.
+                if self.groups > 1 and max(self.stride) > 1:
+                    ch_per_group_in = x.shape[-1] // self.groups
+                    ch_per_group_out = self.weight.shape[0] // self.groups
+                    outs = []
+                    for g in range(self.groups):
+                        x_g = x[..., g * ch_per_group_in : (g + 1) * ch_per_group_in]
+                        w_g = self.weight[g * ch_per_group_out : (g + 1) * ch_per_group_out]
+                        outs.append(
+                            mx.conv_transpose2d(
+                                x_g,
+                                w_g,
+                                stride=self.stride,
+                                padding=self.padding,
+                                output_padding=self.output_padding,
+                                groups=1,
+                            )
+                        )
+                    y = mx.concatenate(outs, axis=-1)
+                else:
+                    y = mx.conv_transpose2d(
+                        x,
+                        self.weight,
+                        stride=self.stride,
+                        padding=self.padding,
+                        output_padding=self.output_padding,
+                        groups=self.groups,
+                    )
                 if self.bias is not None:
                     y = y + self.bias.reshape(1, 1, 1, -1)
                 return y
@@ -346,6 +369,8 @@ class ConvTranspose2dNormAct(nn.Module):
             self.activation = nn.GELU()
         elif activation == "silu":
             self.activation = nn.SiLU()
+        elif activation == "sigmoid":
+            self.activation = nn.Sigmoid()
 
     def __call__(self, x: mx.array) -> mx.array:
         """Forward pass."""

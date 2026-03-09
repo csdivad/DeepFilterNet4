@@ -17,9 +17,14 @@ git -C "$ROOT_DIR" config core.hooksPath "$ROOT_DIR/.githooks"
 
 chmod +x "$ROOT_DIR/scripts/guard-upstream-remote.sh"
 chmod +x "$ROOT_DIR/.githooks/pre-commit"
-# chmod +x "$ROOT_DIR/.githooks/pre-push"
+chmod +x "$ROOT_DIR/.githooks/pre-push"
 chmod +x "$ROOT_DIR/.githooks/post-checkout"
 chmod +x "$ROOT_DIR/.githooks/post-merge"
 chmod +x "$ROOT_DIR/.githooks/post-rewrite"
+chmod +x "$ROOT_DIR/.githooks/prepare-commit-msg"
 
 echo "Git hooks installed at $ROOT_DIR/.githooks"
+if command -v bd >/dev/null 2>&1; then
+  echo "Beads hook shims are active via the repo-managed .githooks directory."
+  echo "Optional Beads remote replication: bd dolt remote add <name> <url>"
+fi

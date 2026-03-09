@@ -337,7 +337,7 @@ def convert_dfnet3_checkpoint(
         ("erb_dec.conv1p", "erb_decoder.conv1p", 0, 1, None, False),
         ("erb_dec.convt1", "erb_decoder.convt1", 0, 2, 1, True),
         ("erb_dec.conv0p", "erb_decoder.conv0p", 0, 1, None, False),
-        ("erb_dec.conv0_out", "erb_decoder.conv0_out", 0, None, None, False),
+        ("erb_dec.conv0_out", "erb_decoder.conv0_out", 0, 1, None, False),
     ]
     for pt_prefix, mlx_prefix, conv_index, norm_index, pointwise_index, is_transposed in erb_decoder_specs:
         mlx_state.update(

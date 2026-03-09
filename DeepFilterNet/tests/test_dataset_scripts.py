@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "build_mlx_datastore.sh"
 DOWNLOAD_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "download_datasets.sh"
+CHAINS_PREPARE_SCRIPT = REPO_ROOT / "scripts" / "datasets" / "prepare_chains_speech.py"
 
 
 def _write_wav(path: Path, *, sample_rate: int, seconds: float, frequency_hz: float = 440.0) -> None:
@@ -26,9 +30,114 @@ def _write_wav(path: Path, *, sample_rate: int, seconds: float, frequency_hz: fl
         handle.writeframes(bytes(samples))
 
 
+def _write_stereo_wav(
+    path: Path,
+    *,
+    sample_rate: int,
+    seconds: float,
+    left_frequency_hz: float = 220.0,
+    right_frequency_hz: float = 440.0,
+) -> None:
+    frames = int(sample_rate * seconds)
+    amplitude = 12000
+    samples = bytearray()
+    for i in range(frames):
+        left = int(amplitude * math.sin((2.0 * math.pi * left_frequency_hz * i) / sample_rate))
+        right = int(amplitude * math.sin((2.0 * math.pi * right_frequency_hz * i) / sample_rate))
+        samples.extend(int(left).to_bytes(2, byteorder="little", signed=True))
+        samples.extend(int(right).to_bytes(2, byteorder="little", signed=True))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(bytes(samples))
+
+
 def _touch(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"")
+
+
+def _build_fake_chains_corpus(root: Path, *, sample_rate: int) -> Path:
+    mono_specs = {
+        "fast": ("frf01", "frf01_f01_fast.wav"),
+        "retell": ("frf01", "frf01_f01_retell.wav"),
+        "solo": ("frf01", "frf01_f01_solo.wav"),
+        "sync": ("frf01", "frf01_f01_sync_frf02.wav"),
+        "whsp": ("frf01", "frf01_f01_whsp.wav"),
+    }
+    for style, (speaker, filename) in mono_specs.items():
+        _write_wav(
+            root / style / "data" / style / speaker / filename,
+            sample_rate=sample_rate,
+            seconds=1.0,
+            frequency_hz=330.0,
+        )
+
+    _write_stereo_wav(
+        root / "rsi" / "data" / "rsi" / "frf01" / "frf01_f01_fs01_rsi_irf05.wav",
+        sample_rate=sample_rate,
+        seconds=1.0,
+    )
+    return root
+
+
+def _write_fake_python_bin(path: Path) -> None:
+    script = f"""#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REAL_PYTHON = {sys.executable!r}
+LOG_PATH = Path(os.environ["FAKE_PY_LOG"])
+args = sys.argv[1:]
+with LOG_PATH.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps({{"args": args}}) + "\\n")
+
+def arg_value(flag: str) -> str:
+    return args[args.index(flag) + 1]
+
+if args and args[0].endswith("prepare_chains_speech.py"):
+    raise SystemExit(subprocess.call([REAL_PYTHON, *args]))
+
+if args and args[0].endswith("preprocess_clean_speech.py"):
+    file_list = Path(arg_value("--file-list"))
+    output_root = Path(arg_value("--output-root"))
+    base_dir = Path(arg_value("--base-dir")).resolve()
+    output_list = Path(arg_value("--output-list"))
+    outputs: list[str] = []
+    for raw_line in file_list.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        source = Path(line).expanduser().resolve()
+        try:
+            relative = source.relative_to(base_dir)
+        except ValueError:
+            relative = Path("_external") / source.name
+        target = output_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"fake")
+        outputs.append(str(target))
+    output_list.parent.mkdir(parents=True, exist_ok=True)
+    output_list.write_text("".join(f"{{path}}\\n" for path in outputs), encoding="utf-8")
+    raise SystemExit(0)
+
+if len(args) >= 2 and args[0] == "-m" and args[1] == "df_mlx.build_audio_cache":
+    output_dir = Path(arg_value("--output-dir"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "config.json").write_text("{{}}\\n", encoding="utf-8")
+    (output_dir / "index.json").write_text('{{"speech": {{}}, "noise": {{}}, "rir": {{}}}}\\n', encoding="utf-8")
+    raise SystemExit(0)
+
+raise SystemExit(subprocess.call([REAL_PYTHON, *args]))
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
 
 
 def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
@@ -44,8 +153,233 @@ def test_build_mlx_datastore_help_mentions_preprocess_and_merge_short() -> None:
     assert result.returncode == 0, result.stderr
     assert "--preprocess-clean-speech" in result.stdout
     assert "--preprocess-probe-workers" in result.stdout
+    assert "--preprocess-probe-cache" in result.stdout
+    assert "DeepFilterNet3-MLX" in result.stdout
     assert "--merge-short" in result.stdout
+    assert "--include-chains" in result.stdout
+    assert "--chains-dir PATH" in result.stdout
     assert "Examples:" in result.stdout
+
+
+def test_prepare_chains_speech_extracts_rsi_subject_and_reuses_outputs(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    chains_dir = _build_fake_chains_corpus(tmp_path / "CHAINS", sample_rate=sample_rate)
+    prepared_root = tmp_path / "prepared"
+    output_list = tmp_path / "lists" / "chains_clean.txt"
+
+    first = subprocess.run(
+        [
+            sys.executable,
+            str(CHAINS_PREPARE_SCRIPT),
+            "--chains-dir",
+            str(chains_dir),
+            "--prepared-root",
+            str(prepared_root),
+            "--output-list",
+            str(output_list),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert first.returncode == 0, first.stderr
+    entries = [line.strip() for line in output_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(entries) == 6
+
+    raw_rsi = (chains_dir / "rsi" / "data" / "rsi" / "frf01" / "frf01_f01_fs01_rsi_irf05.wav").resolve()
+    prepared_rsi = (prepared_root / "rsi_subject" / "frf01" / "frf01_f01_fs01_rsi_irf05.wav").resolve()
+
+    assert str(raw_rsi) not in entries
+    assert str(prepared_rsi) in entries
+    assert prepared_rsi.exists()
+    with wave.open(str(prepared_rsi), "rb") as handle:
+        assert handle.getnchannels() == 1
+
+    first_mtime = prepared_rsi.stat().st_mtime_ns
+    second = subprocess.run(
+        [
+            sys.executable,
+            str(CHAINS_PREPARE_SCRIPT),
+            "--chains-dir",
+            str(chains_dir),
+            "--prepared-root",
+            str(prepared_root),
+            "--output-list",
+            str(output_list),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert prepared_rsi.stat().st_mtime_ns == first_mtime
+
+
+def test_build_mlx_datastore_include_chains_builds_combined_cache(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    cache_dir = tmp_path / "cache"
+    chains_dir = _build_fake_chains_corpus(tmp_path / "CHAINS", sample_rate=sample_rate)
+
+    speech_file = tmp_path / "speech" / "speech.wav"
+    noise_file = tmp_path / "noise" / "noise.wav"
+    rir_file = tmp_path / "rir" / "rir.wav"
+    _write_wav(speech_file, sample_rate=sample_rate, seconds=1.2)
+    _write_wav(noise_file, sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0)
+    _write_wav(rir_file, sample_rate=sample_rate, seconds=0.1, frequency_hz=110.0)
+
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    clean_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_music.txt"
+    rir_list = lists_dir / "rir_all.txt"
+    clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
+    noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--output-dir",
+            str(cache_dir),
+            "--clean-list",
+            str(clean_list),
+            "--noise-list",
+            str(noise_list),
+            "--rir-list",
+            str(rir_list),
+            "--profile",
+            "prototype",
+            "--include-chains",
+            "--chains-dir",
+            str(chains_dir),
+            "--sample-rate",
+            str(sample_rate),
+            "--segment-length",
+            "1.0",
+            "--min-duration",
+            "0",
+            "--num-workers",
+            "1",
+            "--shard-size",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined_list = lists_dir / "clean_all.with_chains.txt"
+    combined_entries = [line.strip() for line in combined_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(combined_entries) == 7
+
+    index = json.loads((cache_dir / "index.json").read_text(encoding="utf-8"))
+    assert len(index["speech"]) == 7
+    assert any("prepared/chains_speech/rsi_subject" in path for path in index["speech"])
+    assert (
+        str((chains_dir / "rsi" / "data" / "rsi" / "frf01" / "frf01_f01_fs01_rsi_irf05.wav").resolve())
+        not in index["speech"]
+    )
+
+
+def test_build_mlx_datastore_include_chains_preprocess_uses_combined_list_and_common_base(tmp_path: Path) -> None:
+    sample_rate = 16_000
+    data_dir = tmp_path / "data"
+    lists_dir = data_dir / "lists"
+    cache_dir = tmp_path / "cache"
+    chains_dir = _build_fake_chains_corpus(tmp_path / "CHAINS", sample_rate=sample_rate)
+
+    speech_file = tmp_path / "speech" / "speech.wav"
+    noise_file = tmp_path / "noise" / "noise.wav"
+    rir_file = tmp_path / "rir" / "rir.wav"
+    _write_wav(speech_file, sample_rate=sample_rate, seconds=1.2)
+    _write_wav(noise_file, sample_rate=sample_rate, seconds=0.6, frequency_hz=220.0)
+    _write_wav(rir_file, sample_rate=sample_rate, seconds=0.1, frequency_hz=110.0)
+
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    clean_list = lists_dir / "clean_all.txt"
+    noise_list = lists_dir / "noise_music.txt"
+    rir_list = lists_dir / "rir_all.txt"
+    clean_list.write_text(f"{speech_file}\n", encoding="utf-8")
+    noise_list.write_text(f"{noise_file}\n", encoding="utf-8")
+    rir_list.write_text(f"{rir_file}\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake_python.py"
+    fake_log = tmp_path / "fake_python_calls.jsonl"
+    _write_fake_python_bin(fake_python)
+
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = str(fake_python)
+    env["FAKE_PY_LOG"] = str(fake_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(BUILD_SCRIPT),
+            "--data-dir",
+            str(data_dir),
+            "--list-dir",
+            str(lists_dir),
+            "--output-dir",
+            str(cache_dir),
+            "--clean-list",
+            str(clean_list),
+            "--noise-list",
+            str(noise_list),
+            "--rir-list",
+            str(rir_list),
+            "--profile",
+            "prototype",
+            "--include-chains",
+            "--chains-dir",
+            str(chains_dir),
+            "--preprocess-clean-speech",
+            "--sample-rate",
+            str(sample_rate),
+            "--segment-length",
+            "1.0",
+            "--min-duration",
+            "0",
+            "--num-workers",
+            "1",
+            "--shard-size",
+            "1",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    preprocess_call = next(
+        call for call in calls if call["args"] and call["args"][0].endswith("preprocess_clean_speech.py")
+    )
+    build_call = next(call for call in calls if call["args"][:2] == ["-m", "df_mlx.build_audio_cache"])
+
+    preprocess_args = preprocess_call["args"]
+    assert preprocess_args[preprocess_args.index("--file-list") + 1] == str(lists_dir / "clean_all.with_chains.txt")
+    assert Path(preprocess_args[preprocess_args.index("--base-dir") + 1]) == tmp_path.resolve()
+
+    build_args = build_call["args"]
+    assert build_args[build_args.index("--speech-list") + 1] == str(lists_dir / "clean_all.preprocessed.txt")
 
 
 def test_build_mlx_datastore_smoke_prints_cache_dir_override(tmp_path: Path) -> None:

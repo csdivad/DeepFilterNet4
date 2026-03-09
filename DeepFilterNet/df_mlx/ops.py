@@ -12,7 +12,7 @@ All operations are optimized for Apple Silicon unified memory architecture.
 
 import math
 from functools import lru_cache
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
@@ -419,26 +419,59 @@ def erb_fb_and_inverse(
     max_freq: Optional[float] = None,
     min_width: int = 2,
     normalized: bool = True,
+    widths: Optional[List[int]] = None,
 ) -> Tuple[mx.array, mx.array]:
-    """Generate ERB filterbank and its inverse (transpose).
+    """Generate ERB filterbank and its inverse matching PyTorch/libDF semantics.
 
-    Convenience function that returns both the forward and inverse
-    ERB filterbank matrices needed by DFNetMF and other models.
+    The forward filterbank uses rectangular (boxcar) filters with column
+    normalization.  The inverse is the transpose of the **unnormalized**
+    binary matrix so that ``mask @ erb_inv_fb`` maps each frequency bin to
+    the full mask value for its ERB band — exactly as the PyTorch ``Mask``
+    module does.
 
     Args:
         sr: Sample rate in Hz
         fft_size: FFT size
         nb_bands: Number of ERB bands
-        min_freq: Minimum frequency in Hz
-        max_freq: Maximum frequency in Hz (defaults to sr/2)
-        min_width: Minimum filter width in FFT bins
-        normalized: Whether to normalize each filter to sum to 1
+        min_freq: Minimum frequency in Hz (unused when *widths* provided)
+        max_freq: Maximum frequency in Hz (unused when *widths* provided)
+        min_width: Minimum filter width in FFT bins (unused when *widths* provided)
+        normalized: Whether to normalize the forward filterbank columns to sum to 1
+        widths: Explicit per-band widths (e.g. from ``compute_erb_fb`` or
+            ``libdf.DF.erb_widths()``).  When provided, the rectangular boxcar
+            filters are built directly from these widths and the smooth-filter
+            path is bypassed.
 
     Returns:
         Tuple of (erb_fb, erb_inv_fb):
             - erb_fb: Forward filterbank [n_freqs, nb_bands]
             - erb_inv_fb: Inverse filterbank [nb_bands, n_freqs]
     """
+    if widths is not None:
+        n_freqs = fft_size // 2 + 1
+        if len(widths) != nb_bands:
+            raise ValueError(f"len(widths) {len(widths)} != nb_bands {nb_bands}")
+        if sum(widths) != n_freqs:
+            raise ValueError(f"ERB widths sum {sum(widths)} != n_freqs {n_freqs}")
+
+        fb_np = np.zeros((n_freqs, nb_bands), dtype=np.float32)
+        b = 0
+        for i, w in enumerate(widths):
+            fb_np[b : b + int(w), i] = 1.0
+            b += int(w)
+
+        # Inverse: transpose of unnormalized binary matrix (each bin gets 1.0)
+        fb_inv_np = fb_np.T.copy()
+
+        # Forward: normalize columns so each band sums to 1
+        if normalized:
+            col_sums = fb_np.sum(axis=0, keepdims=True)
+            col_sums[col_sums == 0] = 1.0
+            fb_np = fb_np / col_sums
+
+        return mx.array(fb_np), mx.array(fb_inv_np)
+
+    # Fallback: smooth triangular filters (legacy path, not used for inference)
     fb = erb_fb(sr, fft_size, nb_bands, min_freq, max_freq, min_width, normalized, as_numpy=False)
     fb_mx = fb if isinstance(fb, mx.array) else mx.array(fb)
     return fb_mx, mx.transpose(fb_mx)

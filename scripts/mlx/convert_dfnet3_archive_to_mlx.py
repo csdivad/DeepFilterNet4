@@ -9,7 +9,6 @@ result with a strict MLX weight load plus a dummy forward pass.
 from __future__ import annotations
 
 import argparse
-import configparser
 import json
 import shutil
 import sys
@@ -28,71 +27,16 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _parse_tuple(value: str) -> tuple[int, int]:
-    left, right = (part.strip() for part in value.split(",", maxsplit=1))
-    return int(left), int(right)
-
-
 def _build_model_params(config_path: Path):
-    from df.spectral import compute_erb_fb
-    from df_mlx.deepfilternet3 import ModelParams3
+    from df_mlx.deepfilternet3 import load_dfnet3_config
 
-    parser = configparser.ConfigParser()
-    parser.read(config_path)
-
-    sec_df = parser["df"]
-    sec_model = parser["deepfilternet"]
-
-    params = ModelParams3()
-    params.sr = sec_df.getint("sr")
-    params.fft_size = sec_df.getint("fft_size")
-    params.hop_size = sec_df.getint("hop_size")
-    params.nb_erb = sec_df.getint("nb_erb")
-    params.nb_df = sec_df.getint("nb_df")
-    params.df_order = sec_df.getint("df_order")
-    params.df_lookahead = sec_df.getint("df_lookahead")
-    params.lsnr_min = sec_df.getfloat("lsnr_min")
-    params.lsnr_max = sec_df.getfloat("lsnr_max")
-    params.erb_widths = compute_erb_fb(
-        sr=params.sr,
-        fft_size=params.fft_size,
-        nb_bands=params.nb_erb,
-        min_nb_freqs=sec_df.getint("min_nb_erb_freqs"),
-    )
-
-    params.conv_lookahead = sec_model.getint("conv_lookahead")
-    params.conv_ch = sec_model.getint("conv_ch")
-    params.conv_depthwise = sec_model.getboolean("conv_depthwise", fallback=True)
-    params.convt_depthwise = sec_model.getboolean("convt_depthwise", fallback=True)
-    params.conv_kernel = _parse_tuple(sec_model.get("conv_kernel"))
-    params.convt_kernel = _parse_tuple(sec_model.get("convt_kernel"))
-    params.conv_kernel_inp = _parse_tuple(sec_model.get("conv_kernel_inp"))
-    params.emb_hidden_dim = sec_model.getint("emb_hidden_dim")
-    params.emb_num_layers = sec_model.getint("emb_num_layers", fallback=params.emb_num_layers)
-    params.emb_gru_skip_enc = sec_model.get("emb_gru_skip_enc", fallback="none")
-    params.emb_gru_skip = sec_model.get("emb_gru_skip")
-    params.df_hidden_dim = sec_model.getint("df_hidden_dim")
-    params.df_num_layers = sec_model.getint("df_num_layers", fallback=params.df_num_layers)
-    params.df_gru_skip = sec_model.get("df_gru_skip")
-    params.df_pathway_kernel_size_t = sec_model.getint("df_pathway_kernel_size_t")
-    params.enc_concat = sec_model.getboolean("enc_concat")
-    params.linear_groups = sec_model.getint("linear_groups")
-    params.enc_linear_groups = sec_model.getint("enc_linear_groups")
-    params.mask_pf = sec_model.getboolean("mask_pf")
-    return params
+    return load_dfnet3_config(config_path)
 
 
 def _build_model(params):
-    from df_mlx.deepfilternet3 import DFNet3
-    from df_mlx.ops import erb_fb_and_inverse
+    from df_mlx.deepfilternet3 import build_dfnet3_model
 
-    erb_fb_matrix, erb_inv_fb = erb_fb_and_inverse(
-        sr=params.sr,
-        fft_size=params.fft_size,
-        nb_bands=params.nb_erb,
-        min_width=min(params.erb_widths),
-    )
-    return DFNet3(erb_fb_matrix, erb_inv_fb, run_df=True, p=params)
+    return build_dfnet3_model(params, run_df=True)
 
 
 def convert_archive(archive_path: Path, output_dir: Path) -> dict[str, object]:

@@ -12,9 +12,10 @@ If `.beads/` exists → use `bd` for task tracking.
 ```bash
 bd prime              # Get AI-optimized context (run first!)
 bd ready --json       # Find unblocked work
-bd update <id> --status in_progress --json  # Claim work
+bd update <id> --claim --json               # Claim work
 bd close <id> --reason "..." --json         # Complete work
-bd sync               # Persist to git (ALWAYS run at session end)
+bd dolt remote list   # Check whether a Dolt remote is configured
+bd dolt push          # Persist Beads commits when a Dolt remote is configured
 ```
 
 ## Session Protocol
@@ -25,7 +26,11 @@ bd sync               # Persist to git (ALWAYS run at session end)
 
 **End** (MANDATORY):
 ```bash
-bd sync && git push   # Work is NOT complete until pushed
+# If a Dolt remote is configured:
+bd dolt pull
+bd dolt commit -m "Sync beads state"   # when there are pending Dolt changes
+bd dolt push
+git push                                 # Work is NOT complete until pushed
 ```
 
 ## bd vs TodoWrite

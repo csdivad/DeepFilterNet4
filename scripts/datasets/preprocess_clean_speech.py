@@ -9,6 +9,8 @@ be fed directly into ``build_mlx_datastore.sh`` / ``df_mlx.build_audio_cache``.
 from __future__ import annotations
 
 import argparse
+import gc
+import json
 import math
 import os
 import platform
@@ -18,16 +20,20 @@ import sys
 import time
 from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, NamedTuple
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from df.enhance import AudioDataset, enhance, init_df
-from df.io import resample, save_audio
-from df.model import ModelParams
+PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "DeepFilterNet"
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
+
+from df.enhance import AudioDataset, enhance, init_df  # noqa: E402
+from df.io import resample, save_audio  # noqa: E402
+from df.model import ModelParams  # noqa: E402
 
 NON_SPEECH_PATH_MARKERS = frozenset(
     {
@@ -42,8 +48,9 @@ NON_SPEECH_PATH_MARKERS = frozenset(
     }
 )
 
-KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet4-mlx"})
+KNOWN_MLX_MODEL_NAMES = frozenset({"deepfilternet3-mlx", "deepfilternet4-mlx"})
 KNOWN_TORCH_MODEL_NAMES = frozenset({"deepfilternet", "deepfilternet2", "deepfilternet3"})
+MLX_CLEAR_CACHE_INTERVAL = 8
 
 
 class PreprocessProgressStats:
@@ -62,6 +69,12 @@ class EnhanceBackend:
         self.name = name
         self.sample_rate = sample_rate
         self.enhance_audio = enhance_audio
+
+
+class ProbeCacheEntry(NamedTuple):
+    duration_seconds: float
+    size_bytes: int
+    mtime_ns: int
 
 
 def read_file_list(path: Path) -> List[Path]:
@@ -94,6 +107,74 @@ def write_output_list(paths: Iterable[Path], output_list: Path) -> None:
 
 def write_resumable_output_list(output_paths: list[Path], completed_paths: set[Path], output_list: Path) -> None:
     write_output_list((path for path in output_paths if path in completed_paths), output_list)
+
+
+def resolve_probe_cache_path(output_list: Path, explicit_cache_path: str | None) -> Path:
+    if explicit_cache_path:
+        return Path(explicit_cache_path).expanduser().resolve()
+    cache_stem = output_list.stem if output_list.suffix else output_list.name
+    return output_list.with_name(f"{cache_stem}.ffprobe-cache.json")
+
+
+def _build_probe_cache_entry(path: Path, duration_seconds: float) -> ProbeCacheEntry:
+    stat = path.stat()
+    return ProbeCacheEntry(
+        duration_seconds=duration_seconds,
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+    )
+
+
+def load_probe_cache(path: Path) -> dict[Path, ProbeCacheEntry]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[warn] Ignoring unreadable ffprobe cache {path}: {exc}", file=sys.stderr)
+        return {}
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+
+    cache: dict[Path, ProbeCacheEntry] = {}
+    for raw_path, raw_entry in entries.items():
+        if not isinstance(raw_path, str) or not isinstance(raw_entry, dict):
+            continue
+        try:
+            duration_seconds = float(raw_entry["duration_seconds"])
+            size_bytes = int(raw_entry["size_bytes"])
+            mtime_ns = int(raw_entry["mtime_ns"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(duration_seconds) or duration_seconds < 0.0 or size_bytes < 0 or mtime_ns < 0:
+            continue
+        cache[Path(raw_path)] = ProbeCacheEntry(
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            mtime_ns=mtime_ns,
+        )
+    return cache
+
+
+def write_probe_cache(path: Path, entries: dict[Path, ProbeCacheEntry]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "entries": {
+            str(source_path): {
+                "duration_seconds": entry.duration_seconds,
+                "size_bytes": entry.size_bytes,
+                "mtime_ns": entry.mtime_ns,
+            }
+            for source_path, entry in sorted(entries.items(), key=lambda item: str(item[0]))
+        },
+    }
+    temp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(path)
 
 
 def find_output_path_collisions(sources: list[Path], output_paths: list[Path]) -> dict[Path, list[Path]]:
@@ -163,12 +244,27 @@ def model_requests_mlx(model_base_dir: str | None) -> bool:
     return "mlx" in lowered or path.name.lower() in KNOWN_MLX_MODEL_NAMES or path.is_dir()
 
 
+def model_explicitly_requests_mlx(model_base_dir: str | None) -> bool:
+    if not model_base_dir:
+        return False
+    lowered = str(model_base_dir).strip().lower()
+    path = Path(model_base_dir).expanduser()
+    return lowered in KNOWN_MLX_MODEL_NAMES or "mlx" in lowered or path.name.lower() in KNOWN_MLX_MODEL_NAMES
+
+
 def should_prefer_mlx_backend(model_base_dir: str | None, requested_device: str | None) -> bool:
     if not running_on_apple_silicon():
         return False
     if requested_device and requested_device.lower() not in {"mps"}:
         return False
     return model_requests_mlx(model_base_dir)
+
+
+def resolve_torch_fallback_model(model_base_dir: str | None) -> str:
+    if model_explicitly_requests_mlx(model_base_dir):
+        print("[warn] MLX model requested but MLX backend unavailable; falling back to DeepFilterNet3 (torch).")
+        return "DeepFilterNet3"
+    return model_base_dir or "DeepFilterNet3"
 
 
 def is_complete_output(path: Path) -> bool:
@@ -179,7 +275,7 @@ def is_complete_output(path: Path) -> bool:
 
 
 def build_temp_output_path(target: Path) -> Path:
-    return target.with_name(f".{target.name}.partial.{os.getpid()}")
+    return target.with_name(f".{target.stem}.partial.{os.getpid()}{target.suffix}")
 
 
 def resolve_ffprobe_bin() -> str:
@@ -209,20 +305,82 @@ def load_torch_backend(model_base_dir: str, requested_device: str | None) -> Enh
     return EnhanceBackend(name="torch", sample_rate=df_sr, enhance_audio=enhance_audio)
 
 
-def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
+def _import_mlx_enhance_module():
     from df_mlx import enhance as mlx_enhance_mod
 
+    return mlx_enhance_mod
+
+
+def clear_mlx_cache(mx_module) -> None:
+    clear_cache = getattr(mx_module, "clear_cache", None)
+    if callable(clear_cache):
+        clear_cache()
+        return
+    metal = getattr(mx_module, "metal", None)
+    if metal is not None:
+        metal_clear_cache = getattr(metal, "clear_cache", None)
+        if callable(metal_clear_cache):
+            metal_clear_cache()
+
+
+def is_mlx_resource_limit_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "metal::malloc" in message or ("resource limit" in message and "metal" in message)
+
+
+def _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params):
+    enhanced = mlx_enhance_mod.enhance(
+        model,
+        audio_mx,
+        params,
+        compensate_delay=True,
+    )
+    mlx_enhance_mod.mx.eval(enhanced)
+    return enhanced
+
+
+def _mlx_output_to_torch(enhanced) -> torch.Tensor:
+    enhanced_np = np.array(enhanced, copy=True)
+    return torch.from_numpy(enhanced_np)
+
+
+def load_mlx_backend(model_base_dir: str) -> EnhanceBackend:
+    mlx_enhance_mod = _import_mlx_enhance_module()
+
     model, params, _, _ = mlx_enhance_mod.load_model(model_path=model_base_dir, epoch="best")
+    inference_calls = 0
 
     def enhance_audio(audio: torch.Tensor) -> torch.Tensor:
-        enhanced = mlx_enhance_mod.enhance(
-            model,
-            mlx_enhance_mod.mx.array(audio.detach().cpu().numpy()),
-            params,
-            compensate_delay=True,
-        )
-        mlx_enhance_mod.mx.eval(enhanced)
-        return torch.from_numpy(np.asarray(enhanced))
+        nonlocal inference_calls
+
+        audio_np = audio.detach().cpu().numpy()
+        audio_mx = None
+        enhanced = None
+        result = None
+        try:
+            audio_mx = mlx_enhance_mod.mx.array(audio_np)
+            for attempt in range(2):
+                try:
+                    enhanced = _run_mlx_enhancement(mlx_enhance_mod, model, audio_mx, params)
+                    break
+                except Exception as exc:
+                    if attempt == 0 and is_mlx_resource_limit_error(exc):
+                        clear_mlx_cache(mlx_enhance_mod.mx)
+                        gc.collect()
+                        audio_mx = mlx_enhance_mod.mx.array(audio_np)
+                        continue
+                    clear_mlx_cache(mlx_enhance_mod.mx)
+                    gc.collect()
+                    raise
+            result = _mlx_output_to_torch(enhanced)
+            return result
+        finally:
+            inference_calls += 1
+            if inference_calls % MLX_CLEAR_CACHE_INTERVAL == 0:
+                clear_mlx_cache(mlx_enhance_mod.mx)
+                gc.collect()
+            del audio_mx
+            del enhanced
 
     return EnhanceBackend(name="mlx", sample_rate=params.sr, enhance_audio=enhance_audio)
 
@@ -233,7 +391,7 @@ def resolve_backend(model_base_dir: str, requested_device: str | None) -> Enhanc
             return load_mlx_backend(model_base_dir)
         except Exception as exc:
             print(f"[warn] Failed to initialize MLX preprocessing backend, falling back to torch: {exc}")
-    return load_torch_backend(model_base_dir, requested_device)
+    return load_torch_backend(resolve_torch_fallback_model(model_base_dir), requested_device)
 
 
 def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
@@ -265,20 +423,49 @@ def probe_audio_duration_seconds(path: Path, ffprobe_bin: str) -> float:
     return duration_seconds
 
 
-def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_workers: int) -> dict[Path, float]:
+def probe_audio_durations(
+    paths: Iterable[Path],
+    ffprobe_bin: str,
+    *,
+    num_workers: int,
+    cache_path: Path | None = None,
+) -> dict[Path, float]:
     ordered_paths = list(paths)
     if not ordered_paths:
         return {}
 
+    cache_entries = load_probe_cache(cache_path) if cache_path is not None else {}
     durations: dict[Path, float] = {}
     failures: list[str] = []
     discovered_audio_seconds = 0.0
     start_time = time.perf_counter()
-    max_inflight = max(1, min(len(ordered_paths), max(4, num_workers * 4)))
+    probe_paths: list[Path] = []
+
+    for path in ordered_paths:
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+            continue
+        cached = cache_entries.get(path)
+        if (
+            cached is not None
+            and cached.size_bytes == stat.st_size
+            and cached.mtime_ns == stat.st_mtime_ns
+            and math.isfinite(cached.duration_seconds)
+            and cached.duration_seconds >= 0.0
+        ):
+            durations[path] = cached.duration_seconds
+            discovered_audio_seconds += cached.duration_seconds
+        else:
+            probe_paths.append(path)
+
+    max_inflight = max(1, min(len(probe_paths), max(4, num_workers * 4))) if probe_paths else 1
+    completed_files = len(durations)
 
     with ThreadPoolExecutor(max_workers=max(1, num_workers)) as probe_pool:
         pending_futures: dict[Future[float], Path] = {}
-        path_iter = iter(ordered_paths)
+        path_iter = iter(probe_paths)
 
         def schedule_probe_jobs() -> None:
             while len(pending_futures) < max_inflight:
@@ -290,6 +477,7 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
 
         with tqdm(
             total=len(ordered_paths),
+            initial=completed_files,
             desc="ffprobe",
             unit="file",
             dynamic_ncols=True,
@@ -299,10 +487,15 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
         ) as progress:
             schedule_probe_jobs()
             progress.set_postfix_str(
-                build_probe_postfix(0, len(ordered_paths), discovered_audio_seconds, 0, start_time=start_time),
+                build_probe_postfix(
+                    completed_files,
+                    len(ordered_paths),
+                    discovered_audio_seconds,
+                    len(failures),
+                    start_time=start_time,
+                ),
                 refresh=False,
             )
-            completed_files = 0
             while pending_futures:
                 completed, _ = wait(set(pending_futures), return_when=FIRST_COMPLETED)
                 for future in completed:
@@ -311,6 +504,7 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
                         duration_seconds = future.result()
                         durations[path] = duration_seconds
                         discovered_audio_seconds += duration_seconds
+                        cache_entries[path] = _build_probe_cache_entry(path, duration_seconds)
                     except Exception as exc:  # pragma: no cover - exercised via main guard path
                         failures.append(f"{path}: {exc}")
                     completed_files += 1
@@ -326,6 +520,9 @@ def probe_audio_durations(paths: Iterable[Path], ffprobe_bin: str, *, num_worker
                     ),
                     refresh=False,
                 )
+
+    if cache_path is not None and cache_entries:
+        write_probe_cache(cache_path, cache_entries)
     if failures:
         preview = "\n".join(f"  {item}" for item in failures[:10])
         remainder = len(failures) - min(len(failures), 10)
@@ -535,6 +732,11 @@ def parse_args() -> argparse.Namespace:
         help="Parallel ffprobe workers used to estimate pending audio duration before enhancement (default: auto).",
     )
     parser.add_argument(
+        "--probe-cache",
+        default=None,
+        help="JSON cache for ffprobe duration results; defaults to a sibling of --output-list. Unchanged files reuse cached durations on reruns.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Rebuild outputs even when the mirrored file already exists.",
@@ -587,6 +789,7 @@ def main() -> int:
     completed_count = len(sources) - len(pending_sources)
     save_workers = choose_save_workers(args.num_workers, effective_device)
     probe_workers = max(1, getattr(args, "probe_workers", 0) or choose_probe_workers(args.num_workers))
+    probe_cache_path = resolve_probe_cache_path(output_list, getattr(args, "probe_cache", None))
 
     write_resumable_output_list(output_paths, completed_paths, output_list)
 
@@ -599,6 +802,7 @@ def main() -> int:
     print(f"Pending files:   {len(pending_sources):,}")
     print(f"Output root:     {output_root}")
     print(f"Output list:     {output_list}")
+    print(f"Probe cache:     {probe_cache_path}")
     print(f"Base dir:        {base_dir}")
     print(f"Model:           {args.model_base_dir}")
     print(f"Device:          {effective_device}")
@@ -615,7 +819,12 @@ def main() -> int:
 
     ffprobe_bin = resolve_ffprobe_bin()
     print(f"Duration scan:   ffprobe over {len(pending_sources):,} pending files")
-    pending_source_durations = probe_audio_durations(pending_sources, ffprobe_bin, num_workers=probe_workers)
+    pending_source_durations = probe_audio_durations(
+        pending_sources,
+        ffprobe_bin,
+        num_workers=probe_workers,
+        cache_path=probe_cache_path,
+    )
     total_audio_seconds = sum(pending_source_durations.values())
     print(f"Pending audio:   {total_audio_seconds / 3600.0:.2f}h")
 

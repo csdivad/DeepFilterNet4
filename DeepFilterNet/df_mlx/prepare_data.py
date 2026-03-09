@@ -28,7 +28,7 @@ import argparse
 import random
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import List, Optional, Tuple, cast
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy import signal as scipy_signal

@@ -3,9 +3,39 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DEFAULT_DATA_DIR="/Volumes/TrainingData/datasets"
+DEFAULT_CHAINS_DIR="/Volumes/TrainingData/CHAINS"
 if [[ ! -d "${DEFAULT_DATA_DIR}" ]]; then
   DEFAULT_DATA_DIR="${ROOT_DIR}/data"
 fi
+
+detect_apple_silicon_tier() {
+  if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+    echo "non-apple"
+    return
+  fi
+
+  local brand_string
+  brand_string="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  case "${brand_string}" in
+    *Ultra*)
+      echo "ultra"
+      ;;
+    *Max*)
+      echo "max"
+      ;;
+    *Pro*)
+      echo "pro"
+      ;;
+    Apple*)
+      echo "entry"
+      ;;
+    *)
+      echo "entry"
+      ;;
+  esac
+}
+
+APPLE_SILICON_TIER="$(detect_apple_silicon_tier)"
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "${PYTHON_BIN}" ]]; then
   if [[ -x "${ROOT_DIR}/.venv/bin/python3" ]]; then
@@ -22,6 +52,56 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   fi
 fi
 
+DEFAULT_MLX_PREPROCESS_MODEL="${ROOT_DIR}/models/mlx/DeepFilterNet3-MLX"
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" && -f "${DEFAULT_MLX_PREPROCESS_MODEL}/config.ini" ]]; then
+  DEFAULT_PREPROCESS_MODEL="${DEFAULT_MLX_PREPROCESS_MODEL}"
+else
+  DEFAULT_PREPROCESS_MODEL="DeepFilterNet3"
+fi
+
+write_atomic_stream() {
+  local out_file="$1"
+  local tmp_file="${out_file}.tmp.$$"
+  cat > "${tmp_file}"
+  mv "${tmp_file}" "${out_file}"
+}
+
+merge_unique_file_lists() {
+  local out_file="$1"
+  shift
+  {
+    for list_file in "$@"; do
+      if [[ -f "${list_file}" ]]; then
+        cat "${list_file}"
+      fi
+    done
+  } | awk 'NF && $0 !~ /^#/ && !seen[$0]++' | write_atomic_stream "${out_file}"
+  echo "[ok] wrote $(wc -l < "${out_file}") entries -> ${out_file}"
+}
+
+compute_common_base_dir() {
+  local list_file="$1"
+  "${PYTHON_BIN}" - "${list_file}" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+list_path = Path(sys.argv[1]).expanduser().resolve()
+parent_dirs: list[str] = []
+with list_path.open() as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parent_dirs.append(str(Path(line).expanduser().resolve().parent))
+
+if not parent_dirs:
+    raise SystemExit(f"No speech entries found in {list_path}")
+
+print(os.path.commonpath(parent_dirs))
+PY
+}
+
 usage_helptext() {
   cat <<EOF
 Usage:
@@ -34,9 +114,13 @@ Core options:
   --output-dir PATH           Output cache directory
   --list-dir PATH             Directory containing clean/noise/RIR file lists
   --profile NAME              prototype | production | apple
+                              (apple auto-tunes worker defaults by chip class)
   --clean-list PATH           Clean speech file list
   --noise-list PATH           Noise/music file list
   --rir-list PATH             Optional RIR file list
+  --include-chains            Append CHAINS speaking-style recordings to the clean list
+                              (mono styles + extracted RSI speaker channel)
+  --chains-dir PATH           CHAINS corpus root (default: ${DEFAULT_CHAINS_DIR})
 
 Audio/cache options:
   --sample-rate HZ            Target sample rate (default: 48000)
@@ -57,13 +141,17 @@ Optional clean-speech preprocessing:
   --preprocess-output-root P  Directory for preprocessed speech mirror tree
   --preprocess-base-dir P     Base dir used to preserve relative paths
   --preprocess-output-list P  File list written for preprocessed outputs
-  --preprocess-model NAME     Model name or model dir (default: DeepFilterNet3;
-                              Apple Silicon auto-prefers df_mlx for MLX models)
+  --preprocess-model NAME     Model name or model dir (default: repo-local
+                              models/mlx/DeepFilterNet3-MLX on Apple Silicon
+                              when available, otherwise DeepFilterNet3)
   --preprocess-device DEV     cpu | cuda | mps | auto
-  --preprocess-workers N      Input-loading workers for preprocessing (default: 2)
+  --preprocess-workers N      Input-loading workers for preprocessing
+                              (default: chip-aware under apple profile)
   --preprocess-probe-workers N
                               Parallel ffprobe workers used to estimate pending
                               clean-speech duration before enhancement
+  --preprocess-probe-cache P  Optional JSON cache for ffprobe duration results
+                              (default: auto path derived from the preprocess output list)
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
 
 General:
@@ -84,6 +172,14 @@ Examples:
     --profile apple \
     --merge-short \
     --preprocess-clean-speech
+
+  # Append CHAINS speaking-style speech and preprocess it in the same pass.
+  ./build_mlx_datastore.sh \
+    --profile apple \
+    --merge-short \
+    --include-chains \
+    --chains-dir /Volumes/TrainingData/CHAINS \
+    --preprocess-clean-speech
 EOF
 }
 
@@ -94,6 +190,7 @@ CLI_PROFILE=""
 CLI_CLEAN_LIST=""
 CLI_NOISE_LIST=""
 CLI_RIR_LIST=""
+CLI_CHAINS_DIR=""
 CLI_SR=""
 CLI_SEGMENT_LENGTH=""
 CLI_SNR_MIN=""
@@ -110,9 +207,11 @@ CLI_PREPROCESS_MODEL=""
 CLI_PREPROCESS_DEVICE=""
 CLI_PREPROCESS_WORKERS=""
 CLI_PREPROCESS_PROBE_WORKERS=""
+CLI_PREPROCESS_PROBE_CACHE=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
+INCLUDE_CHAINS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -142,6 +241,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rir-list)
       CLI_RIR_LIST="$2"
+      shift 2
+      ;;
+    --include-chains)
+      INCLUDE_CHAINS=1
+      shift
+      ;;
+    --chains-dir)
+      CLI_CHAINS_DIR="$2"
       shift 2
       ;;
     --sample-rate)
@@ -220,6 +327,10 @@ while [[ $# -gt 0 ]]; do
       CLI_PREPROCESS_PROBE_WORKERS="$2"
       shift 2
       ;;
+    --preprocess-probe-cache)
+      CLI_PREPROCESS_PROBE_CACHE="$2"
+      shift 2
+      ;;
     --preprocess-overwrite)
       PREPROCESS_OVERWRITE=1
       shift
@@ -236,6 +347,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+PREPROCESS_BASE_DIR_WAS_SET=0
+if [[ -n "${CLI_PREPROCESS_BASE_DIR}" || -n "${PREPROCESS_BASE_DIR:-}" ]]; then
+  PREPROCESS_BASE_DIR_WAS_SET=1
+fi
+
 DATA_DIR="${CLI_DATA_DIR:-${DATA_DIR:-${DEFAULT_DATA_DIR}}}"
 OUTPUT_DIR="${CLI_OUTPUT_DIR:-${OUTPUT_DIR:-${DATA_DIR}/mlx_audio_cache}}"
 LIST_DIR="${CLI_LIST_DIR:-${LIST_DIR:-${DATA_DIR}/lists}}"
@@ -250,14 +366,18 @@ RIR_PROB="${CLI_RIR_PROB:-${RIR_PROB:-0.5}}"
 CLEAN_LIST="${CLI_CLEAN_LIST:-${CLEAN_LIST:-${LIST_DIR}/clean_all.txt}}"
 NOISE_LIST="${CLI_NOISE_LIST:-${NOISE_LIST:-${LIST_DIR}/noise_music.txt}}"
 RIR_LIST="${CLI_RIR_LIST:-${RIR_LIST:-${LIST_DIR}/rir_all.txt}}"
+CHAINS_DIR="${CLI_CHAINS_DIR:-${CHAINS_DIR:-${DEFAULT_CHAINS_DIR}}}"
+CHAINS_PREPARED_ROOT="${CHAINS_PREPARED_ROOT:-${DATA_DIR}/prepared/chains_speech}"
+CHAINS_LIST="${CHAINS_LIST:-${LIST_DIR}/chains_clean.txt}"
+COMBINED_CLEAN_LIST="${COMBINED_CLEAN_LIST:-${LIST_DIR}/clean_all.with_chains.txt}"
 
 PREPROCESS_OUTPUT_ROOT="${CLI_PREPROCESS_OUTPUT_ROOT:-${PREPROCESS_OUTPUT_ROOT:-${DATA_DIR}/preprocessed/dfn3_speech_clean}}"
 PREPROCESS_BASE_DIR="${CLI_PREPROCESS_BASE_DIR:-${PREPROCESS_BASE_DIR:-${DATA_DIR}/raw}}"
 PREPROCESS_OUTPUT_LIST="${CLI_PREPROCESS_OUTPUT_LIST:-${PREPROCESS_OUTPUT_LIST:-${LIST_DIR}/clean_all.preprocessed.txt}}"
-PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-DeepFilterNet3}}"
+PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-${DEFAULT_PREPROCESS_MODEL}}}"
 PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
-PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-2}}"
 PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
+PREPROCESS_PROBE_CACHE="${CLI_PREPROCESS_PROBE_CACHE:-${PREPROCESS_PROBE_CACHE:-}}"
 
 case "${PROFILE}" in
   prototype)
@@ -269,7 +389,24 @@ case "${PROFILE}" in
     SHARD_SIZE_DEFAULT=500
     ;;
   apple)
-    NUM_WORKERS_DEFAULT=4
+    case "${APPLE_SILICON_TIER}" in
+      ultra)
+        NUM_WORKERS_DEFAULT=8
+        PREPROCESS_WORKERS_DEFAULT=4
+        ;;
+      max)
+        NUM_WORKERS_DEFAULT=6
+        PREPROCESS_WORKERS_DEFAULT=4
+        ;;
+      pro)
+        NUM_WORKERS_DEFAULT=4
+        PREPROCESS_WORKERS_DEFAULT=2
+        ;;
+      *)
+        NUM_WORKERS_DEFAULT=2
+        PREPROCESS_WORKERS_DEFAULT=1
+        ;;
+    esac
     SHARD_SIZE_DEFAULT=500
     ;;
   *)
@@ -278,21 +415,35 @@ case "${PROFILE}" in
     ;;
 esac
 
+if [[ "${PROFILE}" != "apple" ]]; then
+  PREPROCESS_WORKERS_DEFAULT=2
+fi
+
 NUM_WORKERS="${CLI_NUM_WORKERS:-${NUM_WORKERS:-${NUM_WORKERS_DEFAULT}}}"
 SHARD_SIZE="${CLI_SHARD_SIZE:-${SHARD_SIZE:-${SHARD_SIZE_DEFAULT}}}"
 MAX_PENDING_BYTES="${CLI_MAX_PENDING_BYTES:-${MAX_PENDING_BYTES:-8}}"
 MIN_DURATION="${CLI_MIN_DURATION:-${MIN_DURATION:-${SEGMENT_LENGTH}}}"
 MERGE_SHORT="${CLI_MERGE_SHORT:-${MERGE_SHORT:-false}}"
+PREPROCESS_WORKERS="${CLI_PREPROCESS_WORKERS:-${PREPROCESS_WORKERS:-${PREPROCESS_WORKERS_DEFAULT}}}"
 
 echo "=============================================="
 echo "DeepFilterNet MLX Audio Cache Builder"
 echo "=============================================="
 echo "Profile:            ${PROFILE}"
+if [[ "${PROFILE}" == "apple" ]]; then
+  echo "Apple tier:         ${APPLE_SILICON_TIER}"
+fi
 echo "Root dir:           ${ROOT_DIR}"
 echo "Python:             ${PYTHON_BIN}"
 echo "Data dir:           ${DATA_DIR}"
 echo "Output dir:         ${OUTPUT_DIR}"
 echo "List dir:           ${LIST_DIR}"
+echo "CHAINS speech:      $([[ ${INCLUDE_CHAINS} -eq 1 ]] && echo "enabled" || echo "disabled")"
+if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
+  echo "CHAINS dir:         ${CHAINS_DIR}"
+  echo "CHAINS prepared:    ${CHAINS_PREPARED_ROOT}"
+  echo "CHAINS list:        ${CHAINS_LIST}"
+fi
 echo "Clean list:         ${CLEAN_LIST}"
 echo "Noise list:         ${NOISE_LIST}"
 if [[ -f "${RIR_LIST}" ]]; then
@@ -312,7 +463,7 @@ echo "Max pending budget: ${MAX_PENDING_BYTES} GB"
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   echo "Preprocess speech:  enabled"
   echo "Preprocess model:   ${PREPROCESS_MODEL}"
-  echo "Preprocess backend: auto (Apple Silicon prefers df_mlx for MLX models)"
+  echo "Preprocess backend: auto (Apple Silicon uses df_mlx for MLX bundles; torch otherwise)"
   echo "Preprocess root:    ${PREPROCESS_OUTPUT_ROOT}"
   echo "Preprocess base:    ${PREPROCESS_BASE_DIR}"
   echo "Preprocess list:    ${PREPROCESS_OUTPUT_LIST}"
@@ -321,6 +472,11 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     echo "Preprocess probe workers: ${PREPROCESS_PROBE_WORKERS}"
   else
     echo "Preprocess probe workers: auto"
+  fi
+  if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
+    echo "Preprocess probe cache: ${PREPROCESS_PROBE_CACHE}"
+  else
+    echo "Preprocess probe cache: auto"
   fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     echo "Preprocess device:  ${PREPROCESS_DEVICE}"
@@ -354,22 +510,56 @@ mkdir -p "${LIST_DIR}"
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
+if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
+  if [[ ! -d "${CHAINS_DIR}" ]]; then
+    echo "Error: CHAINS corpus root not found: ${CHAINS_DIR}" >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "Preparing CHAINS clean-speech additions..."
+  chains_cmd=(
+    "${PYTHON_BIN}"
+    "${ROOT_DIR}/scripts/datasets/prepare_chains_speech.py"
+    --chains-dir "${CHAINS_DIR}"
+    --prepared-root "${CHAINS_PREPARED_ROOT}"
+    --output-list "${CHAINS_LIST}"
+  )
+  "${chains_cmd[@]}"
+  if [[ ! -f "${CHAINS_LIST}" ]]; then
+    echo "Error: CHAINS preparation did not produce list ${CHAINS_LIST}" >&2
+    exit 1
+  fi
+  merge_unique_file_lists "${COMBINED_CLEAN_LIST}" "${CLEAN_LIST}" "${CHAINS_LIST}"
+  CLEAN_LIST_TO_USE="${COMBINED_CLEAN_LIST}"
+fi
+
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
+  PREPROCESS_BASE_DIR_TO_USE="${PREPROCESS_BASE_DIR}"
+  if [[ ${INCLUDE_CHAINS} -eq 1 && ${PREPROCESS_BASE_DIR_WAS_SET} -eq 0 ]]; then
+    PREPROCESS_BASE_DIR_TO_USE="$(compute_common_base_dir "${CLEAN_LIST_TO_USE}")"
+  fi
   echo ""
   echo "Running clean-speech preprocessing before cache build..."
   echo "Only the clean/speech list is eligible; noise and RIR lists are left untouched."
+  if [[ "${PREPROCESS_BASE_DIR_TO_USE}" != "${PREPROCESS_BASE_DIR}" ]]; then
+    echo "Preprocess base auto-adjusted for combined speech roots: ${PREPROCESS_BASE_DIR_TO_USE}"
+  fi
   preprocess_cmd=(
     "${PYTHON_BIN}"
     "${ROOT_DIR}/scripts/datasets/preprocess_clean_speech.py"
-    --file-list "${CLEAN_LIST}"
+    --file-list "${CLEAN_LIST_TO_USE}"
     --output-root "${PREPROCESS_OUTPUT_ROOT}"
-    --base-dir "${PREPROCESS_BASE_DIR}"
+    --base-dir "${PREPROCESS_BASE_DIR_TO_USE}"
     --output-list "${PREPROCESS_OUTPUT_LIST}"
     --model-base-dir "${PREPROCESS_MODEL}"
     --num-workers "${PREPROCESS_WORKERS}"
   )
   if [[ -n "${PREPROCESS_PROBE_WORKERS}" ]]; then
     preprocess_cmd+=(--probe-workers "${PREPROCESS_PROBE_WORKERS}")
+  fi
+  if [[ -n "${PREPROCESS_PROBE_CACHE}" ]]; then
+    preprocess_cmd+=(--probe-cache "${PREPROCESS_PROBE_CACHE}")
   fi
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")

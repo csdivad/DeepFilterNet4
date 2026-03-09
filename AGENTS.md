@@ -9,13 +9,17 @@
 ## Issue Tracking
 
 This project uses **bd (beads)** for issue tracking.
-Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
+Run `bd prime` for workflow context. This repo keeps the Beads hook shims in
+`.githooks/`, so enable them with `./setup.sh` or `scripts/install-hooks.sh`.
+Use `bd hooks install` only if you intentionally want upstream-managed hooks
+instead of the repo-managed shims.
 
 **Quick reference:**
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue
 - `bd close <id>` - Complete work
-- `bd dolt push` - Push beads to remote
+- `bd dolt remote list` - Check whether a Dolt remote is configured
+- `bd dolt push` - Push beads to remote **when a Dolt remote is configured**
 
 For full workflow details: `bd prime`
 
@@ -63,7 +67,12 @@ For full workflow details: `bd prime`
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd dolt status
+   bd dolt remote list
+   # If a Dolt remote is configured, then:
+   bd dolt pull
+   bd dolt commit -m "Sync beads state"   # when there are pending Dolt changes
+   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -76,3 +85,4 @@ For full workflow details: `bd prime`
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+- Do **not** run `bd sync`; the current local CLI uses `bd dolt ...` commands instead

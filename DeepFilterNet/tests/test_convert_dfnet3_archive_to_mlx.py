@@ -28,7 +28,7 @@ def test_convert_archive_creates_valid_mlx_bundle(tmp_path: Path) -> None:
     report = module.convert_archive(archive, output_dir)
 
     assert report["archive"] == str(archive)
-    assert report["converted_keys"] == 110
+    assert report["converted_keys"] == 114
     assert report["output_shapes"] == {"real": [1, 4, 481], "imag": [1, 4, 481]}
     assert (output_dir / "config.ini").exists()
     assert (output_dir / "checkpoints" / "model_120.safetensors").exists()

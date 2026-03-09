@@ -15,13 +15,16 @@ applyTo: "**"
 ## Issue Tracking
 
 This project uses **bd (beads)** for issue tracking.
-Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
+Run `bd prime` for workflow context. This repo keeps the Beads hook shims in
+`.githooks/`, so enable them with `./setup.sh` or `scripts/install-hooks.sh`.
+Use `bd hooks install` only if you intentionally want upstream-managed hooks.
 
 **Quick reference:**
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue
 - `bd close <id>` - Complete work
-- `bd dolt push` - Push beads to remote
+- `bd dolt remote list` - Check whether a Dolt remote is configured
+- `bd dolt push` - Push beads to remote **when a Dolt remote is configured**
 
 For full workflow details: `bd prime`
 

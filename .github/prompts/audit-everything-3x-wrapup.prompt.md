@@ -72,7 +72,7 @@ Do **not** stop until all of the following are true:
 - relevant tests pass,
 - todo/checklist fully resolved,
 - beads issue closed,
-- `bd sync` run,
+- `bd dolt remote list` checked, and `bd dolt pull|commit|push` run when a Dolt remote is configured,
 - changes committed with Conventional Commit style,
 - branch pushed and working tree clean.
 
