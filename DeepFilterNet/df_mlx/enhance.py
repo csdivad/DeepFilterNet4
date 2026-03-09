@@ -271,6 +271,8 @@ def load_model(
         else:
             logger.warning(f"No checkpoint found in {checkpoint_dir}")
 
+    model.eval()
+
     # Model suffix for output naming
     suffix = model_dir.name
 

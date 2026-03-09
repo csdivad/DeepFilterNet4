@@ -575,7 +575,7 @@ class ErbDecoder3(nn.Module):
             1,
             kernel_size=p.conv_kernel,
             bias=False,
-            norm=None,
+            norm="batch",
             activation="sigmoid",
             separable=p.conv_depthwise,
         )
