@@ -115,6 +115,7 @@ def test_main_resumes_existing_outputs_by_default(tmp_path: Path, monkeypatch) -
             num_workers=2,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -198,6 +199,7 @@ def test_main_fully_resumed_run_skips_ffprobe_and_backend_init(tmp_path: Path, m
             num_workers=2,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -252,6 +254,7 @@ def test_main_rejects_colliding_output_paths(tmp_path: Path, monkeypatch) -> Non
             num_workers=0,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -432,6 +435,7 @@ def test_main_rejects_obvious_non_speech_sources_by_default(tmp_path: Path, monk
             num_workers=0,
             probe_workers=None,
             probe_cache=None,
+            enhance_batch_size=None,
             overwrite=False,
             allow_non_speech_paths=False,
         ),
@@ -696,3 +700,35 @@ def test_resolve_probe_cache_path_defaults_next_to_output_list(tmp_path: Path) -
     cache_path = module.resolve_probe_cache_path(output_list, explicit_cache_path=None)
 
     assert cache_path == tmp_path / "clean_all.preprocessed.ffprobe-cache.json"
+
+
+def test_choose_enhance_batch_size_defaults_to_mlx_batching() -> None:
+    module = _load_module()
+
+    assert module.choose_enhance_batch_size("mlx") == module.MLX_DEFAULT_ENHANCE_BATCH_SIZE
+    assert module.choose_enhance_batch_size("torch") == 1
+    assert module.choose_enhance_batch_size("mlx", override=8) == 8
+    assert module.choose_enhance_batch_size("torch", override=2) == 2
+    assert module.choose_enhance_batch_size("mlx", override=None) == module.MLX_DEFAULT_ENHANCE_BATCH_SIZE
+    assert module.choose_enhance_batch_size("mlx", override=0) == 1
+
+
+def test_enhance_audio_batch_pads_inputs_and_trims_outputs() -> None:
+    module = _load_module()
+
+    seen_shapes: list[tuple[int, ...]] = []
+
+    def fake_enhance_audio(audio: torch.Tensor) -> torch.Tensor:
+        seen_shapes.append(tuple(audio.shape))
+        return audio + 2
+
+    backend = module.EnhanceBackend(name="mlx", sample_rate=16_000, enhance_audio=fake_enhance_audio)
+    audios = [torch.tensor([[1.0, 2.0, 3.0]]), torch.tensor([[4.0, 5.0]])]
+
+    enhanced, elapsed = module.enhance_audio_batch(backend, audios)
+
+    assert seen_shapes == [(2, 3)]
+    assert elapsed >= 0.0
+    assert len(enhanced) == 2
+    assert torch.equal(enhanced[0], torch.tensor([[3.0, 4.0, 5.0]]))
+    assert torch.equal(enhanced[1], torch.tensor([[6.0, 7.0]]))

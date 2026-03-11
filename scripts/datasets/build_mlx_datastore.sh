@@ -102,6 +102,11 @@ print(os.path.commonpath(parent_dirs))
 PY
 }
 
+phase_elapsed() {
+  local s=$SECONDS
+  printf '%dm%02ds' $((s / 60)) $((s % 60))
+}
+
 usage_helptext() {
   cat <<EOF
 Usage:
@@ -152,6 +157,9 @@ Optional clean-speech preprocessing:
                               clean-speech duration before enhancement
   --preprocess-probe-cache P  Optional JSON cache for ffprobe duration results
                               (default: auto path derived from the preprocess output list)
+  --preprocess-enhance-batch-size N
+                              Batch size for MLX enhancement (default: auto;
+                              currently 4 for MLX, 1 for torch)
   --preprocess-overwrite      Rebuild preprocessed files even if they already exist; otherwise resume is automatic
 
 General:
@@ -208,6 +216,7 @@ CLI_PREPROCESS_DEVICE=""
 CLI_PREPROCESS_WORKERS=""
 CLI_PREPROCESS_PROBE_WORKERS=""
 CLI_PREPROCESS_PROBE_CACHE=""
+CLI_PREPROCESS_ENHANCE_BATCH_SIZE=""
 CLI_MERGE_SHORT=""
 PREPROCESS_CLEAN_SPEECH=0
 PREPROCESS_OVERWRITE=0
@@ -331,6 +340,10 @@ while [[ $# -gt 0 ]]; do
       CLI_PREPROCESS_PROBE_CACHE="$2"
       shift 2
       ;;
+    --preprocess-enhance-batch-size)
+      CLI_PREPROCESS_ENHANCE_BATCH_SIZE="$2"
+      shift 2
+      ;;
     --preprocess-overwrite)
       PREPROCESS_OVERWRITE=1
       shift
@@ -378,6 +391,7 @@ PREPROCESS_MODEL="${CLI_PREPROCESS_MODEL:-${PREPROCESS_MODEL:-${DEFAULT_PREPROCE
 PREPROCESS_DEVICE="${CLI_PREPROCESS_DEVICE:-${PREPROCESS_DEVICE:-}}"
 PREPROCESS_PROBE_WORKERS="${CLI_PREPROCESS_PROBE_WORKERS:-${PREPROCESS_PROBE_WORKERS:-}}"
 PREPROCESS_PROBE_CACHE="${CLI_PREPROCESS_PROBE_CACHE:-${PREPROCESS_PROBE_CACHE:-}}"
+PREPROCESS_ENHANCE_BATCH_SIZE="${CLI_PREPROCESS_ENHANCE_BATCH_SIZE:-${PREPROCESS_ENHANCE_BATCH_SIZE:-}}"
 
 case "${PROFILE}" in
   prototype)
@@ -484,6 +498,11 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     echo "Preprocess device:  auto"
   fi
   echo "Preprocess mode:    $([[ ${PREPROCESS_OVERWRITE} -eq 1 ]] && echo "overwrite" || echo "resume")"
+  if [[ -n "${PREPROCESS_ENHANCE_BATCH_SIZE}" ]]; then
+    echo "Preprocess batch:   ${PREPROCESS_ENHANCE_BATCH_SIZE}"
+  else
+    echo "Preprocess batch:   auto"
+  fi
 else
   echo "Preprocess speech:  disabled"
 fi
@@ -510,6 +529,7 @@ mkdir -p "${LIST_DIR}"
 
 cd "${ROOT_DIR}/DeepFilterNet"
 
+SECONDS=0
 if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
   if [[ ! -d "${CHAINS_DIR}" ]]; then
     echo "Error: CHAINS corpus root not found: ${CHAINS_DIR}" >&2
@@ -533,7 +553,9 @@ if [[ ${INCLUDE_CHAINS} -eq 1 ]]; then
   merge_unique_file_lists "${COMBINED_CLEAN_LIST}" "${CLEAN_LIST}" "${CHAINS_LIST}"
   CLEAN_LIST_TO_USE="${COMBINED_CLEAN_LIST}"
 fi
+echo "[timing] CHAINS preparation: $(phase_elapsed)"
 
+SECONDS=0
 if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   PREPROCESS_BASE_DIR_TO_USE="${PREPROCESS_BASE_DIR}"
   if [[ ${INCLUDE_CHAINS} -eq 1 && ${PREPROCESS_BASE_DIR_WAS_SET} -eq 0 ]]; then
@@ -564,6 +586,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
   if [[ -n "${PREPROCESS_DEVICE}" ]]; then
     preprocess_cmd+=(--device "${PREPROCESS_DEVICE}")
   fi
+  if [[ -n "${PREPROCESS_ENHANCE_BATCH_SIZE}" ]]; then
+    preprocess_cmd+=(--enhance-batch-size "${PREPROCESS_ENHANCE_BATCH_SIZE}")
+  fi
   if [[ ${PREPROCESS_OVERWRITE} -eq 1 ]]; then
     preprocess_cmd+=(--overwrite)
   fi
@@ -574,7 +599,9 @@ if [[ ${PREPROCESS_CLEAN_SPEECH} -eq 1 ]]; then
     exit 1
   fi
 fi
+echo "[timing] Clean-speech preprocessing: $(phase_elapsed)"
 
+SECONDS=0
 echo ""
 echo "Starting audio cache build..."
 echo "Speech list used: ${CLEAN_LIST_TO_USE}"
@@ -608,6 +635,7 @@ if [[ "${MERGE_SHORT}" == "true" ]]; then
 fi
 
 "${build_cmd[@]}"
+echo "[timing] Audio cache build: $(phase_elapsed)"
 
 echo ""
 echo "=============================================="
