@@ -301,6 +301,9 @@ def print_training_config(
     print(f"Speech files:   {len(config.speech_files):,}")
     print(f"Noise files:    {len(config.noise_files):,}")
     print(f"RIR files:      {len(config.rir_files):,}")
+    if config.p_reverb > 0 and not config.rir_files:
+        print("  WARNING: p_reverb > 0 but no RIR files loaded. Reverb will not be applied.")
+        print("  To fix: rebuild cache with --rir-list or provide --rir-list directly.")
     print(f"Epochs:         {epochs}")
     print(f"Batch size:     {batch_size}")
     print(f"Learning rate:  {learning_rate} (min {min_lr})")

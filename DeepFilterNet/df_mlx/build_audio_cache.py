@@ -1098,6 +1098,10 @@ def main():
         rir_index, rir_stats = rir_future.result()
         all_indices["rir"] = rir_index
         all_stats["rir"] = rir_stats
+    elif "rir" in existing_indices:
+        # Preserve existing RIR index when --rir-list is not provided
+        all_indices["rir"] = existing_indices["rir"]
+        print(f"  Preserved {len(existing_indices['rir']):,} existing RIR index entries")
 
     bg_executor.shutdown(wait=False)
 

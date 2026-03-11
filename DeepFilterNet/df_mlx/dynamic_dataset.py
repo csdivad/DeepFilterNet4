@@ -853,6 +853,14 @@ class DynamicDataset:
 
             if has_rir:
                 self.rir_cache = ShardedAudioCache(config.cache_dir, "rir")
+                if not self.rir_cache.files:
+                    rir_shards = list(Path(config.cache_dir).joinpath("rir").glob("*.npz"))
+                    if rir_shards:
+                        print(
+                            f"Warning: rir/ directory has {len(rir_shards)} shards but "
+                            "index.json has no RIR entries. Run build_audio_cache.py "
+                            "with --rir-list or --rebuild-index to fix."
+                        )
             else:
                 self.rir_cache = None
 
