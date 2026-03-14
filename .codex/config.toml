@@ -1,0 +1,16 @@
+# Repo-local Codex configuration for DeepFilterNet.
+# Keep this file portable: only relative paths and repo-scoped defaults live
+# here. User-specific model/provider/auth settings should stay in ~/.codex.
+
+model_instructions_file = ".codex/AGENTS.md"
+project_doc_fallback_filenames = ["AGENTS.md", ".codex/AGENTS.md", "DeepFilterNet/AGENTS.md"]
+project_root_markers = [".git", ".beads", ".codex/config.toml", "AGENTS.md"]
+suppress_unstable_features_warning = true
+
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 6
+max_depth = 4
+job_max_runtime_seconds = 1800

@@ -7,10 +7,14 @@ applyTo: "**"
 
 ## Repository Identity
 
-- **This is sealad886/DeepFilterNet** — a standalone fork
+- **This is sealad886/DeepFilterNet4** — a standalone fork
 - **There is NO upstream repository relationship**
 - **NEVER create PRs to or reference Rikorose/DeepFilterNet**
 - All work stays within this repository only
+
+## Active Path
+
+- The most actively developed code path is `DeepFilterNet/df_mlx/`.
 
 ## Issue Tracking
 
