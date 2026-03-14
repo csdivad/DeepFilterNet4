@@ -15,6 +15,11 @@
 			"label": "Verify state",
 			"type": "shell",
 			"command": "cd ${workspaceFolder} && git log --oneline -5 && echo '---' && git status --short"
+		},
+		{
+			"label": "Run Tests",
+			"type": "shell",
+			"command": "cd ${workspaceFolder} && .venv/bin/python -m pytest DeepFilterNet/tests/ -q 2>&1 | tee /tmp/dfn_test_output.txt"
 		}
 	]
 }
