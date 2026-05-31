@@ -31,7 +31,7 @@ classifiers = [
 # these direct references to published package versions before publishing.
 dependencies = [
   "deepfilterlib @ file:../pyDF",
-  "numpy>=1.22,<3.0",
+  "numpy>=2.2.6,<3.0",
   "loguru>=0.7.3",
   "appdirs>=1.4.4,<2",
   "requests>=2.34.2,<3",
