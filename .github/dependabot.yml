@@ -2,14 +2,7 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     open-pull-requests-limit: 1000
-    directories:
-      - "/"
-      - "/demo/"
-      - "/ladspa/"
-      - "/libDF/"
-      - "/pyDF-augment/"
-      - "/pyDF-data/"
-      - "/pyDF/"
+    directory: "/"
     schedule:
       interval: "daily"
     groups:
@@ -19,6 +12,9 @@ updates:
           - "@tract*"
   - package-ecosystem: "pip"
     open-pull-requests-limit: 1000
+    versioning-strategy: increase
     directory: "/DeepFilterNet/"
     schedule:
       interval: "daily"
+
+#trigger: 4
