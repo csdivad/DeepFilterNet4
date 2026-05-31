@@ -2,14 +2,7 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     open-pull-requests-limit: 1000
-    directories:
-      - "/"
-      - "/demo/"
-      - "/ladspa/"
-      - "/libDF/"
-      - "/pyDF-augment/"
-      - "/pyDF-data/"
-      - "/pyDF/"
+    directory: "/"
     schedule:
       interval: "daily"
     groups:
@@ -23,4 +16,4 @@ updates:
     schedule:
       interval: "daily"
 
-#trigger: 0
+#trigger: 4

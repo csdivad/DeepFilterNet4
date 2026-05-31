@@ -100,7 +100,7 @@ itertools = "0.14"
 num-complex = { version = "^0.4", features = ["serde"] }
 log = { version = "0.4", features = ["std"], optional = true }
 rand = { version = "0.10", optional = true }
-rubato = { version = "0.14", optional = true }
+rubato = { version = "3.0", optional = true }
 roots = { version = "0.0.7", optional = true }
 rand_xoshiro = { version = "0.8", optional = true }
 thiserror = { version = "1.0", optional = true }
@@ -120,14 +120,14 @@ claxon = { version = "^0.4", optional = true }
 env_logger = { version = "0.11", optional = true }
 clap = { version = "4.5", optional = true, features = ["derive"] }
 rust-ini = { version = "^0.21", optional = true }
-tract-core = { version = "^0.21.4", optional = true }
-tract-onnx = { version = "^0.21.4", optional = true }
-tract-pulse = { version = "^0.21.4", optional = true }
-tract-hir = { version = "^0.21.4", optional = true }
+tract-core = { version = "^0.22.1", optional = true }
+tract-onnx = { version = "^0.22.1", optional = true }
+tract-pulse = { version = "^0.22.1", optional = true }
+tract-hir = { version = "^0.22.1", optional = true }
 flate2 = { version = "1.1.9", optional = true }
 tar = { version = "0.4.46", optional = true }
 wasm-bindgen = { version = "0.2.87", optional = true }
-getrandom = { version = "0.2", features = ["js"], optional = true }
+getrandom = { version = "0.4", features = ["js"], optional = true }
 console_error_panic_hook = { version = "0.1.1", optional = true }
 js-sys = { version = "0.3", optional = true }
 
@@ -137,7 +137,7 @@ jemallocator = { version = "0.5.0", optional = true }
 
 [dev-dependencies]
 rand = "0.10"
-rstest = "0.22"
+rstest = "0.26"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
 
