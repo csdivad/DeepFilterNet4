@@ -59,7 +59,7 @@ train = [
 ]
 eval = [
   "pystoi>=0.3,<0.5",
-  "pesq>=0.0.3,<0.0.5; platform_system != 'Windows'",
+  "pesq>=0.0.4,<0.0.5; platform_system != 'Windows'",
   "scipy>=1.15.3,<2",
 ]
 soundfile = ["soundfile>=0.13.1,<0.14"]
