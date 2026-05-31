@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     open-pull-requests-limit: 1000
+    versioning-strategy: increase
     directory: "/"
     schedule:
       interval: "daily"
@@ -12,6 +13,7 @@ updates:
           - "@tract*"
   - package-ecosystem: "pip"
     open-pull-requests-limit: 1000
+    versioning-strategy: increase
     directory: "/DeepFilterNet/"
     schedule:
       interval: "daily"
