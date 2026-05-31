@@ -1,28 +1,28 @@
 # Core runtime dependencies
-torch>=2.12.0,<3.0
-torchaudio>=2.11.0,<3.0
-numpy>=2.2.6,<3
+torch
+torchaudio
+numpy
 requests
 packaging
 sympy
-loguru>=0.7.3
-icecream>=2.2.0
+loguru
+icecream
 
 # Project-specific deps
 deepfilterdataloader
 deepfilterlib
 
 # Utilities / metrics
-ptflops==0.7.5
-librosa>=0.11.0,<0.12.0
+ptflops
+librosa
 pandas
 tqdm
 h5py
-huggingface_hub>=1.17.0
+huggingface_hub
 
 # Optional dependencies
 # - Video/audio codec utilities
-torchcodec>=0.13.0
+torchcodec
 
 # - ASR dependencies (for ASRLoss and WAcc evaluation)
-openai-whisper>=20250625
+openai-whisper

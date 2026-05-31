@@ -1,12 +1,12 @@
-torch >=2.12.0, <3.0
-torchaudio >=2.11.0, <3.0
+torch
+torchaudio
 deepfilterlib
-icecream>=2.2.0
-loguru>=0.7.3
-numpy>=2.2.6
-ptflops==0.7.5
+icecream
+loguru
+numpy
+ptflops
 requests
 packaging
 pystoi
-pesq; platform_system != "Windows"
+pesq
 scipy
