@@ -2,11 +2,13 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directories:
-      - "/libDF/"
-      - "/pyDF/"
-      - "/pyDF-data/"
-      - "/ladspa/"
+      - "/"
       - "/demo/"
+      - "/ladspa/"
+      - "/libDF/"
+      - "/pyDF-augment/"
+      - "/pyDF-data/"
+      - "/pyDF/"
     schedule:
       interval: "daily"
     groups:
