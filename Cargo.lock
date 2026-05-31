@@ -1101,7 +1101,7 @@ name = "deep-filter-ladspa"
 version = "0.8.0"
 dependencies = [
  "deep_filter",
- "env_logger 0.10.2",
+ "env_logger",
  "event-listener 2.5.3",
  "ladspa",
  "log",
@@ -1120,7 +1120,7 @@ dependencies = [
  "console_error_panic_hook",
  "crossbeam-channel",
  "ctrlc",
- "env_logger 0.11.3",
+ "env_logger",
  "flate2",
  "getrandom",
  "hdf5",
@@ -1194,7 +1194,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "deep_filter",
- "env_logger 0.11.3",
+ "env_logger",
  "iced",
  "image",
  "itertools 0.14.0",
@@ -1341,19 +1341,6 @@ checksum = "a009aa4810eb158359dda09d0c87378e4bbb89b5a801f016885a4707ba24f7ea"
 dependencies = [
  "log",
  "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580"
-dependencies = [
- "humantime",
- "is-terminal",
- "log",
- "regex",
- "termcolor",
 ]
 
 [[package]]
@@ -2300,17 +2287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "is-terminal"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f23ff5ef2b80d608d61efee834934d862cd92461afc0560dedf493e4c033738b"
-dependencies = [
- "hermit-abi",
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2528,7 +2504,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c2a198fb6b0eada2a8df47933734e6d35d350665a33a3593d7164fa52c75c19"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
