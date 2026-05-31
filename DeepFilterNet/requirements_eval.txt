@@ -2,7 +2,7 @@ torch >=2.12.0, <3.0
 torchaudio >=2.11.0, <3.0
 deepfilterlib
 icecream>=2
-loguru>=0.5
+loguru>=0.7.3
 numpy>=1.20
 ptflops==0.7.5
 requests

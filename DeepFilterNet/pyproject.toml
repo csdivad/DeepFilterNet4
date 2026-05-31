@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
   "deepfilterlib @ file:../pyDF",
   "numpy>=1.22,<3.0",
-  "loguru>=0.5",
+  "loguru>=0.7.3",
   "appdirs>=1.4.4,<2",
   "requests>=2.27,<3",
   "packaging>=23,<27",

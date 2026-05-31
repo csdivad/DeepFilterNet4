@@ -5,7 +5,7 @@ numpy>=1.22,<3
 requests
 packaging
 sympy
-loguru>=0.5
+loguru>=0.7.3
 icecream>=2
 
 # Project-specific deps
