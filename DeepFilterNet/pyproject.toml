@@ -38,7 +38,7 @@ dependencies = [
   "packaging>=23,<27",
   "sympy>=1.6",
   "torch>=2.9.1",
-  "torchaudio>=2.9.1",
+  "torchaudio>=2.11.0",
   "librosa>=0.11.0,<0.12.0",
   "pandas",
   "huggingface_hub>=0.20.0",
