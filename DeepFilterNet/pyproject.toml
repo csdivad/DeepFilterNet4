@@ -32,16 +32,16 @@ classifiers = [
 dependencies = [
   "deepfilterlib @ file:../pyDF",
   "numpy>=2.2.6,<3.0",
-  "loguru>=0.5",
+  "loguru>=0.7.3",
   "appdirs>=1.4.4,<2",
-  "requests>=2.27,<3",
+  "requests>=2.34.2,<3",
   "packaging>=23,<27",
-  "sympy>=1.6",
+  "sympy>=1.14.0",
   "torch>=2.12.0",
   "torchaudio>=2.11.0",
   "librosa>=0.11.0,<0.12.0",
   "pandas",
-  "huggingface_hub>=0.20.0",
+  "huggingface_hub>=1.17.0",
   "tqdm",
   "h5py",
   "ptflops",
@@ -59,27 +59,27 @@ train = [
 ]
 eval = [
   "pystoi>=0.3,<0.5",
-  "pesq>=0.0.3,<0.0.5; platform_system != 'Windows'",
-  "scipy>=1,<2",
+  "pesq>=0.0.4,<0.0.5; platform_system != 'Windows'",
+  "scipy>=1.15.3,<2",
 ]
-soundfile = ["soundfile>=0.10,<0.14"]
+soundfile = ["soundfile>=0.13.1,<0.14"]
 dnsmos-local = ["onnxruntime>=1.24.3,<1.25"]
 # ASR-based loss and evaluation (requires openai-whisper)
 asr = ["openai-whisper>=20240930"]
 mlx = [
-  "mlx>=0.0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "mlx>=0.31.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-whisper>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-data>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # Combined ASR with MLX optimization
 asr-mlx = [
   "openai-whisper>=20240930",
-  "mlx>=0.0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "mlx>=0.31.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-whisper>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "mlx-data>=0.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 dev = [
-  "poethepoet>=0.26,<0.47",
+  "poethepoet>=0.46.0,<0.47",
   "pytest>=9,<10",
   "matplotlib>=3.8,<4",
 ]
