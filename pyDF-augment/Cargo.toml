@@ -16,5 +16,5 @@ default = ["extension-module"]
 
 [dependencies]
 pyo3 = { version = "0.28" }
-numpy = "0.21"
+numpy = "0.28"
 ndarray = { workspace = true }
