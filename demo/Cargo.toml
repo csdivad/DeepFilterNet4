@@ -21,7 +21,7 @@ thresholds = []
 
 [dependencies]
 # Use iced 0.12.x which still supports the Application trait API used by this demo
-iced = { version = "0.12", features = [
+iced = { version = "0.14", features = [
   "image",
   "debug",
   "tokio",
@@ -31,7 +31,7 @@ itertools = "0.14"
 crossbeam-channel = "0.5"
 image_rs = { package = "image", version = "0.24", optional = true }
 anyhow = "1.0"
-cpal = "0.15"
+cpal = "0.17"
 clap = { version = "4.5", features = ["derive"] }
 deep_filter = { path = "../libDF/", default-features = false, features = [
   "tract",
@@ -40,7 +40,7 @@ deep_filter = { path = "../libDF/", default-features = false, features = [
 ] }
 # Use workspace ndarray version for compatibility with libDF
 ndarray = { workspace = true }
-rubato = "0.15"
+rubato = "3.0"
 ringbuf = "0.5"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
