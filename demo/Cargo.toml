@@ -40,7 +40,7 @@ deep_filter = { path = "../libDF/", default-features = false, features = [
 ] }
 # Use workspace ndarray version for compatibility with libDF
 ndarray = { workspace = true }
-rubato = "0.15"
+rubato = "3.0"
 ringbuf = "0.5"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
