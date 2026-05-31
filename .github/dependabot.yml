@@ -22,3 +22,5 @@ updates:
     directory: "/DeepFilterNet/"
     schedule:
       interval: "daily"
+
+#trigger: 0
