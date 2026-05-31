@@ -80,7 +80,7 @@ asr-mlx = [
 ]
 dev = [
   "poethepoet>=0.46.0,<0.47",
-  "pytest>=9,<10",
+  "pytest>=9.0.3,<10",
   "matplotlib>=3.8,<4",
 ]
 
