@@ -58,7 +58,7 @@ train = [
   "icecream>=2,<3",
 ]
 eval = [
-  "pystoi>=0.3,<0.5",
+  "pystoi>=0.4.1,<0.5",
   "pesq>=0.0.4,<0.0.5; platform_system != 'Windows'",
   "scipy>=1.15.3,<2",
 ]
