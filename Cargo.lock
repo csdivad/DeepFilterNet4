@@ -1095,7 +1095,7 @@ version = "0.8.0"
 dependencies = [
  "deep_filter",
  "env_logger 0.10.2",
- "event-listener 2.5.3",
+ "event-listener 5.3.0",
  "ladspa",
  "log",
  "ndarray 0.17.2",
@@ -2846,8 +2846,8 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65608f937acc725f5b164dcf40f4f0bc5d67dc268ab8a649d3002606718c4588"
 dependencies = [
- "ndarray",
- "rand",
+ "ndarray 0.15.6",
+ "rand 0.8.6",
  "rand_distr",
 ]
 
