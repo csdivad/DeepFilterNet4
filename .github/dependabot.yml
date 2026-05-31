@@ -16,4 +16,4 @@ updates:
     schedule:
       interval: "daily"
 
-#trigger: 3
+#trigger: 4
