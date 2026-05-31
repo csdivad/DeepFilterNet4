@@ -19,7 +19,7 @@ hdf5-static = ["deep_filter/hdf5-static"]
 [dependencies]
 deep_filter = { features = ["dataset", "logging", "vorbis", "flac"], path = "../libDF" }
 pyo3 = { version = "0.21", default-features = true }
-numpy = "0.21"
+numpy = "0.28"
 log = { version = "0.4", features = ["std"] }
 crossbeam-channel = "^0.5"
 ndarray = { workspace = true }
