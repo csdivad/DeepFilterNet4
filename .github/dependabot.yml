@@ -1,6 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
+    open-pull-requests-limit: 1000
     directories:
       - "/"
       - "/demo/"
@@ -17,12 +18,7 @@ updates:
         patterns:
           - "@tract*"
   - package-ecosystem: "pip"
+    open-pull-requests-limit: 1000
     directory: "/DeepFilterNet/"
     schedule:
       interval: "daily"
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-
-#test1

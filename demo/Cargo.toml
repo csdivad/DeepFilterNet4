@@ -32,7 +32,7 @@ crossbeam-channel = "0.5"
 image_rs = { package = "image", version = "0.24", optional = true }
 anyhow = "1.0"
 cpal = "0.15"
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 deep_filter = { path = "../libDF/", default-features = false, features = [
   "tract",
   "use-jemalloc",
@@ -41,6 +41,6 @@ deep_filter = { path = "../libDF/", default-features = false, features = [
 # Use workspace ndarray version for compatibility with libDF
 ndarray = { workspace = true }
 rubato = "0.15"
-ringbuf = "0.3"
+ringbuf = "0.5"
 env_logger = "0.11"
 log = { version = "0.4", features = ["std"] }
