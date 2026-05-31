@@ -16,6 +16,6 @@ default = ["extension-module"]
 
 [dependencies]
 deep_filter = { features = ["transforms", "logging"], path = "../libDF" }
-pyo3 = { version = "0.28" }
-numpy = "0.28"
+pyo3 = { version = "*" }
+numpy = "*"
 ndarray = { workspace = true }
