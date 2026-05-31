@@ -37,7 +37,7 @@ dataset = [
   "dep:ndarray",
   "dep:ndarray-rand",
   "dep:rand_xoshiro",
-  "dep:hdf5",
+  "dep:hdf5-metno",
   "dep:rayon",
   "dep:crossbeam-channel",
   "dep:serde_json",
@@ -90,7 +90,7 @@ wasm = [
   "dep:console_error_panic_hook",
   "dep:js-sys",
 ]
-hdf5-static = ["hdf5?/static"]
+hdf5-static = ["hdf5-metno?/static"]
 
 [dependencies]
 rustfft = "*"
@@ -106,7 +106,7 @@ thiserror = { version = "*", optional = true }
 anyhow = { version = "*", optional = true, features = ["backtrace"] }
 ctrlc = { version = "*", optional = true }
 hound = { version = "*", optional = true }
-hdf5 = { optional = true, git = "https://github.com/aldanor/hdf5-rust.git" }
+hdf5-metno = { version = "*", optional = true }
 ndarray = { workspace = true, optional = true, features = ["serde"] }
 ndarray-rand = { version = "*", optional = true }
 rayon = { version = "*", optional = true }
