@@ -25,4 +25,4 @@ huggingface_hub>=1.17.0
 torchcodec>=0.13.0
 
 # - ASR dependencies (for ASRLoss and WAcc evaluation)
-openai-whisper>=20240930
+openai-whisper>=20250625
