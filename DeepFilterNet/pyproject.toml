@@ -55,7 +55,7 @@ Repository = "https://github.com/sealad886/DeepFilterNet4"
 [project.optional-dependencies]
 train = [
   "deepfilterdataloader @ file:../pyDF-data",
-  "icecream>=2,<3",
+  "icecream>=2.2.0,<3",
 ]
 eval = [
   "pystoi>=0.3,<0.5",

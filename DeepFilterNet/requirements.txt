@@ -6,7 +6,7 @@ requests
 packaging
 sympy
 loguru>=0.7.3
-icecream>=2
+icecream>=2.2.0
 
 # Project-specific deps
 deepfilterdataloader
