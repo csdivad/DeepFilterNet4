@@ -29,4 +29,4 @@ panic = "abort"
 
 [workspace.dependencies]
 # Force all ndarray usage to 0.15.6 to match hdf5-rust's dependency
-ndarray = "=0.15.6"
+ndarray = "=0.17.2"
