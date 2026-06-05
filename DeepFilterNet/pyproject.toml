@@ -41,7 +41,7 @@ dependencies = [
   "torchaudio>=2.11.0",
   "librosa>=0.11.0,<0.12.0",
   "pandas",
-  "huggingface_hub>=1.17.0",
+  "huggingface_hub>=1.18.0",
   "tqdm",
   "h5py",
   "ptflops",
