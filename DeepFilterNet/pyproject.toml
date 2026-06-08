@@ -62,7 +62,7 @@ eval = [
   "pesq>=0.0.4,<0.0.5; platform_system != 'Windows'",
   "scipy>=1.15.3,<2",
 ]
-soundfile = ["soundfile>=0.13.1,<0.14"]
+soundfile = ["soundfile>=0.14.0,<0.15"]
 dnsmos-local = ["onnxruntime>=1.24.3,<1.25"]
 # ASR-based loss and evaluation (requires openai-whisper)
 asr = ["openai-whisper>=20250625"]
